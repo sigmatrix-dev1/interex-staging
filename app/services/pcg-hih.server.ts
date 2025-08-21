@@ -143,25 +143,80 @@ export function coerceStageToLocalStatus(stage?: string | null): 'SUBMITTED' | '
 
 /** PUT /pcgfhir/hih/api/updateSubmission/{submission_id} */
 export async function pcgUpdateSubmission(
-  submissionId: string,
-      payload: ReturnType<typeof buildCreateSubmissionPayload>, // same shape as create
-    ) {
-      const url = `https://drfpimpl.cms.gov/pcgfhir/hih/api/updateSubmission/${encodeURIComponent(submissionId)}`
+    submissionId: string,
+    payload: ReturnType<typeof buildCreateSubmissionPayload>, // same shape as create
+) {
+    const url = `https://drfpimpl.cms.gov/pcgfhir/hih/api/updateSubmission/${encodeURIComponent(submissionId)}`
 
-            const res = await callPcg(url, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
+    const res = await callPcg(url, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
-          })
-      const text = await res.text()
+    })
+    const text = await res.text()
 
-          let data: any = null
-          try { data = text ? JSON.parse(text) : null } catch { data = text }
+    let data: any = null
+    try { data = text ? JSON.parse(text) : null } catch { data = text }
 
-          if (!res.ok) {
-            if (typeof data === 'object' && data?.message) throw new Error(data.message)
-            throw new Error(`PCG update submission failed (${res.status}): ${text?.slice?.(0, 500) || 'Unknown error'}`)
-          }
+    if (!res.ok) {
+        if (typeof data === 'object' && data?.message) throw new Error(data.message)
+        throw new Error(`PCG update submission failed (${res.status}): ${text?.slice?.(0, 500) || 'Unknown error'}`)
+    }
 
-          return data as { submission_id: string; errorList?: any[]; status?: string }
-        }
+    return data as { submission_id: string; errorList?: any[]; status?: string }
+}
+
+// --- User NPIs --------------------------------------------------------------
+
+/** GET /pcgfhir/hih/api/npis  — list of NPIs registered for the org */
+
+export async function pcgGetUserNpis() {
+    const url = 'https://drfpimpl.cms.gov/pcgfhir/hih/api/npis'
+    const res = await callPcg(url, {
+        method: 'GET',
+        headers: { 'Content-Type': 'application/json' },
+    })
+    const text = await res.text()
+    let data: any = null
+    try { data = text ? JSON.parse(text) : null } catch { data = text }
+
+    if (!res.ok) {
+        if (typeof data === 'object' && data?.message) throw new Error(data.message)
+        throw new Error(`PCG get NPIs failed (${res.status}): ${text?.slice?.(0, 500) || 'Unknown error'}`)
+    }
+
+    // Expected shape: { total, pageSize, page, npis: string[] }
+    return data as {
+        total: number
+        pageSize: number
+        page: number
+        npis: string[]
+    }
+}
+
+
+// --- Provider NPI: Create ----------------------------------------------------
+
+/** POST /pcgfhir/hih/api/AddProviderNPI  */
+export async function pcgAddProviderNpi(input: { providerNPI: string; customerName: string }) {
+    const url = 'https://drfpimpl.cms.gov/pcgfhir/hih/api/AddProviderNPI'
+    const res = await callPcg(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            providerNPI: input.providerNPI,
+            customerName: input.customerName,
+        }),
+    })
+    const text = await res.text()
+    let data: any = null
+    try { data = text ? JSON.parse(text) : null } catch { data = text }
+
+    if (!res.ok) {
+        if (typeof data === 'object' && data?.message) throw new Error(data.message)
+        throw new Error(`PCG AddProviderNPI failed (${res.status}): ${text?.slice?.(0, 500) || 'Unknown error'}`)
+    }
+
+    // Expected: { errorList: [], id: "73959", status: "NPI 123... Successfully added to the system" }
+    return data as { errorList: any[]; id: string; status: string }
+}

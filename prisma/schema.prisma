@@ -43,6 +43,8 @@ model User {
   submissions         Submission[]
   submissionDocuments SubmissionDocument[]
 
+  providerEventsAuthored ProviderEvent[] @relation("ProviderEventActor")
+
   @@index([customerId])
   @@index([providerGroupId])
 }
@@ -226,6 +228,7 @@ model Customer {
   providerGroups ProviderGroup[]
   providers      Provider[]
   submissions    Submission[]
+  providerEvents ProviderEvent[] // <-- back-relation for ProviderEvent.customer
 
   @@index([name])
 }
@@ -271,6 +274,8 @@ model Provider {
 
   // Submissions for this provider
   submissions Submission[]
+
+  events ProviderEvent[] // <-- back-relation for ProviderEvent.provider
 
   @@index([customerId])
   @@index([providerGroupId])
@@ -465,4 +470,38 @@ model SubmissionEvent {
   message      String?
   payload      Json?
   createdAt    DateTime            @default(now())
+}
+
+// Provider event kinds
+enum ProviderEventKind {
+  CREATED
+  UPDATED
+  ACTIVATED
+  INACTIVATED
+  GROUP_ASSIGNED
+  GROUP_UNASSIGNED
+  PCG_ADD_ATTEMPT
+  PCG_ADD_ERROR
+}
+
+// Persistent audit trail for Provider (NPI) changes
+model ProviderEvent {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+
+  kind    ProviderEventKind
+  message String?
+  payload Json?
+
+  provider   Provider @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  providerId String
+
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  customerId String
+
+  actor   User?   @relation("ProviderEventActor", fields: [actorId], references: [id]) // <-- name the relation
+  actorId String?
+
+  @@index([providerId])
+  @@index([customerId, createdAt])
 }
