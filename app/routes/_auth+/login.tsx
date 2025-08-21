@@ -22,6 +22,8 @@ import { PasswordSchema, UsernameSchema } from '#app/utils/user-validation.ts'
 import { type Route } from './+types/login.ts'
 import { handleNewSession } from './login.server.ts'
 
+import { EyeIcon, EyeSlashIcon } from '@heroicons/react/24/outline'
+
 export const handle: SEOHandle = {
 	getSitemapEntries: () => null,
 }
@@ -98,19 +100,23 @@ export default function LoginPage({ actionData }: Route.ComponentProps) {
 		shouldRevalidate: 'onBlur',
 	})
 
-	return (
-		<div className="flex min-h-full flex-col justify-center pt-20 pb-32">
-			<div className="mx-auto w-full max-w-md">
-				<div className="flex flex-col gap-3 text-center">
-					<h1 className="text-h1">Welcome back!</h1>
-					<p className="text-body-md text-muted-foreground">
-						Please enter your details.
-					</p>
-				</div>
-				<Spacer size="xs" />
+	// 👁️ Show/Hide password toggle
+	const [showPassword, setShowPassword] = useState(false)
 
-				<div>
-					<div className="mx-auto w-full max-w-md px-8">
+	return (
+		<div className="flex min-h-full flex-col justify-center pt-20 pb-32 bg-gray-50">
+			<div className="mx-auto w-full max-w-md px-4 sm:px-0">
+				{/* Card wrapper */}
+				<div className="rounded-2xl border border-gray-200 bg-white/95 shadow-xl ring-1 ring-black/5 backdrop-blur-sm">
+					<div className="px-6 py-6 sm:px-8 sm:py-8">
+						<div className="flex flex-col gap-3 text-center">
+							<h1 className="text-h2">Welcome back!</h1>
+							<p className="text-body-md text-muted-foreground text-blue-900">
+								InterEx Login.
+							</p>
+						</div>
+						<Spacer size="xs" />
+
 						<Form method="POST" {...getFormProps(form)}>
 							<HoneypotInputs />
 							<Field
@@ -118,22 +124,52 @@ export default function LoginPage({ actionData }: Route.ComponentProps) {
 								inputProps={{
 									...getInputProps(fields.username, { type: 'text' }),
 									autoFocus: true,
-									className: 'lowercase',
+									className:
+										'lowercase block w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-gray-900 shadow-sm ' +
+										'focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 ' +
+										'hover:border-gray-400 transition',
 									autoComplete: 'username',
 								}}
 								errors={fields.username.errors}
 							/>
 
-							<Field
-								labelProps={{ children: 'Password' }}
-								inputProps={{
-									...getInputProps(fields.password, {
-										type: 'password',
-									}),
-									autoComplete: 'current-password',
-								}}
-								errors={fields.password.errors}
-							/>
+							{/* Password field with eye toggle */}
+							<div className="mb-4">
+								<label className="block text-sm font-medium text-gray-700">
+									Password
+								</label>
+								<div className="relative mt-1">
+									<input
+										{...getInputProps(fields.password, {
+											type: showPassword ? 'text' : 'password',
+										})}
+										autoComplete="current-password"
+										className={
+											'block w-full rounded-md border border-gray-300 bg-white px-3 py-2 pr-10 text-gray-900 shadow-sm ' +
+											'focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 ' +
+											'hover:border-gray-400 transition'
+										}
+									/>
+									<button
+										type="button"
+										onClick={() => setShowPassword(!showPassword)}
+										className="absolute inset-y-0 right-0 flex items-center pr-3 text-gray-500 hover:text-gray-700 focus:outline-none"
+										tabIndex={-1}
+										aria-label={showPassword ? 'Hide password' : 'Show password'}
+									>
+										{showPassword ? (
+											<EyeIcon className="h-5 w-5 text-gray-500" />
+										) : (
+											<EyeSlashIcon className="h-5 w-5 text-gray-500" />
+										)}
+									</button>
+								</div>
+								{fields.password.errors?.length ? (
+									<p className="mt-1 text-sm text-red-600">
+										{fields.password.errors[0]}
+									</p>
+								) : null}
+							</div>
 
 							<div className="flex justify-between">
 								<CheckboxField
@@ -163,7 +199,9 @@ export default function LoginPage({ actionData }: Route.ComponentProps) {
 
 							<div className="flex items-center justify-between gap-6 pt-3">
 								<StatusButton
-									className="w-full"
+									className="w-full rounded-md bg-gray-900 text-white shadow-sm
+												 hover:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500
+												 focus:ring-offset-2 transition"
 									status={isPending ? 'pending' : (form.status ?? 'idle')}
 									type="submit"
 									disabled={isPending}
@@ -172,25 +210,6 @@ export default function LoginPage({ actionData }: Route.ComponentProps) {
 								</StatusButton>
 							</div>
 						</Form>
-						<hr className="my-4" />
-						<div className="flex flex-col gap-5">
-							<PasskeyLogin
-								redirectTo={redirectTo}
-								remember={fields.remember.value === 'on'}
-							/>
-						</div>
-						<hr className="my-4" />
-						<ul className="flex flex-col gap-5">
-							{providerNames.map((providerName) => (
-								<li key={providerName}>
-									<ProviderConnectionForm
-										type="Login"
-										providerName={providerName}
-										redirectTo={redirectTo}
-									/>
-								</li>
-							))}
-						</ul>
 					</div>
 				</div>
 			</div>
@@ -210,9 +229,9 @@ const VerificationResponseSchema = z.discriminatedUnion('status', [
 ])
 
 function PasskeyLogin({
-	redirectTo,
-	remember,
-}: {
+						  redirectTo,
+						  remember,
+					  }: {
 	redirectTo: string | null
 	remember: boolean
 }) {

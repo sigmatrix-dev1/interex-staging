@@ -1,3 +1,5 @@
+// app/routes/admin+/customers.new.tsx
+
 import { type LoaderFunctionArgs, type ActionFunctionArgs } from 'react-router'
 import { data, redirect, useLoaderData, Form } from 'react-router'
 import { requireUserId } from '#app/utils/auth.server.ts'

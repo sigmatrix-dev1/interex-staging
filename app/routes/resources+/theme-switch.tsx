@@ -129,7 +129,7 @@ export function useTheme() {
 	if (optimisticMode) {
 		return optimisticMode === 'system' ? hints.theme : optimisticMode
 	}
-	return requestInfo.userPrefs.theme ?? hints.theme
+	return requestInfo.userPrefs.theme ?? 'light'
 }
 
 export function useOptionalTheme() {
@@ -139,5 +139,5 @@ export function useOptionalTheme() {
 	if (optimisticMode) {
 		return optimisticMode === 'system' ? optionalHints?.theme : optimisticMode
 	}
-	return optionalRequestInfo?.userPrefs.theme ?? optionalHints?.theme
+	return optionalRequestInfo?.userPrefs.theme ?? 'light'
 }

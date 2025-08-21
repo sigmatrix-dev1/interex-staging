@@ -1,3 +1,5 @@
+// app/routes/admin+/dashboard.tsx
+
 import { type LoaderFunctionArgs } from 'react-router'
 import { data, useLoaderData, Link } from 'react-router'
 import { requireUserId } from '#app/utils/auth.server.ts'

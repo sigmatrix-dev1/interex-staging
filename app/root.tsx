@@ -214,9 +214,7 @@ function App() {
 					<header className="container py-6">
 						<nav className="flex flex-wrap items-center justify-between gap-4 sm:flex-nowrap md:gap-8">
 							<Logo />
-							<div className="ml-auto hidden max-w-sm flex-1 sm:block">
-								{searchBar}
-							</div>
+
 							<div className="flex items-center gap-10">
 								{user ? (
 									<UserDropdown />
@@ -236,12 +234,13 @@ function App() {
 				</div>
 
 				{/* Only show footer on marketing/public pages */}
-				{!isAppPage && (
+				{!isAppPage && currentPath !== '/login' && (
 					<div className="container flex justify-between pb-5">
 						<Logo />
 						<ThemeSwitch userPreference={data.requestInfo.userPrefs.theme} />
 					</div>
 				)}
+
 			</div>
 			<EpicToaster closeButton position="top-right" theme={theme} />
 			<EpicProgress />
@@ -252,11 +251,11 @@ function App() {
 function Logo() {
 	return (
 		<Link to="/" className="group grid leading-snug">
-			<span className="font-light transition group-hover:-translate-x-1">
-				inter
+			<span className="font-bold text-2xl transition group-hover:translate-x-1 transition-colors: text-blue-900">
+				InterEx
 			</span>
-			<span className="font-bold transition group-hover:translate-x-1">
-				ex
+			<span className="font-medium text-sm transition group-hover:translate-x-1 transition-colors: text-blue-900">
+				InterOperability Exchange
 			</span>
 		</Link>
 	)

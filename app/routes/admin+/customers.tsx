@@ -1,3 +1,5 @@
+// app/routes/admin+/customers.tsx
+
 import { data, useLoaderData, Form, useSearchParams, useActionData } from 'react-router'
 import { type LoaderFunctionArgs, type ActionFunctionArgs } from 'react-router'
 import { InterexLayout } from '#app/components/interex-layout.tsx'
