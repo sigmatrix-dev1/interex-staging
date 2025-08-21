@@ -24,15 +24,11 @@ if (SENTRY_ENABLED) {
 const viteDevServer = IS_PROD
 	? undefined
 	: await import('vite').then((vite) =>
-			vite.createServer({
-				server: {
-					middlewareMode: true,
-				},
-				// We tell Vite we are running a custom app instead of
-				// the SPA default so it doesn't run HTML middleware
-				appType: 'custom',
-			}),
-		)
+		vite.createServer({
+			server: { middlewareMode: true },
+			appType: 'custom',
+		}),
+	)
 
 const app = express()
 
@@ -56,7 +52,6 @@ app.use((req, res, next) => {
 })
 
 // no ending slashes for SEO reasons
-// https://github.com/epicweb-dev/epic-stack/discussions/108
 app.get('*', (req, res, next) => {
 	if (req.path.endsWith('/') && req.path.length > 1) {
 		const query = req.url.slice(req.path.length)
@@ -69,7 +64,7 @@ app.get('*', (req, res, next) => {
 
 app.use(compression())
 
-// http://expressjs.com/en/advanced/best-practice-security.html#at-a-minimum-disable-x-powered-by-header
+// disable x-powered-by
 app.disable('x-powered-by')
 
 app.use((_, res, next) => {
@@ -81,20 +76,16 @@ app.use((_, res, next) => {
 if (viteDevServer) {
 	app.use(viteDevServer.middlewares)
 } else {
-	// Remix fingerprints its assets so we can cache forever.
+	// Remix (react-router) fingerprints its assets so we can cache forever
 	app.use(
 		'/assets',
 		express.static('build/client/assets', { immutable: true, maxAge: '1y' }),
 	)
-
-	// Everything else (like favicon.ico) is cached for an hour. You may want to be
-	// more aggressive with this caching.
 	app.use(express.static('build/client', { maxAge: '1h' }))
 }
 
+// Explicit 404 for missing images/favicons
 app.get(['/img/*', '/favicons/*'], (_req, res) => {
-	// if we made it past the express.static for these, then we're missing something.
-	// So we'll just send a 404 and won't bother calling other middleware.
 	return res.status(404).send('Not found')
 })
 
@@ -114,21 +105,14 @@ app.use(
 	}),
 )
 
-// When running tests or running in development, we want to effectively disable
-// rate limiting because playwright tests are very fast and we don't want to
-// have to wait for the rate limit to reset between tests.
-const maxMultiple =
-	!IS_PROD || process.env.PLAYWRIGHT_TEST_BASE_URL ? 10_000 : 1
+// ---- Rate limiting (kept as-is) ----
+const maxMultiple = !IS_PROD || process.env.PLAYWRIGHT_TEST_BASE_URL ? 10_000 : 1
 const rateLimitDefault = {
 	windowMs: 60 * 1000,
 	limit: 1000 * maxMultiple,
 	standardHeaders: true,
 	legacyHeaders: false,
 	validate: { trustProxy: false },
-	// Malicious users can spoof their IP address which means we should not default
-	// to trusting req.ip when hosted on Fly.io. However, users cannot spoof Fly-Client-Ip.
-	// When sitting behind a CDN such as cloudflare, replace fly-client-ip with the CDN
-	// specific header such as cf-connecting-ip
 	keyGenerator: (req: express.Request) => {
 		return req.get('fly-client-ip') ?? `${req.ip}`
 	},
@@ -165,26 +149,23 @@ app.use((req, res, next) => {
 		}
 		return strongRateLimit(req, res, next)
 	}
-
-	// the verify route is a special case because it's a GET route that
-	// can have a token in the query string
 	if (req.path.includes('/verify')) {
 		return strongestRateLimit(req, res, next)
 	}
-
 	return generalRateLimit(req, res, next)
 })
+
+// ---- Healthcheck (IMPORTANT for Fly) ----
+app.get('/resources/healthcheck', (_req, res) => res.status(200).send('ok'))
 
 async function getBuild() {
 	try {
 		const build = viteDevServer
 			? await viteDevServer.ssrLoadModule('virtual:react-router/server-build')
 			: // @ts-expect-error - the file might not exist yet but it will
-				await import('../build/server/index.js')
-
+			await import('../build/server/index.js')
 		return { build: build as unknown as ServerBuild, error: null }
 	} catch (error) {
-		// Catch error and return null to make express happy and avoid an unrecoverable crash
 		console.error('Error creating build:', error)
 		return { error: error, build: null as unknown as ServerBuild }
 	}
@@ -204,64 +185,84 @@ app.all(
 		mode: MODE,
 		build: async () => {
 			const { error, build } = await getBuild()
-			// gracefully "catch" the error
-			if (error) {
-				throw error
-			}
+			if (error) throw error
 			return build
 		},
 	}),
 )
 
-const desiredPort = Number(process.env.PORT || 3000)
-const portToUse = await getPort({
-	port: portNumbers(desiredPort, desiredPort + 100),
-})
-const portAvailable = desiredPort === portToUse
-if (!portAvailable && !IS_DEV) {
-	console.log(`⚠️ Port ${desiredPort} is not available.`)
-	process.exit(1)
-}
+// ---- Start server (bind to 0.0.0.0 in all modes) ----
+const HOST = '0.0.0.0'
 
-const server = app.listen(portToUse, () => {
-	if (!portAvailable) {
-		console.warn(
-			styleText(
-				'yellow',
-				`⚠️  Port ${desiredPort} is not available, using ${portToUse} instead.`,
-			),
-		)
-	}
-	console.log(`🚀  We have liftoff!`)
-	const localUrl = `http://localhost:${portToUse}`
-	let lanUrl: string | null = null
-	const localIp = ipAddress() ?? 'Unknown'
-	// Check if the address is a private ip
-	// https://en.wikipedia.org/wiki/Private_network#Private_IPv4_address_spaces
-	// https://github.com/facebook/create-react-app/blob/d960b9e38c062584ff6cfb1a70e1512509a966e7/packages/react-dev-utils/WebpackDevServerUtils.js#LL48C9-L54C10
-	if (/^10[.]|^172[.](1[6-9]|2[0-9]|3[0-1])[.]|^192[.]168[.]/.test(localIp)) {
-		lanUrl = `http://${localIp}:${portToUse}`
-	}
+if (IS_DEV) {
+	// Dev: allow scanning to avoid port collisions locally
+	const desiredPort = Number(process.env.PORT || 3000)
+	const portToUse = await getPort({ port: portNumbers(desiredPort, desiredPort + 100) })
+	const portAvailable = desiredPort === portToUse
 
-	console.log(
-		`
+	const server = app.listen(portToUse, HOST, () => {
+		if (!portAvailable) {
+			console.warn(
+				styleText(
+					'yellow',
+					`⚠️  Port ${desiredPort} is not available, using ${portToUse} instead.`,
+				),
+			)
+		}
+		console.log(`🚀  We have liftoff!`)
+		const localUrl = `http://localhost:${portToUse}`
+		let lanUrl: string | null = null
+		const localIp = ipAddress() ?? 'Unknown'
+		if (/^10[.]|^172[.](1[6-9]|2[0-9]|3[0-1])[.]|^192[.]168[.]/.test(localIp)) {
+			lanUrl = `http://${localIp}:${portToUse}`
+		}
+		console.log(
+			`
 ${styleText('bold', 'Local:')}            ${styleText('cyan', localUrl)}
 ${lanUrl ? `${styleText('bold', 'On Your Network:')}  ${styleText('cyan', lanUrl)}` : ''}
 ${styleText('bold', 'Press Ctrl+C to stop')}
-		`.trim(),
-	)
-})
-
-closeWithGrace(async ({ err }) => {
-	await new Promise((resolve, reject) => {
-		server.close((e) => (e ? reject(e) : resolve('ok')))
+      `.trim(),
+		)
 	})
-	if (err) {
-		console.error(styleText('red', String(err)))
-		console.error(styleText('red', String(err.stack)))
-		if (SENTRY_ENABLED) {
-			Sentry.captureException(err)
-			await Sentry.flush(500)
+
+	closeWithGrace(async ({ err }) => {
+		await new Promise((resolve, reject) => {
+			server.close((e) => (e ? reject(e) : resolve('ok')))
+		})
+		if (err) {
+			console.error(styleText('red', String(err)))
+			console.error(styleText('red', String(err.stack)))
+			if (SENTRY_ENABLED) {
+				Sentry.captureException(err)
+				await Sentry.flush(500)
+			}
 		}
+	})
+} else {
+	// Prod on Fly: must bind exactly to Fly's PORT (8080) on 0.0.0.0
+	const desiredPort = Number(process.env.PORT || 8080)
+	const portToUse = await getPort({ port: portNumbers(desiredPort, desiredPort) })
+	const portAvailable = desiredPort === portToUse
+	if (!portAvailable) {
+		console.log(`⚠️ Port ${desiredPort} is not available.`)
+		process.exit(1)
 	}
-})
+
+	const server = app.listen(desiredPort, HOST, () => {
+		console.log(`✅ Server listening on http://${HOST}:${desiredPort}`)
+	})
+
+	closeWithGrace(async ({ err }) => {
+		await new Promise((resolve, reject) => {
+			server.close((e) => (e ? reject(e) : resolve('ok')))
+		})
+		if (err) {
+			console.error(styleText('red', String(err)))
+			console.error(styleText('red', String(err.stack)))
+			if (SENTRY_ENABLED) {
+				Sentry.captureException(err)
+				await Sentry.flush(500)
+			}
+		}
+	})
+}
