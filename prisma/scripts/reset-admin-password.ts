@@ -1,5 +1,5 @@
 import { prisma } from '../../app/utils/db.server'
-import { createPassword } from '../../tests/db-utils'
+import { createPassword } from '../../app/utils/password'
 
 async function main() {
   const email = 'kody@kcd.dev' // admin email from seed
