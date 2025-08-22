@@ -28,7 +28,8 @@ const schema = z.object({
 	BUCKET_NAME: z.string().optional(),
 
 	// --- PCG-FHIR (server-only) ---
-	PCGF_TOKEN_URL: z.string().url(),         // e.g. https://drfpimpl.cms.gov/token
+	PCGF_BASE_URL: z.string().url(),
+	PCGF_TOKEN_URL: z.string().url(),
 	PCGF_CLIENT_ID: z.string(),
 	PCGF_CLIENT_SECRET: z.string(),
 	PCGF_SCOPE: z.string().default('UserGroup').optional(),
@@ -80,6 +81,7 @@ declare global {
 }
 
 export const PCG_ENV = {
+	BASE_URL: process.env.PCGF_BASE_URL!,
 	TOKEN_URL: process.env.PCGF_TOKEN_URL!,
 	CLIENT_ID: process.env.PCGF_CLIENT_ID!,
 	CLIENT_SECRET: process.env.PCGF_CLIENT_SECRET!,

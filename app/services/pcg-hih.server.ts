@@ -3,6 +3,7 @@
 // Uses callPcg() which auto-refreshes tokens on 401 once.
 
 import { callPcg } from '#app/services/pcg-token.server.ts'
+import {PCG_ENV} from "#app/utils/env.server.ts";
 
 /** Map UI "purposeOfSubmission" (enum) -> PCG "purpose_of_submission" code strings. */
 const PURPOSE_MAP: Record<string, string> = {
@@ -21,7 +22,7 @@ export function buildCreateSubmissionPayload(input: {
     esMD_claim_id?: string | null
     esmd_case_id?: string | null
     comments?: string | null
-    intended_recepient: string // NOTE: value should be the OID string per UX spec
+    intended_recepient: string
     auto_split: boolean
     bSendinX12: boolean
     threshold: number
@@ -57,7 +58,7 @@ export function buildCreateSubmissionPayload(input: {
 
 /** POST /pcgfhir/hih/api/submission */
 export async function pcgCreateSubmission(payload: ReturnType<typeof buildCreateSubmissionPayload>) {
-    const res = await callPcg('https://drfpimpl.cms.gov/pcgfhir/hih/api/submission', {
+    const res = await callPcg(`${PCG_ENV.BASE_URL}/submission`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
@@ -84,7 +85,7 @@ export async function pcgUploadFiles(submissionId: string, files: File[]) {
     for (const f of files) {
         form.append('uploadFiles', f, f.name)
     }
-    const res = await callPcg(`https://drfpimpl.cms.gov/pcgfhir/hih/api/submission/${encodeURIComponent(submissionId)}`, {
+    const res = await callPcg(`${PCG_ENV.BASE_URL}/submission/${encodeURIComponent(submissionId)}`, {
         method: 'POST',
         body: form,
         // NOTE: fetch will set the correct multipart boundary; do NOT set Content-Type manually
@@ -102,7 +103,7 @@ export async function pcgUploadFiles(submissionId: string, files: File[]) {
 
 /** GET /pcgfhir/hih/api/submission/status/{submission_id} */
 export async function pcgGetStatus(submissionId: string) {
-    const res = await callPcg(`https://drfpimpl.cms.gov/pcgfhir/hih/api/submission/status/${encodeURIComponent(submissionId)}`, {
+    const res = await callPcg(`${PCG_ENV.BASE_URL}/submission/status/${encodeURIComponent(submissionId)}`, {
         method: 'GET',
         headers: { 'Content-Type': 'application/json' },
     })
@@ -146,7 +147,7 @@ export async function pcgUpdateSubmission(
     submissionId: string,
     payload: ReturnType<typeof buildCreateSubmissionPayload>, // same shape as create
 ) {
-    const url = `https://drfpimpl.cms.gov/pcgfhir/hih/api/updateSubmission/${encodeURIComponent(submissionId)}`
+    const url = `${PCG_ENV.BASE_URL}/updateSubmission/${encodeURIComponent(submissionId)}`
 
     const res = await callPcg(url, {
         method: 'PUT',
@@ -171,7 +172,7 @@ export async function pcgUpdateSubmission(
 /** GET /pcgfhir/hih/api/npis  — list of NPIs registered for the org */
 
 export async function pcgGetUserNpis() {
-    const url = 'https://drfpimpl.cms.gov/pcgfhir/hih/api/npis'
+    const url = '${PCG_ENV.BASE_URL}/npis'
     const res = await callPcg(url, {
         method: 'GET',
         headers: { 'Content-Type': 'application/json' },
@@ -199,7 +200,7 @@ export async function pcgGetUserNpis() {
 
 /** POST /pcgfhir/hih/api/AddProviderNPI  */
 export async function pcgAddProviderNpi(input: { providerNPI: string; customerName: string }) {
-    const url = 'https://drfpimpl.cms.gov/pcgfhir/hih/api/AddProviderNPI'
+    const url = '${PCG_ENV.BASE_URL}/AddProviderNPI'
     const res = await callPcg(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
