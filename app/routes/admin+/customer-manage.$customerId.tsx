@@ -1,4 +1,5 @@
 import { type LoaderFunctionArgs, data, useLoaderData, Link  } from 'react-router'
+import { Outlet } from 'react-router'
 import { InterexLayout } from '#app/components/interex-layout.tsx'
 import { Icon } from '#app/components/ui/icon.tsx'
 import { requireUserId } from '#app/utils/auth.server.ts'
@@ -316,6 +317,8 @@ export default function CustomerManagementPage() {
           </div>
         </div>
       </div>
+      {/* Render nested admin management pages here */}
+      <Outlet />
     </InterexLayout>
   )
 }
