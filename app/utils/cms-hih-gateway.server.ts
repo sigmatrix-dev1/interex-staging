@@ -6,8 +6,8 @@
  * and CMS HIH API formats.
  */
 
-import { SubmissionPurpose, SubmissionCategory } from '@prisma/client'
 import crypto from 'crypto'
+import { type SubmissionPurpose, type SubmissionCategory } from '@prisma/client'
 
 // CMS HIH Gateway configuration
 const CMS_HIH_BASE_URL = process.env.CMS_HIH_BASE_URL || 'https://shmsimpl.cms.gov'

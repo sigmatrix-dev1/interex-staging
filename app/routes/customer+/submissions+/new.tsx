@@ -1,26 +1,25 @@
 // app/routes/customer+/submissions+/new.tsx
-import { data, Form, useActionData, useLoaderData, useNavigation, Link, redirect , useNavigate} from 'react-router'
-import type { LoaderFunctionArgs, ActionFunctionArgs } from 'react-router'
-import { z } from 'zod'
-import { getZodConstraint, parseWithZod } from '@conform-to/zod'
 import { getFormProps, getInputProps, getSelectProps, useForm } from '@conform-to/react'
-import { requireUserId } from '#app/utils/auth.server.ts'
-import { prisma } from '#app/utils/db.server.ts'
-import { InterexLayout } from '#app/components/interex-layout.tsx'
+import { getZodConstraint, parseWithZod } from '@conform-to/zod'
+import { data, Form, useActionData, useLoaderData, useNavigation, Link, redirect , useNavigate, type LoaderFunctionArgs, type ActionFunctionArgs } from 'react-router'
+import { z } from 'zod'
+import { FileDropzone } from '#app/components/file-dropzone.tsx'
 import { Field, SelectField, TextareaField, ErrorList } from '#app/components/forms.tsx'
-import { StatusButton } from '#app/components/ui/status-button.tsx'
+import { InterexLayout } from '#app/components/interex-layout.tsx'
 import { Drawer } from '#app/components/ui/drawer.tsx'
-import { redirectWithToast } from '#app/utils/toast.server.ts'
-import { buildCreateSubmissionPayload, pcgCreateSubmission } from '#app/services/pcg-hih.server.ts'
-
+import { StatusButton } from '#app/components/ui/status-button.tsx'
 import {
     SubmissionPurposeValues,
     SubmissionPurposeEnum,
     AuthorTypeEnum,
     formatEnum,
 } from '#app/domain/submission-enums.ts'
+import { buildCreateSubmissionPayload, pcgCreateSubmission } from '#app/services/pcg-hih.server.ts'
+import { requireUserId } from '#app/utils/auth.server.ts'
+import { prisma } from '#app/utils/db.server.ts'
+import { redirectWithToast } from '#app/utils/toast.server.ts'
 
-import { FileDropzone } from '#app/components/file-dropzone.tsx'
+
 
 function setInputValue(input: HTMLInputElement | null | undefined, value: string) {
     if (!input) return

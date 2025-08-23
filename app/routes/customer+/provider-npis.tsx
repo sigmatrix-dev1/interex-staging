@@ -15,6 +15,7 @@ import {
 import { z } from 'zod'
 import { Field, ErrorList, SelectField } from '#app/components/forms.tsx'
 import { InterexLayout } from '#app/components/interex-layout.tsx'
+import { JsonViewer } from '#app/components/json-view.tsx'
 import { useToast } from '#app/components/toaster.tsx'
 import { Drawer } from '#app/components/ui/drawer.tsx'
 import { Icon } from '#app/components/ui/icon.tsx'
@@ -22,7 +23,6 @@ import { StatusButton } from '#app/components/ui/status-button.tsx'
 import { INTEREX_ROLES } from '#app/utils/interex-roles.ts' // safe on client
 import { useIsPending } from '#app/utils/misc.tsx'
 
-import { JsonViewer } from '#app/components/json-view.tsx'
 
 /** Helper: append a provider event (audit) — server-only import inside */
 async function logProviderEvent(input: {

@@ -1,6 +1,4 @@
-import { data, useLoaderData } from 'react-router'
-import { type LoaderFunctionArgs } from 'react-router'
-import { Link } from 'react-router'
+import { data, useLoaderData, type LoaderFunctionArgs , Link  } from 'react-router'
 import { InterexLayout } from '#app/components/interex-layout.tsx'
 import { Icon } from '#app/components/ui/icon.tsx'
 import { requireUserId } from '#app/utils/auth.server.ts'

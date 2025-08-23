@@ -1,7 +1,7 @@
 import { faker } from '@faker-js/faker'
 import { prisma } from '#app/utils/db.server.ts'
-import { MOCK_CODE_GITHUB } from '#app/utils/providers/constants'
 import { createPassword } from '#app/utils/password'
+import { MOCK_CODE_GITHUB } from '#app/utils/providers/constants'
 import { createUser, getNoteImages, getUserImages } from '#tests/db-utils'
 import { insertGitHubUser } from '#tests/mocks/github'
 

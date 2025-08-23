@@ -1,5 +1,6 @@
 import { getFormProps, getInputProps, useForm } from '@conform-to/react'
 import { getZodConstraint, parseWithZod } from '@conform-to/zod'
+import { EyeIcon, EyeSlashIcon } from '@heroicons/react/24/outline'
 import { type SEOHandle } from '@nasa-gcn/remix-seo'
 import { startAuthentication } from '@simplewebauthn/browser'
 import { useOptimistic, useState, useTransition } from 'react'
@@ -22,7 +23,6 @@ import { PasswordSchema, UsernameSchema } from '#app/utils/user-validation.ts'
 import { type Route } from './+types/login.ts'
 import { handleNewSession } from './login.server.ts'
 
-import { EyeIcon, EyeSlashIcon } from '@heroicons/react/24/outline'
 
 export const handle: SEOHandle = {
 	getSitemapEntries: () => null,

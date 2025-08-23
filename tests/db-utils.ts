@@ -29,10 +29,12 @@ export function createUser() {
 	} catch (e) {
 		let msg = 'Unknown error';
 		if (e && typeof e === 'object') {
-			if ('errors' in e && Array.isArray((e).errors) && ((e).errors[0] && typeof (e).errors[0] === 'object' && 'message' in (e).errors[0]))) {
-				msg = ((e).errors[0]).message;
-			} else if ('message' in e && typeof (e).message === 'string') {
-				msg = (e).message;
+			// ZodError: e.errors is an array of objects with .message
+			const errors = (e as any).errors;
+			if (Array.isArray(errors) && errors[0] && typeof errors[0] === 'object' && 'message' in errors[0]) {
+				msg = String(errors[0].message);
+			} else if ('message' in e && typeof (e as any).message === 'string') {
+				msg = (e as any).message;
 			}
 		}
 		throw new Error(`Generated invalid username: ${msg}`)
@@ -44,10 +46,11 @@ export function createUser() {
 	} catch (e) {
 		let msg = 'Unknown error';
 		if (e && typeof e === 'object') {
-			if ('errors' in e && Array.isArray(e.errors) && e.errors[0]?.message) {
-				msg = e.errors[0].message;
-			} else if ('message' in e && typeof e.message === 'string') {
-				msg = e.message;
+			const errors = (e as any).errors;
+			if (Array.isArray(errors) && errors[0] && typeof errors[0] === 'object' && 'message' in errors[0]) {
+				msg = String(errors[0].message);
+			} else if ('message' in e && typeof (e as any).message === 'string') {
+				msg = (e as any).message;
 			}
 		}
 		throw new Error(`Generated invalid email: ${msg}`)

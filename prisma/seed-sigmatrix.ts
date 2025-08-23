@@ -1,6 +1,6 @@
 // prisma/seed-sigmatrix.ts
-import { prisma } from '#app/utils/db.server.ts'
 import bcrypt from 'bcryptjs'
+import { prisma } from '#app/utils/db.server.ts'
 
 const ROLES = [
     'system-admin',

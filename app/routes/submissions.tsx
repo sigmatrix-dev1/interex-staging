@@ -1,5 +1,4 @@
-import { redirect, type LoaderFunctionArgs } from 'react-router'
-import { data, useLoaderData } from 'react-router'
+import { redirect, type LoaderFunctionArgs, data, useLoaderData  } from 'react-router'
 import { InterexLayout } from '#app/components/interex-layout.tsx'
 import { requireUserId } from '#app/utils/auth.server.ts'
 import { prisma } from '#app/utils/db.server.ts'

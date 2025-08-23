@@ -1,9 +1,8 @@
-import { data, useLoaderData, Link } from 'react-router'
-import { type LoaderFunctionArgs } from 'react-router'
+import { data, useLoaderData, Link, type LoaderFunctionArgs  } from 'react-router'
 import { InterexLayout } from '#app/components/interex-layout.tsx'
+import { Icon } from '#app/components/ui/icon.tsx'
 import { requireUserId } from '#app/utils/auth.server.ts'
 import { prisma } from '#app/utils/db.server.ts'
-import { Icon } from '#app/components/ui/icon.tsx'
 
 export async function loader({ params, request }: LoaderFunctionArgs) {
   const userId = await requireUserId(request)
