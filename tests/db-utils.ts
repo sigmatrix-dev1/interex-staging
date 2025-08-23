@@ -1,6 +1,7 @@
 import { faker } from '@faker-js/faker'
 import bcrypt from 'bcryptjs'
 import { UniqueEnforcer } from 'enforce-unique'
+import { UsernameSchema, EmailSchema } from '../app/utils/user-validation'
 
 const uniqueUsernameEnforcer = new UniqueEnforcer()
 
@@ -8,7 +9,7 @@ export function createUser() {
 	const firstName = faker.person.firstName()
 	const lastName = faker.person.lastName()
 
-	const username = uniqueUsernameEnforcer
+	let username = uniqueUsernameEnforcer
 		.enforce(() => {
 			return (
 				faker.string.alphanumeric({ length: 2 }) +
@@ -22,10 +23,39 @@ export function createUser() {
 		.slice(0, 20)
 		.toLowerCase()
 		.replace(/[^a-z0-9_]/g, '_')
+	// Validate username
+	try {
+		username = UsernameSchema.parse(username)
+	} catch (e) {
+		let msg = 'Unknown error';
+		if (e && typeof e === 'object') {
+			if ('errors' in e && Array.isArray((e).errors) && ((e).errors[0] && typeof (e).errors[0] === 'object' && 'message' in (e).errors[0]))) {
+				msg = ((e).errors[0]).message;
+			} else if ('message' in e && typeof (e).message === 'string') {
+				msg = (e).message;
+			}
+		}
+		throw new Error(`Generated invalid username: ${msg}`)
+	}
+	let email = `${username}@example.com`
+	// Validate email
+	try {
+		email = EmailSchema.parse(email)
+	} catch (e) {
+		let msg = 'Unknown error';
+		if (e && typeof e === 'object') {
+			if ('errors' in e && Array.isArray(e.errors) && e.errors[0]?.message) {
+				msg = e.errors[0].message;
+			} else if ('message' in e && typeof e.message === 'string') {
+				msg = e.message;
+			}
+		}
+		throw new Error(`Generated invalid email: ${msg}`)
+	}
 	return {
 		username,
 		name: `${firstName} ${lastName}`,
-		email: `${username}@example.com`,
+		email,
 	}
 }
 

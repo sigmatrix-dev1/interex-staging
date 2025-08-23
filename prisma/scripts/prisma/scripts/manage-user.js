@@ -47,9 +47,24 @@ async function findUsersByRole(role) {
   return users
 }
 
+const { UsernameSchema, EmailSchema } = require('./user-validation.cjs')
+
 async function createUser(role, username, email, password, name) {
   if (!role || !username || !email || !password || !name) {
     console.log('❌ Usage: node manage-user.js create <role> <username> <email> <password> <name>')
+    process.exit(1)
+  }
+  // Validate username and email
+  try {
+    UsernameSchema.parse(username)
+  } catch (e) {
+    console.log(`❌ Invalid username: ${e.errors?.[0]?.message || e.message}`)
+    process.exit(1)
+  }
+  try {
+    EmailSchema.parse(email)
+  } catch (e) {
+    console.log(`❌ Invalid email: ${e.errors?.[0]?.message || e.message}`)
     process.exit(1)
   }
   console.log(`🔧 Creating new user...`)

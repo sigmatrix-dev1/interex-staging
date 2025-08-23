@@ -13,6 +13,7 @@ import { Link } from 'react-router'
 import { getFormProps, getInputProps, useForm } from '@conform-to/react'
 import { getZodConstraint, parseWithZod } from '@conform-to/zod'
 import { z } from 'zod'
+import { UsernameSchema, EmailSchema } from '#app/utils/user-validation.ts'
 import { Field, ErrorList } from '#app/components/forms.tsx'
 import { StatusButton } from '#app/components/ui/status-button.tsx'
 import { useIsPending } from '#app/utils/misc.tsx'
@@ -28,8 +29,8 @@ const CreateCustomerSchema = z.object({
   description: z.string().optional().default(''),
   baaNumber: z.string().optional(),
   adminName: z.string().min(1, 'Admin name is required'),
-  adminEmail: z.string().email('Invalid email address'),
-  adminUsername: z.string().min(3, 'Username must be at least 3 characters'),
+  adminEmail: EmailSchema,
+  adminUsername: UsernameSchema,
 })
 
 const UpdateCustomerSchema = z.object({
@@ -44,8 +45,8 @@ const AddAdminSchema = z.object({
   intent: z.literal('add-admin'),
   customerId: z.string().min(1, 'Customer ID is required'),
   adminName: z.string().min(1, 'Admin name is required'),
-  adminEmail: z.string().email('Invalid email address'),
-  adminUsername: z.string().min(3, 'Username must be at least 3 characters'),
+  adminEmail: EmailSchema,
+  adminUsername: UsernameSchema,
 })
 
 const ActionSchema = z.discriminatedUnion('intent', [
