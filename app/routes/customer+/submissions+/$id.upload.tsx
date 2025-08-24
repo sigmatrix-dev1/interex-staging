@@ -14,8 +14,7 @@ import { requireUserId } from '#app/utils/auth.server.ts'
 import { prisma } from '#app/utils/db.server.ts'
 import { getCachedFile, setCachedFile, clearCachedFile } from '#app/utils/file-cache.ts'
 import { redirectWithToast } from '#app/utils/toast.server.ts'
-
-
+import { LoadingOverlay } from '#app/components/ui/loading-overlay.tsx'   // ✅ NEW
 
 function setInputValue(input: HTMLInputElement | null | undefined, value: string) {
     if (!input) return
@@ -35,12 +34,10 @@ function isDraftFromPCG(s: PcgStageSource) {
     return latestStage.includes('draft')
 }
 
-
 const FileUploadSchema = z.object({
     intent: z.literal('upload-file'),
     submissionId: z.string().min(1, 'Submission ID is required'),
 })
-
 
 export async function loader({ request, params }: LoaderFunctionArgs) {
     const userId = await requireUserId(request)
@@ -106,7 +103,6 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     })
 }
 
-
 export async function action({ request }: ActionFunctionArgs) {
     const userId = await requireUserId(request)
 
@@ -121,15 +117,14 @@ export async function action({ request }: ActionFunctionArgs) {
     })
     if (!user) throw new Response('Unauthorized', { status: 401 })
 
-
     const formData = await request.formData()
     const parsed = parseWithZod(formData, { schema: FileUploadSchema })
     if (parsed.status !== 'success') {
         return data(
-  { result: parsed.reply() },
-        { status: parsed.status === 'error' ? 400 : 200 },
+            { result: parsed.reply() },
+            { status: parsed.status === 'error' ? 400 : 200 },
         )
-      }
+    }
     const { submissionId } = parsed.value
 
     const file = formData.get('file') as File | null
@@ -178,7 +173,6 @@ export async function action({ request }: ActionFunctionArgs) {
             { status: 400 },
         )
     }
-
 
     try {
         const pcgResp = await pcgUploadFiles(submission.pcgSubmissionId, [file])
@@ -290,15 +284,22 @@ export default function UploadSubmission() {
         return () => { alive = false }
     }, [submission.id])
 
-// clear on unmount / nav away
+    // clear on unmount / nav away
     React.useEffect(() => {
         return () => { void clearCachedFile(submission.id) } // <— don't return a Promise
     }, [submission.id])
 
     return (
         <InterexLayout user={user} title="Upload & Submit" subtitle="Step 3 of 3" currentPath={`/customer/submissions/${submission.id}/upload`}>
+            {/* ✅ Full-screen loading overlay while uploading */}
+            <LoadingOverlay
+                show={Boolean(isUploading)}
+                title="Uploading your file…"
+                message="Please don't refresh or close this tab while we upload and submit your document."
+            />
+
             <Drawer key={`drawer-upload-${submission.id}`} isOpen onClose={() => navigate('/customer/submissions')} title={`Upload for: ${submission.title}`} size="fullscreen">
-            <div className="space-y-8">
+                <div className="space-y-8">
                     <div className="rounded-md bg-gray-50 p-4 text-sm text-gray-700">
                         <p>Upload the PDF to finish the submission.</p>
                         {expectedFilename ? (

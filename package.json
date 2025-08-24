@@ -100,6 +100,7 @@
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "react-router": "^7.5.3",
+    "react-router-dom": "7.5.3",
     "remix-auth": "^4.2.0",
     "remix-auth-github": "^3.0.2",
     "remix-utils": "^8.5.0",
@@ -170,3 +171,4 @@
     "date": "2025-05-27T17:34:36Z"
   }
 }
+

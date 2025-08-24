@@ -22,9 +22,7 @@ import { requireUserId } from '#app/utils/auth.server.ts'
 import { prisma } from '#app/utils/db.server.ts'
 import { getCachedFile, setCachedFile, moveCachedFile } from '#app/utils/file-cache.ts'
 import { redirectWithToast } from '#app/utils/toast.server.ts'
-
-
-
+import { LoadingOverlay } from '#app/components/ui/loading-overlay.tsx'   // ✅ NEW
 
 function setInputValue(input: HTMLInputElement | null | undefined, value: string) {
     if (!input) return
@@ -222,7 +220,6 @@ export async function action({ request }: ActionFunctionArgs) {
         include: { providerGroup: true },
     })
 
-
     if (!provider || (!isSystemAdmin && provider.customerId !== user.customerId)) {
         return data({ result: parsed.reply({ formErrors: ['Invalid provider (NPI) selection'] }) }, { status: 400 })
     }
@@ -238,7 +235,6 @@ export async function action({ request }: ActionFunctionArgs) {
             }
         }
     }
-
 
     const pcgPayload = buildCreateSubmissionPayload({
         purposeOfSubmission: v.purposeOfSubmission,
@@ -303,7 +299,6 @@ export async function action({ request }: ActionFunctionArgs) {
                 payload: { pcgSubmissionId: submission.pcgSubmissionId, response: resp },
             },
         })
-
 
         return await redirectWithToast(`/customer/submissions/${v.submissionId}/review`, {
             type: 'success',
@@ -405,6 +400,13 @@ export default function ReviewSubmission() {
             subtitle="Step 2 of 3"
             currentPath={`/customer/submissions/${submission.id}/review`}
         >
+            {/* Full-screen loading overlay while updating */}
+            <LoadingOverlay
+                show={Boolean(isUpdating)}
+                title="Saving your updates…"
+                message="Please don't refresh or close this tab while we update the submission."
+            />
+
             <Drawer
                 key={`drawer-review-${submission.id}`}
                 isOpen

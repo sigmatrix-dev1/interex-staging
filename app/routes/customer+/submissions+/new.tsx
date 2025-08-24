@@ -18,8 +18,7 @@ import { buildCreateSubmissionPayload, pcgCreateSubmission } from '#app/services
 import { requireUserId } from '#app/utils/auth.server.ts'
 import { prisma } from '#app/utils/db.server.ts'
 import { redirectWithToast } from '#app/utils/toast.server.ts'
-
-
+import { LoadingOverlay } from '#app/components/ui/loading-overlay.tsx'   // ✅ NEW
 
 function setInputValue(input: HTMLInputElement | null | undefined, value: string) {
     if (!input) return
@@ -112,10 +111,10 @@ export async function action({ request }: ActionFunctionArgs) {
     const parsed = parseWithZod(formData, { schema: CreateSubmissionSchema })
     if (parsed.status !== 'success') {
         return Response.json(
-        { result: parsed.reply() },
-        { status: parsed.status === 'error' ? 400 : 200 },
+            { result: parsed.reply() },
+            { status: parsed.status === 'error' ? 400 : 200 },
         )
-      }
+    }
 
     const {
         title,
@@ -287,8 +286,15 @@ export default function NewSubmission() {
 
     return (
         <InterexLayout user={user} title="Create Submission" subtitle="Step 1 of 3" currentPath="/customer/submissions/new">
+            {/* ✅ Full-screen loading overlay while creating */}
+            <LoadingOverlay
+                show={Boolean(isSubmitting)}
+                title="Creating submission…"
+                message="Please don't refresh or close this tab while we create the draft in PCG."
+            />
+
             <Drawer key="drawer-new" isOpen onClose={() => navigate('/customer/submissions')} title="Create New Submission" size="fullscreen">
-            <Form method="POST" {...getFormProps(form)} className="space-y-6">
+                <Form method="POST" {...getFormProps(form)} className="space-y-6">
                     <input type="hidden" name="intent" value="create" />
 
                     <Field
@@ -354,8 +360,7 @@ export default function NewSubmission() {
                         errors={fields.comments.errors}
                     />
 
-
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                         <SelectField labelProps={{ children: 'Send in X12' }} selectProps={getSelectProps(fields.sendInX12)} errors={fields.sendInX12.errors}>
                             <option value="false">False</option>
                             <option value="true">True</option>
@@ -368,27 +373,26 @@ export default function NewSubmission() {
                         />
                     </div>
 
-                <FileDropzone
-                    accept="application/pdf"
-                    onPick={f => {
-                        void setCachedFile('NEW',f)
-                        // doc_filename
-                        setInputValue(document.getElementById(fields.doc_filename.id) as HTMLInputElement, f.name)
-                        // doc_name = base name without extension
-                        const base = f.name.replace(/\.pdf$/i, '')
-                        setInputValue(document.getElementById(fields.doc_name.id) as HTMLInputElement, base)
-                        // doc_document_type stays "pdf" (already rendered disabled with "pdf")
-                        // If big file, suggest autoSplit on
-                        const sizeMB = f.size / 1024 / 1024
-                        if (sizeMB >= 150) {
-                            setInputValue(document.getElementById(fields.autoSplit.id) as HTMLInputElement, 'true')
-                        }
-                    }}
-                    note="Choosing a PDF here will pre-fill the document metadata fields below."
-                />
+                    <FileDropzone
+                        accept="application/pdf"
+                        onPick={f => {
+                            void setCachedFile('NEW',f)
+                            // doc_filename
+                            setInputValue(document.getElementById(fields.doc_filename.id) as HTMLInputElement, f.name)
+                            // doc_name = base name without extension
+                            const base = f.name.replace(/\.pdf$/i, '')
+                            setInputValue(document.getElementById(fields.doc_name.id) as HTMLInputElement, base)
+                            // doc_document_type stays "pdf" (already rendered disabled with "pdf")
+                            // If big file, suggest autoSplit on
+                            const sizeMB = f.size / 1024 / 1024
+                            if (sizeMB >= 150) {
+                                setInputValue(document.getElementById(fields.autoSplit.id) as HTMLInputElement, 'true')
+                            }
+                        }}
+                        note="Choosing a PDF here will pre-fill the document metadata fields below."
+                    />
 
-
-                <div className="pt-2 border-t">
+                    <div className="pt-2 border-t">
                         <h4 className="text-sm font-semibold text-gray-900 mb-3">Document metadata (for the first file)</h4>
 
                         <Field
