@@ -1,104 +1,139 @@
-// app/utils/secure-file-vault.ts
-// Ephemeral, tab-scoped encrypted storage for Files (PDFs).
-// - Encrypts with AES-GCM using a per-tab key kept only in memory.
-// - Stores ciphertext in IndexedDB so it survives client navigations / soft reloads.
-// - If the tab is hard-reloaded and the key is gone, data is undecryptable.
+// Client-only encrypted file vault using IndexedDB + Web Crypto (AES-GCM).
+// Stores Files as encrypted blobs keyed by a string. Key material lives only
+// in sessionStorage (per-tab) and never leaves the browser.
 
-type StoredMeta = {
-    name: string
+const DB_NAME = 'esmd-vault'
+const STORE = 'files'
+const VERSION = 1
+
+type StoredRecord = {
+    iv: ArrayBuffer
+    bytes: ArrayBuffer
     type: string
-    size: number
+    name: string
+    lastModified: number
 }
 
-const DB_NAME = 'secure-file-vault'
-const STORE = 'items'
-
-// ---- in-memory, per-tab key ----
-let tabKey: CryptoKey | null = null
-async function getTabKey() {
-    if (tabKey) return tabKey
-    const raw = crypto.getRandomValues(new Uint8Array(32)) // 256-bit
-    tabKey = await crypto.subtle.importKey('raw', raw, 'AES-GCM', false, ['encrypt', 'decrypt'])
-    return tabKey
-}
-
-// ---- tiny IndexedDB helpers ----
-function idb() {
-    return new Promise<IDBDatabase>((resolve, reject) => {
-        const req = indexedDB.open(DB_NAME, 1)
-        req.onupgradeneeded = () => req.result.createObjectStore(STORE)
+function openDB(): Promise<IDBDatabase> {
+    return new Promise((resolve, reject) => {
+        const req = indexedDB.open(DB_NAME, VERSION)
+        req.onupgradeneeded = () => {
+            const db = req.result
+            if (!db.objectStoreNames.contains(STORE)) db.createObjectStore(STORE)
+        }
         req.onsuccess = () => resolve(req.result)
         req.onerror = () => reject(req.error)
     })
 }
-async function idbPut(key: string, value: unknown) {
-    const db = await idb()
-    await new Promise<void>((resolve, reject) => {
-        const tx = db.transaction(STORE, 'readwrite')
-        tx.objectStore(STORE).put(value as any, key)
-        tx.oncomplete = () => resolve()
-        tx.onerror = () => reject(tx.error)
-    })
-}
-async function idbGet<T>(key: string) {
-    const db = await idb()
-    return await new Promise<T | undefined>((resolve, reject) => {
-        const tx = db.transaction(STORE, 'readonly')
-        const req = tx.objectStore(STORE).get(key)
-        req.onsuccess = () => resolve(req.result as T | undefined)
-        req.onerror = () => reject(req.error)
-    })
-}
-async function idbDel(key: string) {
-    const db = await idb()
-    await new Promise<void>((resolve, reject) => {
-        const tx = db.transaction(STORE, 'readwrite')
-        tx.objectStore(STORE).delete(key)
-        tx.oncomplete = () => resolve()
-        tx.onerror = () => reject(tx.error)
+
+function idbReq<T>(r: IDBRequest<T>): Promise<T> {
+    return new Promise((resolve, reject) => {
+        r.onsuccess = () => resolve(r.result)
+        r.onerror = () => reject(r.error)
     })
 }
 
-// ---- public API ----
-export async function vaultPut(key: string, file: File) {
-    const meta: StoredMeta = { name: file.name, type: file.type, size: file.size }
-    const iv = crypto.getRandomValues(new Uint8Array(12))
-    const buf = await file.arrayBuffer()
-    const k = await getTabKey()
-    const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, k, buf)
-    await idbPut(`${key}:meta`, meta)
-    await idbPut(`${key}:iv`, iv)
-    await idbPut(`${key}:data`, new Uint8Array(ciphertext))
-}
-
-export async function vaultGet(key: string): Promise<File | null> {
-    const meta = await idbGet<StoredMeta>(`${key}:meta`)
-    const iv = await idbGet<Uint8Array>(`${key}:iv`)
-    const data = await idbGet<Uint8Array>(`${key}:data`)
-    if (!meta || !iv || !data) return null
-    if (!tabKey) return null // tab reloaded: undecryptable → treat as absent
+function safeCommit(tx: IDBTransaction) {
+    // Some browsers expose tx.commit(), some don't. Also avoid typing issues.
     try {
-        const k = await getTabKey()
-        const plaintext = await crypto.subtle.decrypt(
-            { name: 'AES-GCM', iv },
-            k,
-            (data as unknown as Uint8Array).buffer,
-        )
-        return new File([plaintext], meta.name, { type: meta.type })
+        ;(tx as any).commit?.()
     } catch {
-        // wrong key / tampered / reloaded: treat as absent
-        return null
+        // no-op; normal auto-commit still applies
     }
 }
 
-export async function vaultDel(key: string) {
-    await Promise.all([idbDel(`${key}:meta`), idbDel(`${key}:iv`), idbDel(`${key}:data`)])
+// ---- crypto helpers ----
+const SS_KEY = 'esmdVaultKey.v1'
+
+function bufToB64(buf: ArrayBuffer) {
+    const bytes = new Uint8Array(buf)
+    let str = ''
+    for (let i = 0; i < bytes.length; i++) str += String.fromCharCode(bytes[i])
+    return btoa(str)
+}
+function b64ToBuf(b64: string) {
+    const str = atob(b64)
+    const bytes = new Uint8Array(str.length)
+    for (let i = 0; i < str.length; i++) bytes[i] = str.charCodeAt(i)
+    return bytes.buffer
 }
 
-// move (atomically enough for our purposes)
-export async function vaultMove(fromKey: string, toKey: string) {
-    const f = await vaultGet(fromKey)
-    if (!f) return
-    await vaultPut(toKey, f)
-    await vaultDel(fromKey)
+async function getKey(): Promise<CryptoKey> {
+    let raw = sessionStorage.getItem(SS_KEY)
+    if (!raw) {
+        const rand = crypto.getRandomValues(new Uint8Array(32))
+        sessionStorage.setItem(SS_KEY, bufToB64(rand.buffer))
+        raw = sessionStorage.getItem(SS_KEY)!
+    }
+    const keyBytes = b64ToBuf(raw)
+    return crypto.subtle.importKey('raw', keyBytes, { name: 'AES-GCM' }, false, ['encrypt', 'decrypt'])
+}
+
+async function encrypt(plain: ArrayBuffer) {
+    const key = await getKey()
+    const iv = crypto.getRandomValues(new Uint8Array(12))
+    const bytes = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, plain)
+    return { iv: iv.buffer, bytes }
+}
+async function decrypt(iv: ArrayBuffer, bytes: ArrayBuffer) {
+    const key = await getKey()
+    const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: new Uint8Array(iv) }, key, bytes)
+    return plain
+}
+
+// ---- public API ----
+export async function vaultPut(key: string, file: File): Promise<void> {
+    const db = await openDB()
+    const tx = db.transaction(STORE, 'readwrite')
+    const store = tx.objectStore(STORE)
+    const plain = await file.arrayBuffer()
+    const { iv, bytes } = await encrypt(plain)
+    const rec: StoredRecord = { iv, bytes, type: file.type, name: file.name, lastModified: Number(file.lastModified ?? Date.now()) }
+    await idbReq(store.put(rec, key))
+    safeCommit(tx)
+    db.close()
+}
+
+export async function vaultGet(key: string): Promise<File | null> {
+    const db = await openDB()
+    const tx = db.transaction(STORE, 'readonly')
+    const store = tx.objectStore(STORE)
+    const rec = (await idbReq(store.get(key))) as StoredRecord | undefined
+    safeCommit(tx)
+    db.close()
+    if (!rec) return null
+    const plain = await decrypt(rec.iv, rec.bytes)
+    return new File([plain], rec.name, { type: rec.type, lastModified: Number(rec.lastModified ?? Date.now()) })
+}
+
+export async function vaultDel(key: string): Promise<void> {
+    const db = await openDB()
+    const tx = db.transaction(STORE, 'readwrite')
+    const store = tx.objectStore(STORE)
+    await idbReq(store.delete(key))
+    safeCommit(tx)
+    db.close()
+}
+
+export async function vaultMove(fromKey: string, toKey: string): Promise<void> {
+    const db = await openDB()
+    const tx = db.transaction(STORE, 'readwrite')
+    const store = tx.objectStore(STORE)
+    const rec = (await idbReq(store.get(fromKey))) as StoredRecord | undefined
+    if (rec) {
+        await idbReq(store.put(rec, toKey))
+        await idbReq(store.delete(fromKey))
+    }
+    safeCommit(tx)
+    db.close()
+}
+
+export async function vaultListKeys(prefix?: string): Promise<string[]> {
+    const db = await openDB()
+    const tx = db.transaction(STORE, 'readonly')
+    const store = tx.objectStore(STORE)
+    const keys = (await idbReq(store.getAllKeys())) as string[]
+    safeCommit(tx)
+    db.close()
+    return prefix ? keys.filter(k => k.startsWith(prefix)) : keys
 }

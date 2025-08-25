@@ -1,10 +1,19 @@
-// app/routes/customer+/submissions+/$id.upload.tsx
-import {parseWithZod} from "@conform-to/zod";
+import { parseWithZod } from '@conform-to/zod'
 import { SubmissionEventKind } from '@prisma/client'
 import * as React from 'react'
-import { data, Form, useActionData, useLoaderData, useNavigation, Link, useNavigate, type LoaderFunctionArgs, type ActionFunctionArgs  } from 'react-router'
+import {
+    data,
+    Form,
+    useActionData,
+    useLoaderData,
+    useNavigation,
+    Link,
+    useNavigate,
+    useLocation,
+    type LoaderFunctionArgs,
+    type ActionFunctionArgs,
+} from 'react-router'
 import { z } from 'zod'
-import { FileDropzone } from '#app/components/file-dropzone.tsx'
 import { InterexLayout } from '#app/components/interex-layout.tsx'
 import { SubmissionActivityLog } from '#app/components/submission-activity-log.tsx'
 import { Drawer } from '#app/components/ui/drawer.tsx'
@@ -12,24 +21,15 @@ import { StatusButton } from '#app/components/ui/status-button.tsx'
 import { pcgUploadFiles, pcgGetStatus } from '#app/services/pcg-hih.server.ts'
 import { requireUserId } from '#app/utils/auth.server.ts'
 import { prisma } from '#app/utils/db.server.ts'
-import { getCachedFile, setCachedFile, clearCachedFile } from '#app/utils/file-cache.ts'
 import { redirectWithToast } from '#app/utils/toast.server.ts'
-import { LoadingOverlay } from '#app/components/ui/loading-overlay.tsx'   // ✅ NEW
-
-function setInputValue(input: HTMLInputElement | null | undefined, value: string) {
-    if (!input) return
-    input.value = value
-    input.dispatchEvent(new Event('input', { bubbles: true }))
-}
+import { LoadingOverlay } from '#app/components/ui/loading-overlay.tsx'
+import { getCachedFile, subKey } from '#app/utils/file-cache.ts'
 
 type PcgEvent = { kind?: string; payload?: any }
 type PcgStageSource = { responseMessage?: string | null; events?: PcgEvent[] | any[] }
-
 function isDraftFromPCG(s: PcgStageSource) {
     const stageFromResponse = (s.responseMessage ?? '').toLowerCase()
-    const stageFromEvent =
-        ((s.events ?? []).find((e: any) => e?.kind === 'PCG_STATUS')?.payload?.stage ?? '').toLowerCase()
-
+    const stageFromEvent = ((s.events ?? []).find((e: any) => e?.kind === 'PCG_STATUS')?.payload?.stage ?? '').toLowerCase()
     const latestStage = stageFromEvent || stageFromResponse || 'Draft'
     return latestStage.includes('draft')
 }
@@ -43,7 +43,6 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     const userId = await requireUserId(request)
     const id = params.id as string
 
-    // 🔧 fetch the user so we can pass it to InterexLayout
     const user = await prisma.user.findUnique({
         where: { id: userId },
         include: {
@@ -68,12 +67,11 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
         },
     })
     if (!submission) throw new Response('Not found', { status: 404 })
-
     if (!isDraftFromPCG(submission)) {
         throw await redirectWithToast(`/customer/submissions`, {
             type: 'error',
             title: 'Not allowed',
-            description: 'Upload is only available for while PCG stage is Draft.',
+            description: 'Upload is only available while PCG stage is Draft.',
         })
     }
     if (!submission.pcgSubmissionId) {
@@ -84,9 +82,9 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
         })
     }
 
-    const metaEv = submission.events.find(e => e.kind === SubmissionEventKind.META_UPDATED)
-        ?? submission.events.find(e => e.kind === SubmissionEventKind.DRAFT_CREATED)
-    const expectedFilename = (metaEv?.payload as any)?.document_set?.[0]?.filename ?? null
+    const metaEv = submission.events.find(e => e.kind === SubmissionEventKind.META_UPDATED) ?? submission.events.find(e => e.kind === SubmissionEventKind.DRAFT_CREATED)
+    const docSet: Array<any> = Array.isArray((metaEv?.payload as any)?.document_set) ? (metaEv!.payload as any).document_set : []
+    const expectedFilenames = docSet.map(d => d.filename).filter(Boolean)
 
     const eventsUi = submission.events.map(e => ({
         id: e.id,
@@ -99,13 +97,12 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     return data({
         user,
         submission: { ...submission, events: eventsUi },
-        expectedFilename,
+        expectedFilenames, // array
     })
 }
 
 export async function action({ request }: ActionFunctionArgs) {
     const userId = await requireUserId(request)
-
     const user = await prisma.user.findUnique({
         where: { id: userId },
         include: {
@@ -120,75 +117,76 @@ export async function action({ request }: ActionFunctionArgs) {
     const formData = await request.formData()
     const parsed = parseWithZod(formData, { schema: FileUploadSchema })
     if (parsed.status !== 'success') {
-        return data(
-            { result: parsed.reply() },
-            { status: parsed.status === 'error' ? 400 : 200 },
-        )
+        return data({ result: parsed.reply() }, { status: parsed.status === 'error' ? 400 : 200 })
     }
     const { submissionId } = parsed.value
 
-    const file = formData.get('file') as File | null
-    if (!file || file.size === 0) {
-        return data({ result: parsed.reply({ formErrors: ['Please select a file to upload'] }) }, { status: 400 })
-    }
-    if (!/\.pdf$/i.test(file.name)) {
-        return data({ result: parsed.reply({ formErrors: ['Only PDF files are supported by PCG'] }) }, { status: 400 })
-    }
-
-    const sizeMB = file.size / (1024 * 1024)
-    if (sizeMB > 300) {
-        return data({ result: parsed.reply({ formErrors: ['Files over 300 MB are not supported by PCG'] }) }, { status: 400 })
-    }
-
-    const submission = await prisma.submission.findUnique({
-        where: { id: submissionId },
-        include: { provider: true, events: true },
-    })
+    const submission = await prisma.submission.findUnique({ where: { id: submissionId }, include: { provider: true, events: true } })
     if (!submission) return data({ result: parsed.reply({ formErrors: ['Submission not found'] }) }, { status: 404 })
     if (!isDraftFromPCG(submission)) {
         return data({ result: parsed.reply({ formErrors: ['Files can only be uploaded to draft submissions'] }) }, { status: 400 })
     }
     if (!submission.pcgSubmissionId) {
-        return data({ result: parsed.reply({ formErrors: ['Remote submission_id is not available. Create step likely failed.'] }) }, { status: 400 })
+        return data({ result: parsed.reply({ formErrors: ['Remote submission_id is not available.'] }) }, { status: 400 })
     }
 
-    // Require AutoSplit for large PDFs
-    if (sizeMB >= 150 && sizeMB <= 300 && !submission.autoSplit) {
+    // Get expected filenames from latest meta
+    const metaEv = submission.events.find(e => e.kind === SubmissionEventKind.META_UPDATED) ?? submission.events.find(e => e.kind === SubmissionEventKind.DRAFT_CREATED)
+    const expected: string[] = Array.isArray((metaEv?.payload as any)?.document_set)
+        ? (metaEv!.payload as any).document_set.map((d: any) => d.filename).filter(Boolean)
+        : []
+
+    // Collect files[]
+    const files = (formData.getAll('files') as File[]).filter(f => f && f.size > 0)
+    if (!files.length) return data({ result: parsed.reply({ formErrors: ['Please select file(s) to upload'] }) }, { status: 400 })
+
+    // Count must match
+    if (expected.length !== files.length) {
         return data(
-            { result: parsed.reply({ formErrors: ['This file is ≥150MB. Please enable Auto Split in metadata (Step 1.1).'] }) },
+            { result: parsed.reply({ formErrors: [`You selected ${files.length} file(s), but ${expected.length} file(s) are expected as per metadata.`] }) },
             { status: 400 },
         )
     }
 
-    // prefer META_UPDATED (latest), fallback to DRAFT_CREATED
-    const metaEv = submission.events.find(e => e.kind === SubmissionEventKind.META_UPDATED)
-        ?? submission.events.find(e => e.kind === SubmissionEventKind.DRAFT_CREATED)
-    const expectedFilename = (metaEv?.payload as any)?.document_set?.[0]?.filename ?? null
-    if (expectedFilename && expectedFilename !== file.name) {
-        return data(
-            { result: parsed.reply({ formErrors: [
-                        `Selected file name "${file.name}" does not match the latest metadata filename "${expectedFilename}". ` +
-                        `Update metadata in Step 2 or choose a file with the expected name.`,
-                    ]}) },
-            { status: 400 },
-        )
+    // Validate names
+    const incomingNames = files.map(f => f.name)
+    const missing = expected.filter(fn => !incomingNames.includes(fn))
+    const extras = incomingNames.filter(fn => !expected.includes(fn))
+    if (missing.length || extras.length) {
+        const msgs = []
+        if (missing.length) msgs.push(`Missing file(s): ${missing.join(', ')}`)
+        if (extras.length) msgs.push(`Unexpected file(s): ${extras.join(', ')}`)
+        return data({ result: parsed.reply({ formErrors: msgs }) }, { status: 400 })
     }
 
+    // Validate sizes: each ≤150MB, total ≤300MB
+    const bytesPerMB = 1024 * 1024
+    const perFileErrors = files
+        .filter(f => f.size / bytesPerMB > 150)
+        .map(f => `File "${f.name}" is ${(f.size / bytesPerMB).toFixed(1)} MB (max 150 MB per file).`)
+    const totalSizeMB = files.reduce((acc, f) => acc + f.size, 0) / bytesPerMB
+    const totalError = totalSizeMB > 300 ? [`Total size ${totalSizeMB.toFixed(1)} MB exceeds 300 MB.`] : []
+    const sizeErrors = [...perFileErrors, ...totalError]
+    if (sizeErrors.length) return data({ result: parsed.reply({ formErrors: sizeErrors }) }, { status: 400 })
+
+    // All good: upload
     try {
-        const pcgResp = await pcgUploadFiles(submission.pcgSubmissionId, [file])
+        const pcgResp = await pcgUploadFiles(submission.pcgSubmissionId, files)
 
-        await prisma.submissionDocument.create({
-            data: {
-                submissionId,
-                fileName: file.name,
-                originalFileName: file.name,
-                fileSize: file.size,
-                mimeType: file.type,
-                uploaderId: userId,
-                objectKey: `/pcg/${submission.pcgSubmissionId}/${file.name}`,
-                uploadStatus: 'UPLOADED',
-            },
-        })
+        for (const file of files) {
+            await prisma.submissionDocument.create({
+                data: {
+                    submissionId,
+                    fileName: file.name,
+                    originalFileName: file.name,
+                    fileSize: file.size,
+                    mimeType: file.type,
+                    uploaderId: userId,
+                    objectKey: `/pcg/${submission.pcgSubmissionId}/${file.name}`,
+                    uploadStatus: 'UPLOADED',
+                },
+            })
+        }
 
         await prisma.submission.update({
             where: { id: submissionId },
@@ -203,12 +201,11 @@ export async function action({ request }: ActionFunctionArgs) {
             data: {
                 submissionId,
                 kind: 'PCG_UPLOAD_SUCCESS',
-                message: `Uploaded ${file.name}`,
-                payload: { submission_status: pcgResp?.submission_status, file: file.name },
+                message: `Uploaded ${files.length} file(s)`,
+                payload: { submission_status: pcgResp?.submission_status, files: files.map(f => f.name) },
             },
         })
 
-        // 🔄 Immediately fetch latest status from PCG and persist it
         try {
             const statusResp = await pcgGetStatus(submission.pcgSubmissionId!)
             await prisma.submissionEvent.create({
@@ -227,14 +224,12 @@ export async function action({ request }: ActionFunctionArgs) {
                     updatedAt: new Date(),
                 },
             })
-        } catch (err) {
-            // Non-fatal: keep the upload success redirect; status can be refreshed manually later
-        }
+        } catch {}
 
         return await redirectWithToast(`/customer/submissions`, {
             type: 'success',
-            title: 'File Uploaded',
-            description: `${file.name} uploaded and submitted successfully.`,
+            title: 'Files Uploaded',
+            description: `${files.length} file(s) uploaded and submitted successfully.`,
         })
     } catch (e: any) {
         await prisma.submission.update({
@@ -246,111 +241,152 @@ export async function action({ request }: ActionFunctionArgs) {
             },
         })
         await prisma.submissionEvent.create({
-            data: {
-                submissionId,
-                kind: 'PCG_UPLOAD_ERROR',
-                message: e?.message?.toString?.() ?? 'Upload failed',
-            },
+            data: { submissionId, kind: 'PCG_UPLOAD_ERROR', message: e?.message?.toString?.() ?? 'Upload failed' },
         })
-
         return await redirectWithToast(`/customer/submissions/${submissionId}/upload`, {
             type: 'error',
             title: 'Upload Failed',
-            description: e?.message?.toString?.() ?? 'Unable to upload file',
+            description: e?.message?.toString?.() ?? 'Unable to upload files',
         })
     }
 }
 
 export default function UploadSubmission() {
-    const { user, submission, expectedFilename } = useLoaderData<typeof loader>()
+    const { user, submission, expectedFilenames } = useLoaderData<typeof loader>()
     const actionData = useActionData<typeof action>()
     const nav = useNavigation()
     const navigate = useNavigate()
+    const location = useLocation()
     const isUploading = nav.formData?.get('intent') === 'upload-file'
 
-    const [cached, setCached] = React.useState<File | null>(null)
+    // Hidden input which we populate from cache so the action receives real File objects
+    const inputRef = React.useRef<HTMLInputElement | null>(null)
 
-    // load cache on mount
-    React.useEffect(() => {
-        let alive = true
-        void (async () => {
-            try {
-                const f = await getCachedFile(submission.id)
-                if (alive) setCached(f)
-            } catch (err) {
-                console.error(err)
+    const [mismatch, setMismatch] = React.useState<string[]>([])
+    const [missing, setMissing] = React.useState<string[]>([])
+    const [pickedTotalMB, setPickedTotalMB] = React.useState(0)
+    const [perFileTooBig, setPerFileTooBig] = React.useState<string[]>([])
+    const [ready, setReady] = React.useState(false)
+
+    async function rebuildFromCache() {
+        setReady(false)
+        const dt = new DataTransfer()
+        const BYTES_PER_MB = 1024 * 1024
+        const mism: string[] = []
+        const miss: string[] = []
+        const tooBig: string[] = []
+        let totalMB = 0
+
+        // keep order by expectedFilenames
+        for (let i = 0; i < expectedFilenames.length; i++) {
+            const expected = expectedFilenames[i]
+            const f = await getCachedFile(subKey(submission.id, i + 1))
+            if (!f) {
+                miss.push(`#${i + 1} — ${expected}`)
+                continue
             }
-        })()
-        return () => { alive = false }
-    }, [submission.id])
+            if (f.name !== expected) {
+                mism.push(`#${i + 1}: cached "${f.name}" ≠ expected "${expected}"`)
+            }
+            const mb = f.size / BYTES_PER_MB
+            if (mb > 150) tooBig.push(`${f.name} (${mb.toFixed(1)} MB)`)
+            totalMB += mb
+            dt.items.add(f) // NOTE: we intentionally do not rename; enforce exact match via alert
+        }
 
-    // clear on unmount / nav away
+        if (inputRef.current) inputRef.current.files = dt.files
+        setMismatch(mism)
+        setMissing(miss)
+        setPerFileTooBig(tooBig)
+        setPickedTotalMB(totalMB)
+        setReady(true)
+    }
+
     React.useEffect(() => {
-        return () => { void clearCachedFile(submission.id) } // <— don't return a Promise
-    }, [submission.id])
+        rebuildFromCache()
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [location.key])
+
+    const canSubmit =
+        ready &&
+        mismatch.length === 0 &&
+        missing.length === 0 &&
+        perFileTooBig.length === 0 &&
+        pickedTotalMB <= 300
 
     return (
         <InterexLayout user={user} title="Upload & Submit" subtitle="Step 3 of 3" currentPath={`/customer/submissions/${submission.id}/upload`}>
-            {/* ✅ Full-screen loading overlay while uploading */}
-            <LoadingOverlay
-                show={Boolean(isUploading)}
-                title="Uploading your file…"
-                message="Please don't refresh or close this tab while we upload and submit your document."
-            />
+            <LoadingOverlay show={Boolean(isUploading)} title="Uploading your files…" message="Please don't refresh or close this tab while we upload and submit your documents." />
 
             <Drawer key={`drawer-upload-${submission.id}`} isOpen onClose={() => navigate('/customer/submissions')} title={`Upload for: ${submission.title}`} size="fullscreen">
                 <div className="space-y-8">
                     <div className="rounded-md bg-gray-50 p-4 text-sm text-gray-700">
-                        <p>Upload the PDF to finish the submission.</p>
-                        {expectedFilename ? (
-                            <p className="mt-1">
-                                <strong>Expected filename:</strong> <span className="font-mono">{expectedFilename}</span>
-                            </p>
-                        ) : (
-                            <p className="mt-1">Make sure the filename matches the metadata filename you provided in Step 1.</p>
-                        )}
-                        <p className="mt-1 text-xs text-gray-500">Only PDF. Max 300 MB. 150–300 MB requires Auto Split On.</p>
+                        <p>We’ve pulled your files from the secure cache. Review and submit.</p>
+                        <div className="mt-2">
+                            <strong>Expected filenames ({expectedFilenames.length}):</strong>
+                            <ul className="mt-1 list-disc list-inside font-mono text-xs text-gray-700">
+                                {expectedFilenames.map(n => (<li key={n}>{n}</li>))}
+                            </ul>
+                        </div>
+                        <p className="mt-1 text-xs text-gray-500">Only PDF. Each ≤ 150 MB. Total ≤ 300 MB.</p>
                     </div>
 
+                    {/* Hidden form that includes the cached files */}
                     <Form method="POST" encType="multipart/form-data" className="space-y-4">
                         <input type="hidden" name="intent" value="upload-file" />
                         <input type="hidden" name="submissionId" value={submission.id} />
+                        <input ref={inputRef} name="files" type="file" multiple className="hidden" />
 
-                        <div>
-                            <label htmlFor="file" className="block text-sm font-medium text-gray-700">
-                                Select File (PDF)
-                            </label>
-                            <FileDropzone
-                                label="Upload PDF"
-                                name="file"                    // important: posts with the form
-                                accept="application/pdf"
-                                required
-                                initialFile={cached}
-                                onPick={async f => {
-                                    // keep cache fresh if the user replaces the file here
-                                    await setCachedFile(submission.id, f)
-                                    setCached(f)
-                                }}
-                                note="We’ll upload this in this step. If you change the file here, make sure its name matches the metadata set in Step 2."
-                            />
-
-                            <p className="mt-1 text-xs text-gray-500">150–300 MB requires Auto Split enabled in metadata.</p>
-                        </div>
+                        {/* Alerts */}
+                        {(mismatch.length || missing.length || perFileTooBig.length || pickedTotalMB > 300) ? (
+                            <div className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800">
+                                <div className="font-semibold mb-1">Please fix the following before submitting:</div>
+                                {missing.length ? (
+                                    <div className="mb-2">
+                                        <div className="font-medium">Missing files from cache:</div>
+                                        <ul className="list-disc list-inside">
+                                            {missing.map((m, i) => <li key={`miss-${i}`}>{m}</li>)}
+                                        </ul>
+                                        <div className="mt-1 text-xs">Go back to <strong>Step 2</strong>, attach the missing file(s), and press <em>Update Submission</em>.</div>
+                                    </div>
+                                ) : null}
+                                {mismatch.length ? (
+                                    <div className="mb-2">
+                                        <div className="font-medium">Filename mismatches:</div>
+                                        <ul className="list-disc list-inside">
+                                            {mismatch.map((m, i) => <li key={`mism-${i}`}>{m}</li>)}
+                                        </ul>
+                                        <div className="mt-1 text-xs">In <strong>Step 2</strong> ensure the <code>Filename</code> field matches the attached file’s name (or vice versa). The server requires exact matches.</div>
+                                    </div>
+                                ) : null}
+                                {perFileTooBig.length ? (
+                                    <div className="mb-2">
+                                        <div className="font-medium">Files over 150 MB:</div>
+                                        <ul className="list-disc list-inside">
+                                            {perFileTooBig.map((n, i) => <li key={`big-${i}`}>{n}</li>)}
+                                        </ul>
+                                    </div>
+                                ) : null}
+                                {pickedTotalMB > 300 ? <div>Total size {pickedTotalMB.toFixed(1)} MB exceeds 300 MB.</div> : null}
+                                <div className="mt-3">
+                                    <button type="button" onClick={rebuildFromCache}
+                                            className="rounded-md bg-white px-3 py-1.5 text-sm font-medium text-gray-900 ring-1 ring-gray-300 hover:bg-gray-50">
+                                        Refresh from cache
+                                    </button>
+                                </div>
+                            </div>
+                        ) : (
+                            <div className="rounded-md border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-800">
+                                All good! Cached files match the expected names. Total: {pickedTotalMB.toFixed(1)} / 300 MB.
+                            </div>
+                        )}
 
                         <div className="flex items-center justify-between pt-4 border-t">
-                            <Link
-                                to={`/customer/submissions/${submission.id}/review`}
-                                className="rounded-md bg-white px-3 py-2 text-sm font-semibold text-gray-900 ring-1 ring-inset ring-gray-300 hover:bg-gray-50"
-                            >
+                            <Link to={`/customer/submissions/${submission.id}/review`} className="rounded-md bg-white px-3 py-2 text-sm font-semibold text-gray-900 ring-1 ring-inset ring-gray-300 hover:bg-gray-50">
                                 Back
                             </Link>
 
-                            <StatusButton
-                                type="submit"
-                                disabled={isUploading}
-                                status={isUploading ? 'pending' : 'idle'}
-                                className="rounded-md bg-indigo-600 px-3 py-2 text-sm font-semibold text-white hover:bg-indigo-500"
-                            >
+                            <StatusButton type="submit" disabled={!canSubmit || isUploading} status={isUploading ? 'pending' : 'idle'} className="rounded-md bg-indigo-600 px-3 py-2 text-sm font-semibold text-white hover:bg-indigo-500">
                                 Upload & Submit
                             </StatusButton>
                         </div>
@@ -362,14 +398,11 @@ export default function UploadSubmission() {
                                 ))}
                             </div>
                         ) : null}
-
                     </Form>
 
                     <SubmissionActivityLog events={submission.events ?? []} />
                 </div>
             </Drawer>
         </InterexLayout>
-
     )
-
 }

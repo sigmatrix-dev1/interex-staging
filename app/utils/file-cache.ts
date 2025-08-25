@@ -1,10 +1,17 @@
-// app/utils/file-cache.ts
-// Adapter that keeps your existing API but uses the secure vault.
+// Adapter that keeps your existing API but uses the secure vault + simple
+// key helpers for draft/submission namespaces.
 
 import { vaultPut, vaultGet, vaultDel, vaultMove } from './secure-file-vault'
 
 // keep a tiny in-memory hint to avoid decrypt/IDB hit if we just wrote
 const mem = new Map<string, File>()
+
+export function draftKey(nonce: string, idx: number) {
+    return `draft:${nonce}:${idx}`
+}
+export function subKey(submissionId: string, idx: number) {
+    return `sub:${submissionId}:${idx}`
+}
 
 export async function setCachedFile(key: string, file: File) {
     mem.set(key, file)
