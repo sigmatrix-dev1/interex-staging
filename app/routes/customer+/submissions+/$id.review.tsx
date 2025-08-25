@@ -838,8 +838,14 @@ export default function ReviewSubmission() {
                             })}
                         </div>
 
+                        <div className="rounded-md border border-red-500 bg-amber-50 p-3 text-sm text-amber-900">
+                            <strong>Heads up:</strong> If any edits are made to the metadata, please make sure to choose "yes" from the dropdown below and click on "update submission" to update the metadata for the submission. Once updated please click on "Next" button to proceed with
+                            next step (Upload documents).
+                        </div>
+
                         {/* ===== Update + Next controls ===== */}
                         <div className="grid grid-cols-1 md:grid-cols-12 gap-4 items-start">
+
                             <div className="md:col-span-8">
                                 <label className="block text-sm font-medium text-gray-700 mb-1">Need to update submission?</label>
                                 <select

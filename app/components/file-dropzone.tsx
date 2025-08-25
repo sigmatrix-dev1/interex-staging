@@ -26,7 +26,6 @@ export function FileDropzone({
     const [file, setFile] = React.useState<File | null>(initialFile)
     const [dragOver, setDragOver] = React.useState(false)
 
-    // Keep hidden input in sync when parent provides an initial file.
     React.useEffect(() => {
         if (!initialFile) return
         setFile(initialFile)
@@ -52,18 +51,17 @@ export function FileDropzone({
     }
 
     function extractFileFromDrop(e: React.DragEvent<HTMLDivElement>): File | null {
-        // Prefer DataTransferItemList to avoid getting non-file entries.
         const items = e.dataTransfer?.items
         if (items && items.length) {
             for (let i = 0; i < items.length; i++) {
-                const it = items[i]
+                const it = items[i] as DataTransferItem | undefined // may be undefined with noUncheckedIndexedAccess
+                if (!it) continue
                 if (it.kind === 'file') {
                     const f = it.getAsFile()
                     if (f) return f
                 }
             }
         }
-        // Fallback to files list.
         const f = e.dataTransfer?.files?.[0]
         return f ?? null
     }
@@ -72,7 +70,6 @@ export function FileDropzone({
         <div className="space-y-2">
             {label ? <label className="block text-sm font-medium text-gray-700">{label}</label> : null}
 
-            {/* Hidden native input (wired when we pick via click) */}
             <input
                 ref={inputRef}
                 type="file"
