@@ -172,7 +172,7 @@ export async function pcgUpdateSubmission(
 /** GET /pcgfhir/hih/api/npis  — list of NPIs registered for the org */
 
 export async function pcgGetUserNpis() {
-    const url = '${PCG_ENV.BASE_URL}/npis'
+    const url = `${PCG_ENV.BASE_URL}/npis`
     const res = await callPcg(url, {
         method: 'GET',
         headers: { 'Content-Type': 'application/json' },
@@ -200,7 +200,7 @@ export async function pcgGetUserNpis() {
 
 /** POST /pcgfhir/hih/api/AddProviderNPI  */
 export async function pcgAddProviderNpi(input: { providerNPI: string; customerName: string }) {
-    const url = '${PCG_ENV.BASE_URL}/AddProviderNPI'
+    const url = `${PCG_ENV.BASE_URL}/AddProviderNPI`
     const res = await callPcg(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
