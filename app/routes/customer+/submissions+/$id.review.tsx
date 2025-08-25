@@ -3,7 +3,17 @@ import { getFormProps, getInputProps, getSelectProps, useForm } from '@conform-t
 import { getZodConstraint, parseWithZod } from '@conform-to/zod'
 import { SubmissionEventKind } from '@prisma/client'
 import * as React from 'react'
-import { data, Form, useActionData, useLoaderData, useNavigation, Link, useNavigate, type LoaderFunctionArgs, type ActionFunctionArgs  } from 'react-router'
+import {
+    data,
+    Form,
+    useActionData,
+    useLoaderData,
+    useNavigation,
+    Link,
+    useNavigate,
+    type LoaderFunctionArgs,
+    type ActionFunctionArgs,
+} from 'react-router'
 import { z } from 'zod'
 import { FileDropzone } from '#app/components/file-dropzone.tsx'
 import { Field, SelectField, TextareaField, ErrorList } from '#app/components/forms.tsx'
@@ -16,13 +26,14 @@ import {
     SubmissionPurposeEnum,
     AuthorTypeEnum,
     formatEnum,
+    RecipientOptions,
 } from '#app/domain/submission-enums.ts'
 import { buildCreateSubmissionPayload, pcgUpdateSubmission } from '#app/services/pcg-hih.server.ts'
 import { requireUserId } from '#app/utils/auth.server.ts'
 import { prisma } from '#app/utils/db.server.ts'
 import { getCachedFile, setCachedFile, moveCachedFile } from '#app/utils/file-cache.ts'
 import { redirectWithToast } from '#app/utils/toast.server.ts'
-import { LoadingOverlay } from '#app/components/ui/loading-overlay.tsx'   // ✅ NEW
+import { LoadingOverlay } from '#app/components/ui/loading-overlay.tsx'
 
 function setInputValue(input: HTMLInputElement | null | undefined, value: string) {
     if (!input) return
@@ -65,7 +76,6 @@ const UpdateSubmissionMetaSchema = z.object({
         .string()
         .transform(s => (typeof s === 'string' ? s.trim() : s))
         .refine(s => !!s, { message: 'Attachment Control Number is required' }),
-    // kept only for client‑side logging convenience:
     _initial_json: z.string().optional(),
 })
 
@@ -115,7 +125,6 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
         })
     }
 
-    // NPI options (same rules as Step 1)
     const availableNpis: Npi[] = isSystemAdmin
         ? await prisma.provider.findMany({ select: { id: true, npi: true, name: true } })
         : isCustomerAdmin && user.customerId
@@ -130,9 +139,9 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
                 })
                 : user.userNpis.map(un => ({ id: un.provider.id, npi: un.provider.npi, name: un.provider.name }))
 
-    // Reconstruct initial values from the DRAFT_CREATED payload
-    const metaEvent = submission.events.find(e => e.kind === SubmissionEventKind.META_UPDATED)
-        ?? submission.events.find(e => e.kind === SubmissionEventKind.DRAFT_CREATED)
+    const metaEvent =
+        submission.events.find(e => e.kind === SubmissionEventKind.META_UPDATED) ??
+        submission.events.find(e => e.kind === SubmissionEventKind.DRAFT_CREATED)
     const latestMeta = (metaEvent?.payload as any) ?? {}
     const doc0 = (latestMeta.document_set?.[0] ?? {}) as any
 
@@ -148,8 +157,8 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
         claimId: latestMeta?.esMD_claim_id ?? submission.claimId ?? '',
         caseId: latestMeta?.esmd_case_id ?? submission.caseId ?? '',
         comments: latestMeta?.comments ?? submission.comments ?? '',
-        autoSplit: String(Boolean(latestMeta?.auto_split ?? submission.autoSplit)), // "true" | "false"
-        sendInX12: String(Boolean(latestMeta?.bSendinX12 ?? submission.sendInX12)), // "true" | "false"
+        autoSplit: String(Boolean(latestMeta?.auto_split ?? submission.autoSplit)),
+        sendInX12: String(Boolean(latestMeta?.bSendinX12 ?? submission.sendInX12)),
         threshold: Number(latestMeta?.threshold ?? submission.threshold ?? 100),
         doc_name: doc0?.name ?? '',
         doc_split_no: Number(doc0?.split_no ?? 1),
@@ -198,7 +207,6 @@ export async function action({ request }: ActionFunctionArgs) {
         return data({ result: parsed.reply({ formErrors: ['Remote submission_id not available'] }) }, { status: 400 })
     }
 
-    // Fetch user + validate chosen provider (NPI)
     const user = await prisma.user.findUnique({
         where: { id: userId },
         include: {
@@ -208,7 +216,6 @@ export async function action({ request }: ActionFunctionArgs) {
             userNpis: { include: { provider: true } },
         },
     })
-
     if (!user) throw new Response('Unauthorized', { status: 401 })
 
     const isSystemAdmin = user.roles.some(r => r.name === 'system-admin')
@@ -280,17 +287,15 @@ export async function action({ request }: ActionFunctionArgs) {
             },
         })
 
-        // 1) store latest metadata locally so loaders can always show the most recent values
         await prisma.submissionEvent.create({
             data: {
                 submissionId: v.submissionId,
                 kind: SubmissionEventKind.META_UPDATED,
                 message: 'Local metadata updated',
-                payload: pcgPayload, // <-- contains document_set[0].filename, etc.
+                payload: pcgPayload,
             },
         })
 
-        // 2) audit that PCG accepted the update
         await prisma.submissionEvent.create({
             data: {
                 submissionId: v.submissionId,
@@ -329,7 +334,6 @@ export default function ReviewSubmission() {
 
     const [cached, setCached] = React.useState<File | null>(null)
 
-    // load cache on mount
     React.useEffect(() => {
         let alive = true
         void (async () => {
@@ -362,14 +366,37 @@ export default function ReviewSubmission() {
         defaultValue: initial,
     })
 
-    // — optional but useful client logs (no gating) —
+    // Recipient combo logic — initialize from initial.recipient
+    const initialIsKnown = React.useMemo(
+        () => RecipientOptions.some(o => o.value === initial.recipient),
+        [initial.recipient],
+    )
+    const [recipientMode, setRecipientMode] = React.useState<'list' | 'custom'>(initialIsKnown ? 'list' : 'custom')
+    const [selectedRecipient, setSelectedRecipient] = React.useState<string>(
+        initialIsKnown ? initial.recipient : '',
+    )
+    const [customRecipient, setCustomRecipient] = React.useState<string>(initialIsKnown ? '' : initial.recipient)
+
+    React.useEffect(() => {
+        const hidden = document.getElementById(fields.recipient.id) as HTMLInputElement | null
+        const val = recipientMode === 'list' ? selectedRecipient : customRecipient
+        setInputValue(hidden, val || '')
+    }, [recipientMode, selectedRecipient, customRecipient, fields.recipient.id])
+
+    const recipientHelp =
+        recipientMode === 'list' && selectedRecipient
+            ? `${RecipientOptions.find(o => o.value === selectedRecipient)?.label ?? ''} — ${selectedRecipient}`
+            : recipientMode === 'custom' && customRecipient
+                ? 'Custom OID'
+                : undefined
+
     function buildCurrentValues() {
         return {
             submissionId: submission.id,
             title: fields.title.value,
             authorType: fields.authorType.value,
             purposeOfSubmission: fields.purposeOfSubmission.value,
-            recipient: fields.recipient.value,
+            recipient: (document.getElementById(fields.recipient.id) as HTMLInputElement)?.value,
             providerId: fields.providerId.value,
             claimId: fields.claimId.value,
             caseId: fields.caseId.value,
@@ -387,7 +414,8 @@ export default function ReviewSubmission() {
     function diffObjects(a: any, b: any) {
         const out: Record<string, { before: any; after: any }> = {}
         const keys = new Set([...Object.keys(a || {}), ...Object.keys(b || {})])
-        for (const k of keys) if (JSON.stringify(a?.[k]) !== JSON.stringify(b?.[k])) out[k] = { before: a?.[k], after: b?.[k] }
+        for (const k of keys)
+            if (JSON.stringify(a?.[k]) !== JSON.stringify(b?.[k])) out[k] = { before: a?.[k], after: b?.[k] }
         return out
     }
 
@@ -400,11 +428,10 @@ export default function ReviewSubmission() {
             subtitle="Step 2 of 3"
             currentPath={`/customer/submissions/${submission.id}/review`}
         >
-            {/* Full-screen loading overlay while updating */}
             <LoadingOverlay
                 show={Boolean(isUpdating)}
-                title="Saving your updates…"
-                message="Please don't refresh or close this tab while we update the submission."
+                title="Updating submission…"
+                message="Hold tight while we push your changes to PCG."
             />
 
             <Drawer
@@ -415,7 +442,6 @@ export default function ReviewSubmission() {
                 size="fullscreen"
             >
                 <div className="space-y-8">
-                    {/* Banner */}
                     <div className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">
                         <strong>Heads up:</strong> Review and make any final changes to the submission metadata here. After you
                         upload the file in the next step, edits to metadata are disabled.
@@ -424,129 +450,171 @@ export default function ReviewSubmission() {
                     <Form
                         method="POST"
                         {...getFormProps(form)}
-                        className="space-y-6"
+                        className="space-y-8"
                         onSubmit={() => {
                             try {
                                 const initialObj = JSON.parse(initialJson)
                                 const current = buildCurrentValues()
-                                const pcgLikePayload = {
-                                    purpose_of_submission: current.purposeOfSubmission, // mapped on server
-                                    author_npi: availableNpis.find(n => n.id === current.providerId)?.npi,
-                                    author_type: current.authorType,
-                                    name: current.title,
-                                    esMD_claim_id: current.claimId ?? '',
-                                    esmd_case_id: current.caseId ?? '',
-                                    comments: current.comments ?? '',
-                                    intended_recepient: current.recipient,
-                                    auto_split: current.autoSplit === 'true',
-                                    bSendinX12: current.sendInX12 === 'true',
-                                    threshold: current.threshold,
-                                    document_set: [
-                                        {
-                                            name: current.doc_name,
-                                            split_no: current.doc_split_no,
-                                            filename: current.doc_filename,
-                                            document_type: current.doc_document_type,
-                                            attachmentControlNum: current.doc_attachment,
-                                        },
-                                    ],
-                                }
-                                const changes = diffObjects(initialObj, current)
-
-                            } catch (err) {
-                                console.warn('Submit logging failed:', err)
-                            }
+                                const _changes = diffObjects(initialObj, current)
+                            } catch {}
                         }}
                     >
                         <input type="hidden" name="intent" value="update-submission" />
                         <input type="hidden" name="submissionId" value={submission.id} />
                         <input type="hidden" name="_initial_json" value={initialJson} />
+                        {/* hidden recipient actual field */}
+                        <input {...getInputProps(fields.recipient, { type: 'hidden' })} />
 
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                            <Field
-                                labelProps={{children: 'Title *'}}
-                                inputProps={{...getInputProps(fields.title, {type: 'text'})}}
-                                errors={fields.title.errors}
-                            />
+                        {/* ===== Submission Details ===== */}
+                        <div className="rounded-lg border border-gray-200 bg-white p-4">
+                            <h3 className="text-base font-semibold text-gray-900 mb-4">Submission Details</h3>
 
-                            <SelectField
-                                labelProps={{children: 'Author Type *'}}
-                                selectProps={getSelectProps(fields.authorType)}
-                                errors={fields.authorType.errors}
-                            >
-                                {AuthorTypeEnum.options.map((a: string) => (
-                                    <option key={a} value={a}>
-                                        {formatEnum(a)}
-                                    </option>
-                                ))}
-                            </SelectField>
+                            <div className="grid grid-cols-1 md:grid-cols-12 gap-4">
+                                <div className="md:col-span-6">
+                                    <Field
+                                        labelProps={{ children: 'Title *' }}
+                                        inputProps={{ ...getInputProps(fields.title, { type: 'text' }) }}
+                                        errors={fields.title.errors}
+                                    />
+                                </div>
 
-                            <SelectField
-                                labelProps={{children: 'Purpose *'}}
-                                selectProps={getSelectProps(fields.purposeOfSubmission)}
-                                errors={fields.purposeOfSubmission.errors}
-                            >
-                                {SubmissionPurposeValues.map((p: string) => (
-                                    <option key={p} value={p}>
-                                        {formatEnum(p)}
-                                    </option>
-                                ))}
-                            </SelectField>
+                                <div className="md:col-span-6">
+                                    <SelectField
+                                        labelProps={{ children: 'Author Type *' }}
+                                        selectProps={getSelectProps(fields.authorType)}
+                                        errors={fields.authorType.errors}
+                                    >
+                                        {AuthorTypeEnum.options.map((a: string) => (
+                                            <option key={a} value={a}>
+                                                {formatEnum(a)}
+                                            </option>
+                                        ))}
+                                    </SelectField>
+                                </div>
 
-                            <Field
-                                labelProps={{children: 'Recipient (OID/code) *'}}
-                                inputProps={{...getInputProps(fields.recipient, {type: 'text'})}}
-                                errors={fields.recipient.errors}
-                            />
+                                <div className="md:col-span-6">
+                                    <SelectField
+                                        labelProps={{ children: 'Purpose *' }}
+                                        selectProps={getSelectProps(fields.purposeOfSubmission)}
+                                        errors={fields.purposeOfSubmission.errors}
+                                    >
+                                        {SubmissionPurposeValues.map((p: string) => (
+                                            <option key={p} value={p}>
+                                                {formatEnum(p)}
+                                            </option>
+                                        ))}
+                                    </SelectField>
+                                </div>
 
-                            <SelectField
-                                labelProps={{children: 'NPI *'}}
-                                selectProps={getSelectProps(fields.providerId)}
-                                errors={fields.providerId.errors}
-                            >
-                                {availableNpis.map((p: Npi) => (
-                                    <option key={p.id} value={p.id}>
-                                        {p.npi}
-                                        {p.name ? ` - ${p.name}` : ''}
-                                    </option>
-                                ))}
-                            </SelectField>
+                                {/* Recipient combobox */}
+                                <div className="md:col-span-6">
+                                    <label className="block text-sm font-medium text-gray-700">Recipient *</label>
+                                    <div className="mt-1 flex gap-2">
+                                        <select
+                                            value={recipientMode}
+                                            onChange={e => setRecipientMode(e.target.value as 'list' | 'custom')}
+                                            className="w-36 rounded-md border border-gray-300 bg-white py-2 px-2 text-sm text-gray-900 focus:border-indigo-500 focus:outline-none focus:ring-indigo-500 shadow-sm"
+                                        >
+                                            <option value="list">Pick</option>
+                                            <option value="custom">Custom</option>
+                                        </select>
 
-                            <Field
-                                labelProps={{children: 'Claim ID *'}}
-                                inputProps={{...getInputProps(fields.claimId, {type: 'text'})}}
-                                errors={fields.claimId.errors}
-                            />
-                            <Field
-                                labelProps={{children: 'Case ID'}}
-                                inputProps={{...getInputProps(fields.caseId, {type: 'text'}), maxLength: 32}}
-                                errors={fields.caseId.errors}
-                            />
+                                        {recipientMode === 'list' ? (
+                                            <select
+                                                value={selectedRecipient}
+                                                onChange={e => setSelectedRecipient(e.target.value)}
+                                                className="flex-1 rounded-md border border-gray-300 bg-white py-2 pl-3 pr-10 text-sm text-gray-900 focus:border-indigo-500 focus:outline-none focus:ring-indigo-500 shadow-sm"
+                                            >
+                                                <option value="" disabled>
+                                                    Select recipient
+                                                </option>
+                                                {RecipientOptions.map(opt => (
+                                                    <option key={opt.value} value={opt.value}>
+                                                        {opt.label}
+                                                    </option>
+                                                ))}
+                                            </select>
+                                        ) : (
+                                            <input
+                                                type="text"
+                                                value={customRecipient}
+                                                onChange={e => setCustomRecipient(e.target.value)}
+                                                placeholder="Enter OID (e.g., 2.16.840...)"
+                                                className="flex-1 rounded-md border border-gray-300 bg-white py-2 px-3 text-sm text-gray-900 focus:border-indigo-500 focus:outline-none focus:ring-indigo-500 shadow-sm"
+                                            />
+                                        )}
+                                    </div>
+                                    {recipientHelp ? <p className="mt-1 text-xs text-gray-500">{recipientHelp}</p> : null}
+                                    <ErrorList errors={fields.recipient.errors} id={`${fields.recipient.id}-errors`} />
+                                </div>
 
-                            <TextareaField
-                                labelProps={{children: 'Comments'}}
-                                textareaProps={{
-                                    ...getInputProps(fields.comments, {type: 'text'}),
-                                    rows: 3,
-                                    className: 'text-gray-900 placeholder-gray-400',
-                                }}
-                                errors={fields.comments.errors}
-                            />
+                                <div className="md:col-span-6">
+                                    <SelectField
+                                        labelProps={{ children: 'NPI *' }}
+                                        selectProps={getSelectProps(fields.providerId)}
+                                        errors={fields.providerId.errors}
+                                    >
+                                        {availableNpis.map((p: Npi) => (
+                                            <option key={p.id} value={p.id}>
+                                                {p.npi}
+                                                {p.name ? ` - ${p.name}` : ''}
+                                            </option>
+                                        ))}
+                                    </SelectField>
+                                </div>
 
-                            <SelectField
-                                labelProps={{children: 'Send in X12'}}
-                                selectProps={getSelectProps(fields.sendInX12)}
-                                errors={fields.sendInX12.errors}
-                            >
-                                <option value="false">False</option>
-                                <option value="true">True</option>
-                            </SelectField>
+                                <div className="md:col-span-6">
+                                    <Field
+                                        labelProps={{ children: 'Claim ID *' }}
+                                        inputProps={{ ...getInputProps(fields.claimId, { type: 'text' }) }}
+                                        errors={fields.claimId.errors}
+                                    />
+                                </div>
 
-                            <Field
-                                labelProps={{children: 'Threshold'}}
-                                inputProps={{...getInputProps(fields.threshold, {type: 'number'}), min: 1}}
-                                errors={fields.threshold.errors}
-                            />
+                                <div className="md:col-span-6">
+                                    <Field
+                                        labelProps={{ children: 'Case ID' }}
+                                        inputProps={{ ...getInputProps(fields.caseId, { type: 'text' }), maxLength: 32 }}
+                                        errors={fields.caseId.errors}
+                                    />
+                                </div>
+
+                                <div className="md:col-span-6">
+                                    <TextareaField
+                                        labelProps={{ children: 'Comments' }}
+                                        textareaProps={{
+                                            ...getInputProps(fields.comments, { type: 'text' }),
+                                            rows: 3,
+                                            className: 'text-gray-900 placeholder-gray-400',
+                                        }}
+                                        errors={fields.comments.errors}
+                                    />
+                                </div>
+
+                                <div className="md:col-span-6">
+                                    <SelectField
+                                        labelProps={{ children: 'Send in X12' }}
+                                        selectProps={getSelectProps(fields.sendInX12)}
+                                        errors={fields.sendInX12.errors}
+                                    >
+                                        <option value="false">False</option>
+                                        <option value="true">True</option>
+                                    </SelectField>
+                                </div>
+
+                                <div className="md:col-span-6">
+                                    <Field
+                                        labelProps={{ children: 'Threshold' }}
+                                        inputProps={{ ...getInputProps(fields.threshold, { type: 'number' }), min: 1 }}
+                                        errors={fields.threshold.errors}
+                                    />
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* ===== Document Metadata ===== */}
+                        <div className="rounded-lg border border-gray-200 bg-white p-4">
+                            <h3 className="text-base font-semibold text-gray-900 mb-4">Document Metadata</h3>
 
                             <FileDropzone
                                 label="File (metadata only in this step)"
@@ -567,59 +635,74 @@ export default function ReviewSubmission() {
                                 note="This does not upload the file yet. It only helps keep the metadata aligned."
                             />
 
-                            {/* Document metadata */}
-                            <Field
-                                labelProps={{children: 'Document Name *'}}
-                                inputProps={{...getInputProps(fields.doc_name, {type: 'text'})}}
-                                errors={fields.doc_name.errors}
-                            />
-                            <Field
-                                labelProps={{children: 'Filename (.pdf) *'}}
-                                inputProps={{...getInputProps(fields.doc_filename, {type: 'text'})}}
-                                errors={fields.doc_filename.errors}
-                            />
-                            <Field
-                                labelProps={{children: 'Split No'}}
-                                inputProps={{
-                                    ...getInputProps(fields.doc_split_no, {type: 'number'}),
-                                    min: 1,
-                                    defaultValue: 1
-                                }}
-                                errors={fields.doc_split_no.errors}
-                            />
+                            <div className="mt-4 grid grid-cols-1 md:grid-cols-12 gap-4">
+                                <div className="md:col-span-6">
+                                    <Field
+                                        labelProps={{ children: 'Document Name *' }}
+                                        inputProps={{ ...getInputProps(fields.doc_name, { type: 'text' }) }}
+                                        errors={fields.doc_name.errors}
+                                    />
+                                </div>
 
-                            <input type="hidden" name="doc_document_type" value="pdf"/>
-                            <Field
-                                labelProps={{ children: 'Document Type' }}
-                                inputProps={{
-                                    id: fields.doc_document_type.id, // keep id for label "for" link
-                                    type: 'text',
-                                    value: 'pdf',
-                                    readOnly: true,
-                                }}
-                            />
-                            <Field
-                                labelProps={{children: 'Attachment Control Number *'}}
-                                inputProps={{...getInputProps(fields.doc_attachment, {type: 'text'})}}
-                                errors={fields.doc_attachment.errors}
-                            />
+                                <div className="md:col-span-6">
+                                    <Field
+                                        labelProps={{ children: 'Filename (.pdf) *' }}
+                                        inputProps={{ ...getInputProps(fields.doc_filename, { type: 'text' }) }}
+                                        errors={fields.doc_filename.errors}
+                                    />
+                                </div>
 
-                            <SelectField
-                                labelProps={{children: 'Auto Split (150–300 MB)'}}
-                                selectProps={getSelectProps(fields.autoSplit)}
-                                errors={fields.autoSplit.errors}
-                            >
-                                <option value="false">False</option>
-                                <option value="true">True</option>
-                            </SelectField>
+                                <div className="md:col-span-6">
+                                    <Field
+                                        labelProps={{ children: 'Split No' }}
+                                        inputProps={{
+                                            ...getInputProps(fields.doc_split_no, { type: 'number' }),
+                                            min: 1,
+                                            defaultValue: 1,
+                                        }}
+                                        errors={fields.doc_split_no.errors}
+                                    />
+                                </div>
+
+                                <input type="hidden" name="doc_document_type" value="pdf" />
+                                <div className="md:col-span-6">
+                                    <Field
+                                        labelProps={{ children: 'Document Type' }}
+                                        inputProps={{
+                                            id: fields.doc_document_type.id,
+                                            type: 'text',
+                                            value: 'pdf',
+                                            readOnly: true,
+                                        }}
+                                    />
+                                </div>
+
+                                <div className="md:col-span-6">
+                                    <Field
+                                        labelProps={{ children: 'Attachment Control Number *' }}
+                                        inputProps={{ ...getInputProps(fields.doc_attachment, { type: 'text' }) }}
+                                        errors={fields.doc_attachment.errors}
+                                    />
+                                </div>
+
+                                <div className="md:col-span-6">
+                                    <SelectField
+                                        labelProps={{ children: 'Auto Split (150–300 MB)' }}
+                                        selectProps={getSelectProps(fields.autoSplit)}
+                                        errors={fields.autoSplit.errors}
+                                    >
+                                        <option value="false">False</option>
+                                        <option value="true">True</option>
+                                    </SelectField>
+                                </div>
+                            </div>
                         </div>
 
-                        {/* Update guard banner + toggle */}
-                        <div className="mt-4 rounded-md border border-blue-200 bg-blue-50 p-3 text-sm text-blue-900">
+                        <div className="mt-1 rounded-md border border-blue-200 bg-blue-50 p-3 text-sm text-blue-900">
                             Select <strong>Yes</strong> below to show the <strong>Update Submission</strong> button, which is hidden by
                             default to prevent accidental calls to the “Update Submission” API.
                         </div>
-                        <div className="pt-3">
+                        <div className="pt-1">
                             <label className="block text-sm font-medium text-gray-700 mb-1">Need to update submission?</label>
                             <select
                                 value={wantsUpdate}
@@ -631,7 +714,7 @@ export default function ReviewSubmission() {
                             </select>
                         </div>
 
-                        <div className="flex items-center justify-between pt-4 border-t">
+                        <div className="flex items-center justify-between">
                             {wantsUpdate === 'yes' ? (
                                 <StatusButton
                                     type="submit"

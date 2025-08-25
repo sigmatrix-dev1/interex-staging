@@ -215,15 +215,7 @@ function App() {
 						<nav className="flex flex-wrap items-center justify-between gap-4 sm:flex-nowrap md:gap-8">
 							<Logo />
 
-							<div className="flex items-center gap-10">
-								{user ? (
-									<UserDropdown />
-								) : (
-									<Button asChild variant="default" size="lg">
-										<Link to="/login">Log In</Link>
-									</Button>
-								)}
-							</div>
+
 							<div className="block w-full sm:hidden">{searchBar}</div>
 						</nav>
 					</header>
@@ -233,13 +225,6 @@ function App() {
 					<Outlet />
 				</div>
 
-				{/* Only show footer on marketing/public pages */}
-				{!isAppPage && currentPath !== '/login' && (
-					<div className="container flex justify-between pb-5">
-						<Logo />
-						<ThemeSwitch userPreference={data.requestInfo.userPrefs.theme} />
-					</div>
-				)}
 
 			</div>
 			<EpicToaster closeButton position="top-right" theme={theme} />

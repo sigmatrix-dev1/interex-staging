@@ -166,8 +166,13 @@ export function InterexHeader({
           <div className="flex justify-between h-16">
             <div className="flex">
               <div className="flex-shrink-0 flex items-center">
-                <Link to="/" className="text-xl font-bold text-blue-600">
-                  Interex
+                <Link to="/" className="group grid leading-snug text-xl font-bold text-blue-600">
+                  <span className="font-bold text-2xl transition group-hover:translate-x-1 transition-colors: text-blue-900">
+				        InterEx
+                  </span>
+                    <span className="font-medium text-sm transition group-hover:translate-x-1 transition-colors: text-blue-900">
+				        InterOperability Exchange
+			        </span>
                 </Link>
               </div>
               <div className="hidden sm:ml-6 sm:flex sm:space-x-8">
