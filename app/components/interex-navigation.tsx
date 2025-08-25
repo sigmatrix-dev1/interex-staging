@@ -54,8 +54,8 @@ export function InterexNavigation({ user, currentPath }: InterexNavigationProps)
         description: 'Manage provider NPIs'
       },
       {
-        name: 'Provider Management',
-        href: '/customer/providers',
+        name: 'Provider & eMDR Management',
+        href: '/customer/providers-emdr-management',
         icon: 'building',
         description: 'Manage providers (org-wide)'
       },

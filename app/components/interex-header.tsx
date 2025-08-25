@@ -76,16 +76,10 @@ export function InterexHeader({
         description: 'Manage provider NPIs'
       },
         {
-          name: 'Provider Management',
-          href: '/customer/providers',
+          name: 'Provider & eMDR Management',
+          href: '/customer/providers-emdr-management',
           icon: 'id-card',
           description: 'Manage providers (org-wide)'
-        },
-        {
-          name: 'eMDR',
-          href: '/customer/emdr',
-          icon: 'mail',
-          description: 'Manage eMDR workflows'
         },
         {
           name: 'Letters',

@@ -221,3 +221,66 @@ export async function pcgAddProviderNpi(input: { providerNPI: string; customerNa
     // Expected: { errorList: [], id: "73959", status: "NPI 123... Successfully added to the system" }
     return data as { errorList: any[]; id: string; status: string }
 }
+
+// --- Provider Management (eMDR) ---------------------------------------------
+
+export type PcgProviderListItem = {
+    errorList: any[] | null
+    providerNPI: string
+    last_submitted_transaction: string | null
+    status_changes: any[]
+    registered_for_emdr: boolean
+    provider_street: string | null
+    registered_for_emdr_electronic_only: boolean
+    provider_state: string | null
+    stage: string | null
+    notificationDetails: any[]
+    transaction_id_list: any[] | null
+    reg_status: string | null
+    provider_id: string
+    provider_city: string | null
+    provider_zip: string | null
+    provider_name: string | null
+    submission_status: string | null
+    errors: any[]
+    provider_street2: string | null
+    esMDTransactionID: string | null
+    status: string | null
+}
+
+export type PcgProviderListResponse = {
+    listResponseModel: PcgProviderListItem[]
+    totalResultCount: number
+    totalPages: number
+    pageSize: number
+    page: number
+}
+
+/** GET /pcgfhir/hih/api/providers */
+export async function pcgGetProviders(params?: { page?: number; pageSize?: number }) {
+    const qs = new URLSearchParams()
+    if (params?.page) qs.set('page', String(params.page))
+    if (params?.pageSize) qs.set('pageSize', String(params.pageSize))
+
+    const url = `${PCG_ENV.BASE_URL}/providers${qs.toString() ? `?${qs.toString()}` : ''}`
+
+    const res = await callPcg(url, {
+        method: 'GET',
+        headers: { 'Content-Type': 'application/json' },
+    })
+
+    const text = await res.text()
+    let data: any = null
+    try {
+        data = text ? JSON.parse(text) : null
+    } catch {
+        data = text
+    }
+
+    if (!res.ok) {
+        if (typeof data === 'object' && (data as any)?.message) throw new Error((data as any).message)
+        throw new Error(`PCG providers list failed (${res.status}): ${(text as any)?.slice?.(0, 500) || 'Unknown error'}`)
+    }
+
+    return data as PcgProviderListResponse
+}

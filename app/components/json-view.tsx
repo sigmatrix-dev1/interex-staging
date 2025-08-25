@@ -13,8 +13,15 @@ export function JsonViewer({ data }: { data: unknown }) {
                 {open ? 'Hide details' : 'View details'}
             </button>
             {open ? (
-                <pre className="mt-2 overflow-auto rounded bg-gray-50 p-2 text-xs text-gray-800">
-{JSON.stringify(data, null, 2)}
+                <pre
+                    className="
+            mt-2 rounded bg-gray-50 p-3 text-xs text-gray-800
+            whitespace-pre-wrap break-words
+            max-h-96 overflow-auto
+            w-full min-w-[40rem] max-w-[80vw]
+          "
+                >
+          {JSON.stringify(data, null, 2)}
         </pre>
             ) : null}
         </div>
