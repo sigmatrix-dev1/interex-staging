@@ -48,7 +48,11 @@ const SS_KEY = 'esmdVaultKey.v1'
 function bufToB64(buf: ArrayBuffer) {
     const bytes = new Uint8Array(buf)
     let str = ''
-    for (let i = 0; i < bytes.length; i++) str += String.fromCharCode(bytes[i])
+    for (let i = 0; i < bytes.length; i++) {
+        // With noUncheckedIndexedAccess, bytes[i] is number | undefined.
+        // We know it's in-bounds due to the loop condition.
+        str += String.fromCharCode(bytes[i]!)
+    }
     return btoa(str)
 }
 function b64ToBuf(b64: string) {
@@ -88,7 +92,13 @@ export async function vaultPut(key: string, file: File): Promise<void> {
     const store = tx.objectStore(STORE)
     const plain = await file.arrayBuffer()
     const { iv, bytes } = await encrypt(plain)
-    const rec: StoredRecord = { iv, bytes, type: file.type, name: file.name, lastModified: Number(file.lastModified ?? Date.now()) }
+    const rec: StoredRecord = {
+        iv,
+        bytes,
+        type: file.type,
+        name: file.name,
+        lastModified: Number(file.lastModified ?? Date.now()),
+    }
     await idbReq(store.put(rec, key))
     safeCommit(tx)
     db.close()
@@ -132,8 +142,9 @@ export async function vaultListKeys(prefix?: string): Promise<string[]> {
     const db = await openDB()
     const tx = db.transaction(STORE, 'readonly')
     const store = tx.objectStore(STORE)
-    const keys = (await idbReq(store.getAllKeys())) as string[]
+    const keys = (await idbReq(store.getAllKeys())) as IDBValidKey[]
     safeCommit(tx)
     db.close()
-    return prefix ? keys.filter(k => k.startsWith(prefix)) : keys
+    const asStrings = keys.map(k => String(k))
+    return prefix ? asStrings.filter(k => k.startsWith(prefix)) : asStrings
 }

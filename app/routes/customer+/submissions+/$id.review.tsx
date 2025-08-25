@@ -15,10 +15,12 @@ import {
     type ActionFunctionArgs,
 } from 'react-router'
 import { z } from 'zod'
+import { FileDropzone } from '#app/components/file-dropzone.tsx'
 import { Field, SelectField, TextareaField, ErrorList } from '#app/components/forms.tsx'
 import { InterexLayout } from '#app/components/interex-layout.tsx'
 import { SubmissionActivityLog } from '#app/components/submission-activity-log.tsx'
 import { Drawer } from '#app/components/ui/drawer.tsx'
+import { LoadingOverlay } from '#app/components/ui/loading-overlay.tsx'
 import { StatusButton } from '#app/components/ui/status-button.tsx'
 import {
     SubmissionPurposeValues,
@@ -31,8 +33,6 @@ import { buildCreateSubmissionPayload, pcgUpdateSubmission } from '#app/services
 import { requireUserId } from '#app/utils/auth.server.ts'
 import { prisma } from '#app/utils/db.server.ts'
 import { redirectWithToast } from '#app/utils/toast.server.ts'
-import { LoadingOverlay } from '#app/components/ui/loading-overlay.tsx'
-import { FileDropzone } from '#app/components/file-dropzone.tsx'
 import { draftKey, moveCachedFile, subKey, getCachedFile, setCachedFile } from '#app/utils/file-cache.ts'
 
 type PcgEvent = { kind?: string; payload?: any }
@@ -345,12 +345,16 @@ export default function ReviewSubmission() {
         if (hidden) hidden.value = val || ''
     }, [recipientMode, selectedRecipient, customRecipient, fields.recipient?.id])
 
-    const recipientHelp =
-        recipientMode === 'list' && selectedRecipient
-            ? `${RecipientOptions.find(o => o.value === selectedRecipient)?.label ?? ''} — ${selectedRecipient}`
-            : recipientMode === 'custom' && customRecipient
-                ? 'Custom OID'
-                : undefined
+    // Avoid showing the OID twice in the help line
+    const recipientHelp = React.useMemo(() => {
+        if (recipientMode === 'list' && selectedRecipient) {
+            const opt = RecipientOptions.find(o => o.value === selectedRecipient)
+            if (!opt) return undefined
+            return opt.label.includes(opt.value) ? opt.label : `${opt.label} — ${opt.value}`
+        }
+        if (recipientMode === 'custom' && customRecipient) return 'Custom OID'
+        return undefined
+    }, [recipientMode, selectedRecipient, customRecipient])
 
     const [splitKind, setSplitKind] = React.useState<'manual' | 'auto'>(initial.splitKind as 'manual' | 'auto')
     const [docCount, setDocCount] = React.useState<number>(Math.max(1, initialDocs?.length ?? 1))
@@ -370,7 +374,7 @@ export default function ReviewSubmission() {
     const [dzReset, setDzReset] = React.useState<Record<number, number>>({})
     const [initialFiles, setInitialFiles] = React.useState<Record<number, File | null>>({})
 
-    // New: document metadata controlled state (seeded from initialDocs)
+    // Document metadata state (seeded from initialDocs)
     type DocMeta = { name: string; filename: string; attachmentControlNum: string }
     const [docMeta, setDocMeta] = React.useState<Record<number, DocMeta>>(() => {
         const seed: Record<number, DocMeta> = {}
@@ -380,7 +384,7 @@ export default function ReviewSubmission() {
             seed[i] = {
                 name: preset.name || '',
                 filename: preset.filename || '',
-                attachmentControlNum: preset.attachmentControlNum || DEFAULT_ACN_HINT,
+                attachmentControlNum: preset.attachmentControlNum || '',
             }
         }
         return seed
@@ -402,7 +406,7 @@ export default function ReviewSubmission() {
 
     function updateDocMeta(i: number, patch: Partial<DocMeta>) {
         setDocMeta(prev => {
-            const base = prev[i] ?? { name: '', filename: '', attachmentControlNum: DEFAULT_ACN_HINT }
+            const base = prev[i] ?? { name: '', filename: '', attachmentControlNum: '' }
             const next = { ...base, ...patch }
             const merged = { ...prev, [i]: next }
             setDocChanged(p => ({ ...p, [i]: hasChanged(i, next) }))
@@ -412,7 +416,7 @@ export default function ReviewSubmission() {
 
     function titleCaseFrom(filename: string) {
         const base = filename.replace(/\.pdf$/i, '').replace(/[_-]+/g, ' ').trim()
-        return base.replace(/\w\S*/g, w => w[0].toUpperCase() + w.slice(1))
+        return base.replace(/\w\S*/g, w => w.charAt(0).toUpperCase() + w.slice(1))
     }
 
     // Move draft cache -> submission cache on first load if ?draft= is present
@@ -437,7 +441,7 @@ export default function ReviewSubmission() {
                     setDocPicked(p => ({ ...p, [i]: true }))
                     // if filename empty, seed from cache
                     setDocMeta(prev => {
-                        const base = prev[i] ?? { name: '', filename: '', attachmentControlNum: DEFAULT_ACN_HINT }
+                        const base = prev[i] ?? { name: '', filename: '', attachmentControlNum: '' }
                         const seeded = { ...base }
                         if (!seeded.filename) seeded.filename = f.name
                         if (!seeded.name) seeded.name = titleCaseFrom(f.name)
@@ -490,13 +494,12 @@ export default function ReviewSubmission() {
         }
 
         // Update UI first (non-blocking)
-        console.log('picked file (review)', { idx, name: file.name, size: file.size })
         setDropErrors(prev => ({ ...prev, [idx]: '' }))
         setDocPicked(prev => ({ ...prev, [idx]: true }))
         setDocSizes(prev => ({ ...prev, [idx]: file.size }))
         setInitialFiles(prev => ({ ...prev, [idx]: file }))
 
-        const base = docMeta[idx] ?? { name: '', filename: '', attachmentControlNum: DEFAULT_ACN_HINT }
+        const base = docMeta[idx] ?? { name: '', filename: '', attachmentControlNum: '' }
         const next = {
             filename: file.name,
             name: base.name ? base.name : titleCaseFrom(file.name),
@@ -523,7 +526,7 @@ export default function ReviewSubmission() {
                     sizes[i] = f.size
                     setDocPicked(prev => ({ ...prev, [i]: true }))
                     setDocMeta(prev => {
-                        const base = prev[i] ?? { name: '', filename: '', attachmentControlNum: DEFAULT_ACN_HINT }
+                        const base = prev[i] ?? { name: '', filename: '', attachmentControlNum: '' }
                         const seeded = { ...base }
                         if (!seeded.filename) seeded.filename = f.name
                         if (!seeded.name) seeded.name = titleCaseFrom(f.name)
@@ -538,6 +541,32 @@ export default function ReviewSubmission() {
         })()
     }, [docCount, submission.id])
 
+    // -------- Client-side validation before submit (alerts) --------
+    function validateBeforeSubmit(): boolean {
+        const errs: string[] = []
+        const count = splitKind === 'manual' ? Number(docCount || 0) : 1
+
+        if (!splitKind) errs.push('Select a Split kind.')
+        if (splitKind === 'manual' && !docCount) errs.push('Select the Number of documents.')
+
+        for (let i = 1; i <= count; i++) {
+            const m = docMeta[i] ?? { name: '', filename: '', attachmentControlNum: '' }
+            if (!m.name.trim()) errs.push(`Document #${i}: “Document Name” is required.`)
+            if (!m.filename.trim()) errs.push(`Document #${i}: “Filename” is required.`)
+            else if (!/\.pdf$/i.test(m.filename.trim())) errs.push(`Document #${i}: “Filename” must end with .pdf.`)
+            if (!m.attachmentControlNum.trim()) {
+                errs.push(`Document #${i}: “Attachment Control Number” is required.`)
+            }
+            if (dropErrors[i]) errs.push(`Document #${i}: ${dropErrors[i]}`)
+        }
+
+        if (errs.length) {
+            window.alert(`Please fix the following issues before updating:\n\n• ${errs.join('\n• ')}`)
+            return false
+        }
+        return true
+    }
+
     return (
         <InterexLayout user={user} title="Review & Update" subtitle="Step 2 of 3" currentPath={`/customer/submissions/${submission.id}/review`}>
             <LoadingOverlay show={Boolean(isUpdating)} title="Updating submission…" message="Hold tight while we push your changes to PCG." />
@@ -548,7 +577,14 @@ export default function ReviewSubmission() {
                         <strong>Heads up:</strong> Review and make any final changes to the submission metadata here. After you upload the file(s) in the next step, edits to metadata are disabled.
                     </div>
 
-                    <Form method="POST" {...getFormProps(form)} className="space-y-8">
+                    <Form
+                        method="POST"
+                        {...getFormProps(form)}
+                        className="space-y-8"
+                        onSubmit={e => {
+                            if (!validateBeforeSubmit()) e.preventDefault()
+                        }}
+                    >
                         <input type="hidden" name="intent" value="update-submission" />
                         <input type="hidden" name="submissionId" value={submission.id} />
                         <input type="hidden" name="_initial_json" value={initialJson} />
@@ -666,7 +702,7 @@ export default function ReviewSubmission() {
                             </div>
                         </div>
 
-                        {/* ===== Split Settings (highlight) ===== */}
+                        {/* ===== Split Settings ===== */}
                         <div className="rounded-lg border border-indigo-200 bg-indigo-50 p-4">
                             <h4 className="text-sm font-semibold text-indigo-900 mb-3">Split Settings</h4>
                             <div className="grid grid-cols-1 md:grid-cols-12 gap-4">
@@ -720,27 +756,15 @@ export default function ReviewSubmission() {
                   <span className="inline-block rounded px-2 py-0.5 ring-1 ring-emerald-300 bg-emerald-50 text-emerald-700">
                     Total: {totalSizeMB.toFixed(1)} / 300 MB
                   </span>
-
                                 </div>
                             </div>
 
                             {Array.from({ length: splitKind === 'manual' ? docCount : 1 }).map((_, idx) => {
                                 const i = idx + 1
-                                const meta = docMeta[i] ?? { name: '', filename: '', attachmentControlNum: DEFAULT_ACN_HINT }
-                                const ok = Boolean((docPicked[i] || docChanged[i]) && !dropErrors[i])
-                                const borderColor = ok ? 'border-emerald-500' : 'border-rose-400'
+                                const meta = docMeta[i] ?? { name: '', filename: '', attachmentControlNum: '' }
                                 return (
-                                    <div key={i} className={`mb-4 rounded-md border ${borderColor} p-3 transition-colors`}>
-                                        <div className="mb-2 flex items-center justify-between">
-                                            <div className="text-sm font-medium text-gray-700">Document #{i}</div>
-                                            <div
-                                                className={`text-xs rounded px-2 py-0.5 ring-1 ${
-                                                    ok ? 'bg-emerald-50 text-emerald-700 ring-emerald-300' : 'bg-rose-50 text-rose-700 ring-rose-300'
-                                                }`}
-                                            >
-                                                {ok ? 'Updated and/or file added' : 'Not updated / no file'}
-                                            </div>
-                                        </div>
+                                    <div key={i} className="mb-4 rounded-md border border-gray-200 p-3">
+                                        <div className="mb-2 text-sm font-medium text-gray-700">Document #{i}</div>
 
                                         <FileDropzone
                                             key={`dz-${i}-${dzReset[i] ?? 0}`}
@@ -800,6 +824,7 @@ export default function ReviewSubmission() {
                                                     value={meta.attachmentControlNum}
                                                     onChange={e => updateDocMeta(i, { attachmentControlNum: e.currentTarget.value })}
                                                     className="mt-1 block w-full rounded-md border border-gray-300 bg-white py-2 px-3 text-sm"
+                                                    placeholder={DEFAULT_ACN_HINT}
                                                 />
                                             </div>
 

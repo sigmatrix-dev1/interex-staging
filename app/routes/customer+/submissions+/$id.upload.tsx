@@ -17,13 +17,14 @@ import { z } from 'zod'
 import { InterexLayout } from '#app/components/interex-layout.tsx'
 import { SubmissionActivityLog } from '#app/components/submission-activity-log.tsx'
 import { Drawer } from '#app/components/ui/drawer.tsx'
+import { LoadingOverlay } from '#app/components/ui/loading-overlay.tsx'
 import { StatusButton } from '#app/components/ui/status-button.tsx'
 import { pcgUploadFiles, pcgGetStatus } from '#app/services/pcg-hih.server.ts'
 import { requireUserId } from '#app/utils/auth.server.ts'
 import { prisma } from '#app/utils/db.server.ts'
-import { redirectWithToast } from '#app/utils/toast.server.ts'
-import { LoadingOverlay } from '#app/components/ui/loading-overlay.tsx'
 import { getCachedFile, subKey } from '#app/utils/file-cache.ts'
+import { redirectWithToast } from '#app/utils/toast.server.ts'
+import { FileDropzone } from '#app/components/file-dropzone.tsx'
 
 type PcgEvent = { kind?: string; payload?: any }
 type PcgStageSource = { responseMessage?: string | null; events?: PcgEvent[] | any[] }
@@ -259,8 +260,10 @@ export default function UploadSubmission() {
     const location = useLocation()
     const isUploading = nav.formData?.get('intent') === 'upload-file'
 
-    // Hidden input which we populate from cache so the action receives real File objects
-    const inputRef = React.useRef<HTMLInputElement | null>(null)
+    // One dropzone per expected filename. We keep live state of picked files so we can validate.
+    const [pickedFiles, setPickedFiles] = React.useState<Array<File | null>>(
+        () => expectedFilenames.map(() => null),
+    )
 
     const [mismatch, setMismatch] = React.useState<string[]>([])
     const [missing, setMissing] = React.useState<string[]>([])
@@ -268,42 +271,50 @@ export default function UploadSubmission() {
     const [perFileTooBig, setPerFileTooBig] = React.useState<string[]>([])
     const [ready, setReady] = React.useState(false)
 
-    async function rebuildFromCache() {
-        setReady(false)
-        const dt = new DataTransfer()
+    function recomputeValidations(nextFiles: Array<File | null>) {
         const BYTES_PER_MB = 1024 * 1024
         const mism: string[] = []
         const miss: string[] = []
         const tooBig: string[] = []
         let totalMB = 0
 
-        // keep order by expectedFilenames
         for (let i = 0; i < expectedFilenames.length; i++) {
             const expected = expectedFilenames[i]
-            const f = await getCachedFile(subKey(submission.id, i + 1))
+            const f = nextFiles[i]
             if (!f) {
                 miss.push(`#${i + 1} — ${expected}`)
                 continue
             }
             if (f.name !== expected) {
-                mism.push(`#${i + 1}: cached "${f.name}" ≠ expected "${expected}"`)
+                mism.push(`#${i + 1}: selected "${f.name}" ≠ expected "${expected}"`)
             }
             const mb = f.size / BYTES_PER_MB
             if (mb > 150) tooBig.push(`${f.name} (${mb.toFixed(1)} MB)`)
             totalMB += mb
-            dt.items.add(f) // NOTE: we intentionally do not rename; enforce exact match via alert
         }
 
-        if (inputRef.current) inputRef.current.files = dt.files
         setMismatch(mism)
         setMissing(miss)
         setPerFileTooBig(tooBig)
         setPickedTotalMB(totalMB)
+    }
+
+    async function rebuildFromCache() {
+        setReady(false)
+        const next: Array<File | null> = []
+        for (let i = 0; i < expectedFilenames.length; i++) {
+            // position keys are 1-based in cache
+            const f = await getCachedFile(subKey(submission.id, i + 1))
+            next.push(f ?? null)
+        }
+        setPickedFiles(next)
+        recomputeValidations(next)
         setReady(true)
     }
 
+    // load initial from cache; mark as intentionally ignored promise
     React.useEffect(() => {
-        rebuildFromCache()
+        void rebuildFromCache()
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [location.key])
 
@@ -316,26 +327,59 @@ export default function UploadSubmission() {
 
     return (
         <InterexLayout user={user} title="Upload & Submit" subtitle="Step 3 of 3" currentPath={`/customer/submissions/${submission.id}/upload`}>
-            <LoadingOverlay show={Boolean(isUploading)} title="Uploading your files…" message="Please don't refresh or close this tab while we upload and submit your documents." />
+            <LoadingOverlay
+                show={Boolean(isUploading)}
+                title="Uploading your files…"
+                message="Please don't refresh or close this tab while we upload and submit your documents."
+            />
 
-            <Drawer key={`drawer-upload-${submission.id}`} isOpen onClose={() => navigate('/customer/submissions')} title={`Upload for: ${submission.title}`} size="fullscreen">
+            <Drawer
+                key={`drawer-upload-${submission.id}`}
+                isOpen
+                onClose={() => navigate('/customer/submissions')}
+                title={`Upload for: ${submission.title}`}
+                size="fullscreen"
+            >
                 <div className="space-y-8">
                     <div className="rounded-md bg-gray-50 p-4 text-sm text-gray-700">
-                        <p>We’ve pulled your files from the secure cache. Review and submit.</p>
+                        <p>We’ve pulled your files from the secure cache. You can review, replace, or attach them here, then submit.</p>
                         <div className="mt-2">
                             <strong>Expected filenames ({expectedFilenames.length}):</strong>
                             <ul className="mt-1 list-disc list-inside font-mono text-xs text-gray-700">
-                                {expectedFilenames.map(n => (<li key={n}>{n}</li>))}
+                                {expectedFilenames.map(n => <li key={n}>{n}</li>)}
                             </ul>
                         </div>
                         <p className="mt-1 text-xs text-gray-500">Only PDF. Each ≤ 150 MB. Total ≤ 300 MB.</p>
                     </div>
 
-                    {/* Hidden form that includes the cached files */}
+                    {/* Upload form with one dropzone per expected file */}
                     <Form method="POST" encType="multipart/form-data" className="space-y-4">
                         <input type="hidden" name="intent" value="upload-file" />
                         <input type="hidden" name="submissionId" value={submission.id} />
-                        <input ref={inputRef} name="files" type="file" multiple className="hidden" />
+
+                        <div className="space-y-4">
+                            {expectedFilenames.map((expected, idx) => (
+                                <div key={`${expected}-${idx}`} className="rounded-md border border-gray-200 bg-white p-3">
+                                    <div className="mb-2 text-sm text-gray-700">
+                                        <span className="font-medium">Document #{idx + 1}</span>{' '}
+                                        <span className="font-mono text-xs text-gray-600">(must be named exactly: {expected})</span>
+                                    </div>
+                                    <FileDropzone
+                                        name="files"
+                                        label="Attach PDF"
+                                        accept="application/pdf"
+                                        note={<span className="text-xs">Expected: <code className="font-mono">{expected}</code></span>}
+                                        initialFile={pickedFiles[idx] ?? null}
+                                        onPick={(f) => {
+                                            const next = [...pickedFiles]
+                                            next[idx] = f
+                                            setPickedFiles(next)
+                                            recomputeValidations(next)
+                                        }}
+                                    />
+                                </div>
+                            ))}
+                        </div>
 
                         {/* Alerts */}
                         {(mismatch.length || missing.length || perFileTooBig.length || pickedTotalMB > 300) ? (
@@ -343,11 +387,10 @@ export default function UploadSubmission() {
                                 <div className="font-semibold mb-1">Please fix the following before submitting:</div>
                                 {missing.length ? (
                                     <div className="mb-2">
-                                        <div className="font-medium">Missing files from cache:</div>
+                                        <div className="font-medium">Missing files:</div>
                                         <ul className="list-disc list-inside">
                                             {missing.map((m, i) => <li key={`miss-${i}`}>{m}</li>)}
                                         </ul>
-                                        <div className="mt-1 text-xs">Go back to <strong>Step 2</strong>, attach the missing file(s), and press <em>Update Submission</em>.</div>
                                     </div>
                                 ) : null}
                                 {mismatch.length ? (
@@ -356,7 +399,9 @@ export default function UploadSubmission() {
                                         <ul className="list-disc list-inside">
                                             {mismatch.map((m, i) => <li key={`mism-${i}`}>{m}</li>)}
                                         </ul>
-                                        <div className="mt-1 text-xs">In <strong>Step 2</strong> ensure the <code>Filename</code> field matches the attached file’s name (or vice versa). The server requires exact matches.</div>
+                                        <div className="mt-1 text-xs">
+                                            Ensure the selected file’s name matches exactly the expected filename shown above.
+                                        </div>
                                     </div>
                                 ) : null}
                                 {perFileTooBig.length ? (
@@ -369,24 +414,35 @@ export default function UploadSubmission() {
                                 ) : null}
                                 {pickedTotalMB > 300 ? <div>Total size {pickedTotalMB.toFixed(1)} MB exceeds 300 MB.</div> : null}
                                 <div className="mt-3">
-                                    <button type="button" onClick={rebuildFromCache}
-                                            className="rounded-md bg-white px-3 py-1.5 text-sm font-medium text-gray-900 ring-1 ring-gray-300 hover:bg-gray-50">
+                                    <button
+                                        type="button"
+                                        onClick={() => { void rebuildFromCache() }}
+                                        className="rounded-md bg-white px-3 py-1.5 text-sm font-medium text-gray-900 ring-1 ring-gray-300 hover:bg-gray-50"
+                                    >
                                         Refresh from cache
                                     </button>
                                 </div>
                             </div>
                         ) : (
                             <div className="rounded-md border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-800">
-                                All good! Cached files match the expected names. Total: {pickedTotalMB.toFixed(1)} / 300 MB.
+                                All good! Files match the expected names. Total: {pickedTotalMB.toFixed(1)} / 300 MB.
                             </div>
                         )}
 
                         <div className="flex items-center justify-between pt-4 border-t">
-                            <Link to={`/customer/submissions/${submission.id}/review`} className="rounded-md bg-white px-3 py-2 text-sm font-semibold text-gray-900 ring-1 ring-inset ring-gray-300 hover:bg-gray-50">
+                            <Link
+                                to={`/customer/submissions/${submission.id}/review`}
+                                className="rounded-md bg-white px-3 py-2 text-sm font-semibold text-gray-900 ring-1 ring-inset ring-gray-300 hover:bg-gray-50"
+                            >
                                 Back
                             </Link>
 
-                            <StatusButton type="submit" disabled={!canSubmit || isUploading} status={isUploading ? 'pending' : 'idle'} className="rounded-md bg-indigo-600 px-3 py-2 text-sm font-semibold text-white hover:bg-indigo-500">
+                            <StatusButton
+                                type="submit"
+                                disabled={!canSubmit || isUploading}
+                                status={isUploading ? 'pending' : 'idle'}
+                                className="rounded-md bg-indigo-600 px-3 py-2 text-sm font-semibold text-white hover:bg-indigo-500"
+                            >
                                 Upload & Submit
                             </StatusButton>
                         </div>
