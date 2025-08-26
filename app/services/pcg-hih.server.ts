@@ -284,3 +284,114 @@ export async function pcgGetProviders(params?: { page?: number; pageSize?: numbe
 
     return data as PcgProviderListResponse
 }
+
+/** PUT /pcgfhir/hih/api/provider  (Update provider details for an NPI) */
+export type PcgUpdateProviderPayload = {
+    provider_name: string
+    provider_npi: string
+    provider_street: string
+    provider_street2?: string
+    provider_city: string
+    provider_state: string
+    provider_zip: string
+}
+
+export async function pcgUpdateProvider(payload: PcgUpdateProviderPayload) {
+    const res = await callPcg(`${PCG_ENV.BASE_URL}/provider`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            ...payload,
+            provider_street2: payload.provider_street2 ?? '',
+        }),
+    })
+    const text = await res.text()
+    let data: any = null
+    try { data = text ? JSON.parse(text) : null } catch { data = text }
+
+    if (!res.ok) {
+        if (typeof data === 'object' && data?.message) throw new Error(data.message)
+        throw new Error(`PCG update provider failed (${res.status}): ${text?.slice?.(0, 500) || 'Unknown error'}`)
+    }
+
+    // { provider_status: "Provider Details Successfully Updated", errorList: [], provider_id: "73774" }
+    return data as { provider_status: string; errorList: any[]; provider_id: string }
+}
+
+
+/** Register or de-register a provider for eMDR.
+ *  POST /pcgfhir/hih/api/provider/{provider_id}
+ *  Body: { "register_with_emdr": boolean }
+ *  Returns: { registration_status: string, errorList: any[], provider_id: string }
+ */
+export async function pcgSetEmdrRegistration(providerId: string, registerWithEmdr: boolean) {
+    const url = `${PCG_ENV.BASE_URL}/provider/${encodeURIComponent(providerId)}`
+    const res = await callPcg(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ register_with_emdr: registerWithEmdr }),
+    })
+    const text = await res.text()
+    let data: any = null
+    try { data = text ? JSON.parse(text) : null } catch { data = text }
+    if (!res.ok) {
+        if (typeof data === 'object' && data?.message) throw new Error(data.message)
+        throw new Error(`PCG eMDR register/deregister failed (${res.status}): ${String(text).slice(0,500)}`)
+    }
+    return data as { registration_status: string; errorList: any[]; provider_id: string }
+}
+
+/** GET registration/deregistration status for a provider by provider_id.
+ *  GET /pcgfhir/hih/api/provider/{provider_id}
+ */
+export async function pcgGetProviderRegistration(providerId: string) {
+    const url = `${PCG_ENV.BASE_URL}/provider/${encodeURIComponent(providerId)}`
+    const res = await callPcg(url, { method: 'GET', headers: { 'Content-Type': 'application/json' } })
+    const text = await res.text()
+    let data: any = null
+    try { data = text ? JSON.parse(text) : null } catch { data = text }
+    if (!res.ok) {
+        if (typeof data === 'object' && data?.message) throw new Error(data.message)
+        throw new Error(`PCG get provider registration failed (${res.status}): ${String(text).slice(0,500)}`)
+    }
+    return data as {
+        providerNPI: string
+        errorList: any[]
+        status_changes: any[]
+        provider_street: string | null
+        call_error_description: string | null
+        provider_state: string | null
+        stage: string | null
+        transaction_id_list: string | null
+        reg_status: string | null
+        provider_id: string
+        provider_city: string | null
+        provider_zip: string | null
+        provider_name: string | null
+        call_error_code: string | null
+        submission_status: string | null
+        errors: any[]
+        provider_street2: string | null
+        status: string | null
+    }
+}
+
+/** Register a provider for Electronic-Only ADR (must already be registered for eMDR).
+ *  POST /pcgfhir/hih/api/provider/ProviderRegistrationForElectronicOnlyADR/{provider_id}
+ *  Returns: { errorList: [], registration_status: "Electronic Only Submitted", provider_id: "..." }
+ */
+export async function pcgSetElectronicOnly(providerId: string) {
+    const url = `${PCG_ENV.BASE_URL}/provider/ProviderRegistrationForElectronicOnlyADR/${encodeURIComponent(providerId)}`
+    const res = await callPcg(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+    })
+    const text = await res.text()
+    let data: any = null
+    try { data = text ? JSON.parse(text) : null } catch { data = text }
+    if (!res.ok) {
+        if (typeof data === 'object' && data?.message) throw new Error(data.message)
+        throw new Error(`PCG electronic-only ADR failed (${res.status}): ${String(text).slice(0,500)}`)
+    }
+    return data as { errorList: any[]; registration_status: string; provider_id: string }
+}

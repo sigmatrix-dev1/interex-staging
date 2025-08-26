@@ -62,9 +62,7 @@ model Note {
 
   images NoteImage[]
 
-  // non-unique foreign key
   @@index([ownerId])
-  // This helps our order by in the user search a LOT
   @@index([ownerId, updatedAt])
 }
 
@@ -79,7 +77,6 @@ model NoteImage {
   note   Note   @relation(fields: [noteId], references: [id], onDelete: Cascade, onUpdate: Cascade)
   noteId String
 
-  // non-unique foreign key
   @@index([noteId])
 }
 
@@ -112,15 +109,14 @@ model Session {
   user   User   @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: Cascade)
   userId String
 
-  // non-unique foreign key
   @@index([userId])
 }
 
 model Permission {
   id          String @id @default(cuid())
-  action      String // e.g. create, read, update, delete
-  entity      String // e.g. note, user, etc.
-  access      String // e.g. own or any
+  action      String
+  entity      String
+  access      String
   description String @default("")
 
   createdAt DateTime @default(now())
@@ -148,28 +144,13 @@ model Verification {
   id        String   @id @default(cuid())
   createdAt DateTime @default(now())
 
-  /// The type of verification, e.g. "email" or "phone"
-  type String
-
-  /// The thing we're trying to verify, e.g. a user's email or phone number
-  target String
-
-  /// The secret key used to generate the otp
-  secret String
-
-  /// The algorithm used to generate the otp
+  type      String
+  target    String
+  secret    String
   algorithm String
-
-  /// The number of digits in the otp
-  digits Int
-
-  /// The number of seconds the otp is valid for
-  period Int
-
-  /// The valid characters for the otp
-  charSet String
-
-  /// When it's safe to delete this verification
+  digits    Int
+  period    Int
+  charSet   String
   expiresAt DateTime?
 
   @@unique([target, type])
@@ -199,15 +180,15 @@ model Passkey {
   userId         String
   webauthnUserId String
   counter        BigInt
-  deviceType     String // 'singleDevice' or 'multiDevice'
+  deviceType     String
   backedUp       Boolean
-  transports     String? // Stored as comma-separated values
+  transports     String?
 
   @@index(userId)
 }
 
 // =============================================
-// CMS Interex User Management Models 
+// CMS Interex User Management Models
 // =============================================
 
 model Customer {
@@ -216,19 +197,17 @@ model Customer {
   description String  @default("")
   active      Boolean @default(true)
 
-  // Business Associate Agreement details (optional for now)
   baaNumber String?   @unique
   baaDate   DateTime?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  // Relationships
   users          User[]
   providerGroups ProviderGroup[]
   providers      Provider[]
   submissions    Submission[]
-  providerEvents ProviderEvent[] // <-- back-relation for ProviderEvent.customer
+  providerEvents ProviderEvent[]
 
   @@index([name])
 }
@@ -242,40 +221,48 @@ model ProviderGroup {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  // Belongs to a Customer
   customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
   customerId String
 
-  // Relationships
   users     User[]
   providers Provider[]
 
-  @@unique([customerId, name]) // Provider group names must be unique within a customer
+  @@unique([customerId, name])
   @@index([customerId])
 }
 
 model Provider {
   id     String  @id @default(cuid())
-  npi    String  @unique // National Provider Identifier (10-digit number)
+  npi    String  @unique
   name   String?
   active Boolean @default(true)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  // Belongs to a Customer and optionally to a ProviderGroup
   customer        Customer       @relation(fields: [customerId], references: [id], onDelete: Cascade)
   customerId      String
   providerGroup   ProviderGroup? @relation(fields: [providerGroupId], references: [id])
   providerGroupId String?
 
-  // Many-to-many with Users (users can be assigned multiple NPIs)
-  userNpis UserNpi[]
-
-  // Submissions for this provider
+  userNpis    UserNpi[]
   submissions Submission[]
+  events      ProviderEvent[]
 
-  events ProviderEvent[] // <-- back-relation for ProviderEvent.provider
+  // Persist eMDR/PCG details locally
+  providerStreet  String?
+  providerStreet2 String?
+  providerCity    String?
+  providerState   String?
+  providerZip     String?
+
+  pcgProviderId     String?
+  pcgUpdateResponse Json?
+  pcgUpdateAt       DateTime?
+
+  // NEW: persist the last raw Providers List item + timestamp
+  pcgListSnapshot Json? // ADDED: stores the last /providers row from PCG as raw JSON
+  pcgListAt       DateTime? // ADDED: when we captured pcgListSnapshot
 
   @@index([customerId])
   @@index([providerGroupId])
@@ -287,13 +274,12 @@ model UserNpi {
 
   createdAt DateTime @default(now())
 
-  // Links User to Provider (NPI)
   user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   userId     String
   provider   Provider @relation(fields: [providerId], references: [id], onDelete: Cascade)
   providerId String
 
-  @@unique([userId, providerId]) // User can only be assigned to same NPI once
+  @@unique([userId, providerId])
   @@index([userId])
   @@index([providerId])
 }
@@ -306,69 +292,64 @@ model Submission {
   id                  String            @id @default(cuid())
   title               String
   purposeOfSubmission SubmissionPurpose
-  recipient           String // Receiving partner
-  claimId             String? // Optional for some submission types
-  caseId              String? // Optional case ID (up to 32 chars, required for PERM RC)
-  comments            String? // Additional notes
+  recipient           String
+  claimId             String?
+  caseId              String?
+  comments            String?
   status              SubmissionStatus  @default(DRAFT)
-  authorType          String            @default("Individual") // Will be set from UI "author_type"
+  authorType          String            @default("Individual")
 
-  // CMS HIH Gateway specific fields
-  autoSplit Boolean            @default(false) // auto_split field for CMS HIH
-  category  SubmissionCategory @default(DEFAULT) // metadata element type
-  sendInX12 Boolean            @default(false) // bSendinX12 field
-  threshold Int                @default(100) // threshold value
+  autoSplit Boolean            @default(false)
+  category  SubmissionCategory @default(DEFAULT)
+  sendInX12 Boolean            @default(false)
+  threshold Int                @default(100)
 
-  // Response tracking from CMS HIH Gateway
-  pcgSubmissionId    String? // << NEW: submission_id returned by PCG Wrapper API
-  fhirAcknowledgment String? // Acknowledgment received from FHIR service
-  transactionId      String? // Generated transaction ID after successful upload
-  responseMessage    String? // Response message from FHIR endpoint
-  errorDescription   String? // Error description for failed submissions
+  pcgSubmissionId    String?
+  fhirAcknowledgment String?
+  transactionId      String?
+  responseMessage    String?
+  errorDescription   String?
 
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
-  submittedAt DateTime? // When submission was sent to FHIR endpoint
+  submittedAt DateTime?
 
-  // Relationships
   creator    User     @relation(fields: [creatorId], references: [id])
   creatorId  String
   provider   Provider @relation(fields: [providerId], references: [id])
-  providerId String // NPI for this submission
+  providerId String
   customer   Customer @relation(fields: [customerId], references: [id])
   customerId String
 
-  // Submission documents
   documents SubmissionDocument[]
   events    SubmissionEvent[]
 
+  @@unique([pcgSubmissionId])
   @@index([creatorId])
   @@index([providerId])
   @@index([customerId])
   @@index([status])
   @@index([purposeOfSubmission])
-  @@unique([pcgSubmissionId])
 }
 
 model SubmissionDocument {
   id                      String               @id @default(cuid())
-  title                   String? // Optional title of document
-  fileName                String // Populated after upload
-  originalFileName        String // Original file name from upload
-  fileSize                Int // File size in bytes
-  mimeType                String // MIME type of the file
-  objectKey               String // Storage key for the file
-  language                String               @default("English") // Auto-populated as "English"
-  documentType            DocumentType         @default(PDF) // Auto-populated as "PDF"
-  attachmentControlNumber String? // Optional attachment control number
-  comments                String? // Optional comments
-  fhirResourceId          String? // FHIR resource ID after upload
-  uploadStatus            DocumentUploadStatus @default(PENDING) // Upload status to FHIR endpoint
+  title                   String?
+  fileName                String
+  originalFileName        String
+  fileSize                Int
+  mimeType                String
+  objectKey               String
+  language                String               @default("English")
+  documentType            DocumentType         @default(PDF)
+  attachmentControlNumber String?
+  comments                String?
+  fhirResourceId          String?
+  uploadStatus            DocumentUploadStatus @default(PENDING)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  // Relationships
   submission   Submission @relation(fields: [submissionId], references: [id], onDelete: Cascade)
   submissionId String
   uploader     User       @relation(fields: [uploaderId], references: [id])
@@ -378,54 +359,49 @@ model SubmissionDocument {
   @@index([uploaderId])
 }
 
-// Document upload status for FHIR endpoint uploads
 enum DocumentUploadStatus {
-  PENDING // Document ready for upload
-  UPLOADING // Currently being uploaded to FHIR endpoint
-  UPLOADED // Successfully uploaded to FHIR endpoint
-  UPLOAD_FAILED // Failed to upload to FHIR endpoint
+  PENDING
+  UPLOADING
+  UPLOADED
+  UPLOAD_FAILED
 }
 
-// Submission category for ADR metadata element types
 enum SubmissionCategory {
-  DEFAULT // default
-  MEDICAL_REVIEW // medicalreview
-  NON_MEDICAL_REVIEW // non-medicalreview
-  RESPONSES_FOR_PA // responsesforpa/prrequests
+  DEFAULT
+  MEDICAL_REVIEW
+  NON_MEDICAL_REVIEW
+  RESPONSES_FOR_PA
 }
 
-// Supported submission purposes based on HIH specification
 enum SubmissionPurpose {
-  ADR // Additional Documentation Request
-  PA_ABT // Prior Authorization for Ambulatory services
-  PA_DMEPOS // Prior Authorizations for Durable Medical Equipment, Prosthetics/Orthotics & Supplies
-  HH_PRE_CLAIM // Home Health Pre-Claim
-  HOPD // Hospital Outpatient Department
-  PWK_CLAIM_DOCUMENTATION // PWK Claim Documentation
-  FIRST_APPEAL // 1st-Appeal
-  SECOND_APPEAL // 2nd-Appeal
-  DME_DISCUSSION // DME Discussion
-  RA_DISCUSSION // RA Discussion
-  ADMC // Advance Determination of Medical Coverage Request
-  IRF // Inpatient Rehabilitation Facility
-  PROVIDER_MANAGEMENT // Provider Management
-  POST_PAY_EMDR // Post-Pay eMDR Letters
-  PRE_PAY_EMDR // Pre-Pay eMDR Letters
-  POST_PAY_OTHER_EMDR // Post-pay Other eMDR Letters
-  PADL_RRL_LETTERS // PADL/RRL Letters
+  ADR
+  PA_ABT
+  PA_DMEPOS
+  HH_PRE_CLAIM
+  HOPD
+  PWK_CLAIM_DOCUMENTATION
+  FIRST_APPEAL
+  SECOND_APPEAL
+  DME_DISCUSSION
+  RA_DISCUSSION
+  ADMC
+  IRF
+  PROVIDER_MANAGEMENT
+  POST_PAY_EMDR
+  PRE_PAY_EMDR
+  POST_PAY_OTHER_EMDR
+  PADL_RRL_LETTERS
 }
 
-// Submission status workflow for direct FHIR endpoint uploads
 enum SubmissionStatus {
-  DRAFT // Can be edited, documents can be added/removed
-  SUBMITTED // Submitted to FHIR endpoint
-  PROCESSING // Being processed by FHIR endpoint
-  COMPLETED // Processing completed successfully
-  REJECTED // Submission rejected
-  ERROR // Error occurred during processing
+  DRAFT
+  SUBMITTED
+  PROCESSING
+  COMPLETED
+  REJECTED
+  ERROR
 }
 
-// Supported document types (extensible for future HIH requirements)
 enum DocumentType {
   PDF
   DOC
@@ -441,7 +417,7 @@ enum DocumentType {
 
 model ApiToken {
   id          String   @id @default(cuid())
-  provider    String   @unique // e.g. "pcg-fhir"
+  provider    String   @unique
   accessToken String
   expiresAt   DateTime
   createdAt   DateTime @default(now())
@@ -456,7 +432,7 @@ enum SubmissionEventKind {
   PCG_CREATE_ERROR
   PCG_UPLOAD_SUCCESS
   PCG_UPLOAD_ERROR
-  PCG_STATUS // full payload of GET /status
+  PCG_STATUS
   PCG_UPDATE_SUCCESS
   PCG_UPDATE_ERROR
   META_UPDATED
@@ -472,7 +448,6 @@ model SubmissionEvent {
   createdAt    DateTime            @default(now())
 }
 
-// Provider event kinds
 enum ProviderEventKind {
   CREATED
   UPDATED
@@ -484,7 +459,6 @@ enum ProviderEventKind {
   PCG_ADD_ERROR
 }
 
-// Persistent audit trail for Provider (NPI) changes
 model ProviderEvent {
   id        String   @id @default(cuid())
   createdAt DateTime @default(now())
@@ -499,7 +473,7 @@ model ProviderEvent {
   customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
   customerId String
 
-  actor   User?   @relation("ProviderEventActor", fields: [actorId], references: [id]) // <-- name the relation
+  actor   User?   @relation("ProviderEventActor", fields: [actorId], references: [id])
   actorId String?
 
   @@index([providerId])
