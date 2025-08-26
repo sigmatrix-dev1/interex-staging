@@ -17,6 +17,9 @@ import { LoadingOverlay } from '#app/components/ui/loading-overlay.tsx'
 import {
     pcgGetProviders,
     pcgUpdateProvider,
+    pcgSetEmdrRegistration,
+    pcgSetElectronicOnly,
+    pcgGetProviderRegistration, // NEW
     type PcgProviderListItem,
     type PcgUpdateProviderPayload,
 } from '#app/services/pcg-hih.server.ts'
@@ -34,6 +37,7 @@ type Row = PcgProviderListItem & {
 }
 
 type StoredUpdate = { npi: string; response: unknown | null }
+type RegResp = Awaited<ReturnType<typeof pcgGetProviderRegistration>>
 
 /* ------------------------ Helpers (server) ------------------------ */
 
@@ -89,7 +93,6 @@ function mergeRemoteIntoBase(base: Row[], remote: PcgProviderListItem[]): Row[] 
         const merged: Row = {
             ...(baseRow as any),
             ...r,
-            // prefer local (NPI table) values for these:
             provider_name: baseRow?.provider_name ?? r.provider_name ?? null,
             customerName: baseRow?.customerName ?? null,
             providerGroupName: baseRow?.providerGroupName ?? null,
@@ -128,7 +131,6 @@ async function getAllProvidersFromPCG() {
     const pageSize = 500
     let page = 1
     let all: PcgProviderListItem[] = []
-    // first page
     let res = await pcgGetProviders({ page, pageSize })
     all = all.concat(res.listResponseModel ?? [])
     const totalPages = Math.max(1, res.totalPages || 1)
@@ -140,8 +142,24 @@ async function getAllProvidersFromPCG() {
     return all
 }
 
+// Server-side prereq check for eMDR actions
+function hasEmdrPrereqsServer(p: {
+    name: string | null
+    providerStreet: string | null
+    providerCity: string | null
+    providerState: string | null
+    providerZip: string | null
+}) {
+    return Boolean(
+        (p.name ?? '').trim() &&
+        (p.providerStreet ?? '').trim() &&
+        (p.providerCity ?? '').trim() &&
+        (p.providerState ?? '').trim() &&
+        (p.providerZip ?? '').trim(),
+    )
+}
+
 /* ----------------------------- Loader ----------------------------- */
-/** System Admin: empty table until first Fetch */
 export async function loader({ request }: LoaderFunctionArgs) {
     const userId = await requireUserId(request)
     const user = await prisma.user.findUnique({
@@ -213,11 +231,8 @@ export async function action({ request }: ActionFunctionArgs) {
         let pcgError: string | null = null
         let remote: PcgProviderListItem[] = []
         try {
-            // 1) get *all* providers for token
             remote = await getAllProvidersFromPCG()
 
-            // 2) persist: update existing, create new (under "System" customer),
-            //    and snapshot raw list row for every remote item
             const systemCustomerId = await getSystemCustomerId()
             const existing = await prisma.provider.findMany({
                 where: { npi: { in: remote.map(r => r.providerNPI) } },
@@ -226,31 +241,23 @@ export async function action({ request }: ActionFunctionArgs) {
             const existingSet = new Set(existing.map(p => p.npi))
             const now = new Date()
 
-            // batch updates
             const updates = remote.filter(r => existingSet.has(r.providerNPI))
             const creates = remote.filter(r => !existingSet.has(r.providerNPI))
 
-            // Chunk to keep transaction size sane
             const chunk = <T,>(arr: T[], size: number) =>
                 Array.from({ length: Math.ceil(arr.length / size) }, (_, i) => arr.slice(i * size, (i + 1) * size))
 
-            // Updates
             for (const group of chunk(updates, 100)) {
                 await prisma.$transaction(
                     group.map(r =>
                         prisma.provider.update({
                             where: { npi: r.providerNPI },
-                            data: {
-                                ...buildUpdateFromRemote(r),
-                                pcgListSnapshot: r as any,
-                                pcgListAt: now,
-                            },
+                            data: { ...buildUpdateFromRemote(r), pcgListSnapshot: r as any, pcgListAt: now },
                         }),
                     ),
                 )
             }
 
-            // Creates (under "System")
             for (const group of chunk(creates, 50)) {
                 await prisma.$transaction(
                     group.map(r =>
@@ -276,7 +283,6 @@ export async function action({ request }: ActionFunctionArgs) {
             pcgError = err?.message || 'Failed to fetch providers from PCG.'
         }
 
-        // Rebuild local rows from DB + merge remote for display
         const { baseRows, storedUpdates } = await loadAllLocal()
         const rows = mergeRemoteIntoBase(baseRows, remote)
 
@@ -310,19 +316,15 @@ export async function action({ request }: ActionFunctionArgs) {
             'provider_state',
             'provider_zip',
         ] as const).filter(k => !payload[k])
-        if (missing.length) {
-            return data({ error: `Missing fields: ${missing.join(', ')}` }, { status: 400 })
-        }
+        if (missing.length) return data({ error: `Missing fields: ${missing.join(', ')}` }, { status: 400 })
 
         let pcgError: string | null = null
         let didUpdate = false
         let updateResponse: any = null
         try {
-            // Call PCG
             updateResponse = await pcgUpdateProvider(payload)
             didUpdate = true
 
-            // Persist locally if NPI exists (it should, after fetch)
             const existing = await prisma.provider.findUnique({ where: { npi: payload.provider_npi }, select: { id: true } })
             if (existing) {
                 await prisma.provider.update({
@@ -344,7 +346,6 @@ export async function action({ request }: ActionFunctionArgs) {
             pcgError = err?.message || 'Failed to update provider.'
         }
 
-        // Refresh full remote list and align DB (also snapshot)
         let remote: PcgProviderListItem[] = []
         try {
             remote = await getAllProvidersFromPCG()
@@ -355,27 +356,19 @@ export async function action({ request }: ActionFunctionArgs) {
             })
             const existingSet = new Set(existing.map(p => p.npi))
             const updates = remote.filter(r => existingSet.has(r.providerNPI))
-
             const chunk = <T,>(arr: T[], size: number) =>
                 Array.from({ length: Math.ceil(arr.length / size) }, (_, i) => arr.slice(i * size, (i + 1) * size))
-
             for (const group of chunk(updates, 100)) {
                 await prisma.$transaction(
                     group.map(r =>
                         prisma.provider.update({
                             where: { npi: r.providerNPI },
-                            data: {
-                                ...buildUpdateFromRemote(r),
-                                pcgListSnapshot: r as any,
-                                pcgListAt: now,
-                            },
+                            data: { ...buildUpdateFromRemote(r), pcgListSnapshot: r as any, pcgListAt: now },
                         }),
                     ),
                 )
             }
-        } catch {
-            // ignore
-        }
+        } catch { /* ignore */ }
 
         const { baseRows, storedUpdates } = await loadAllLocal()
         const rows = mergeRemoteIntoBase(baseRows, remote)
@@ -386,6 +379,185 @@ export async function action({ request }: ActionFunctionArgs) {
             pcgError,
             didUpdate,
             updatedNpi: payload.provider_npi,
+            updateResponse,
+            updateResponses: storedUpdates,
+        })
+    }
+
+    // --- Bulk fetch per-provider registration details --------------------------
+    if (intent === 'fetch-registrations') {
+        const nowIso = new Date().toISOString()
+
+        // Only providers with provider_id and required address/name
+        const candidates = await prisma.provider.findMany({
+            where: {
+                NOT: [
+                    { pcgProviderId: null },
+                    { pcgProviderId: '' },
+                    { name: null },
+                    { providerStreet: null },
+                    { providerCity: null },
+                    { providerState: null },
+                    { providerZip: null },
+                ],
+            },
+            select: {
+                npi: true,
+                pcgProviderId: true,
+                name: true,
+                providerStreet: true,
+                providerCity: true,
+                providerState: true,
+                providerZip: true,
+            },
+        })
+
+        const regById: Record<string, RegResp> = Object.create(null)
+        const chunk = <T,>(arr: T[], size: number) =>
+            Array.from({ length: Math.ceil(arr.length / size) }, (_, i) => arr.slice(i * size, (i + 1) * size))
+
+        for (const group of chunk(candidates, 20)) {
+            for (const c of group) {
+                try {
+                    const data = await pcgGetProviderRegistration(c.pcgProviderId!)
+                    regById[c.pcgProviderId!] = data
+                } catch (err: any) {
+                    regById[c.pcgProviderId!] = {
+                        providerNPI: c.npi,
+                        errorList: [err?.message ?? 'Failed to fetch registration'],
+                        status_changes: [],
+                        provider_street: null,
+                        call_error_description: err?.message ?? 'Unknown error',
+                        provider_state: null,
+                        stage: null,
+                        transaction_id_list: null,
+                        reg_status: null,
+                        provider_id: c.pcgProviderId!,
+                        provider_city: null,
+                        provider_zip: null,
+                        provider_name: null,
+                        call_error_code: 'FETCH_ERROR',
+                        submission_status: null,
+                        errors: [],
+                        provider_street2: null,
+                        status: null,
+                    } as any
+                }
+            }
+        }
+
+        // Compose latest rows view
+        const localProviders = await prisma.provider.findMany({
+            select: {
+                npi: true,
+                name: true,
+                providerStreet: true,
+                providerStreet2: true,
+                providerCity: true,
+                providerState: true,
+                providerZip: true,
+                pcgProviderId: true,
+                customer: { select: { name: true } },
+                providerGroup: { select: { name: true } },
+            },
+            orderBy: [{ customerId: 'asc' }, { npi: 'asc' }],
+        })
+        const baseRows = toBaseRows(
+            localProviders.map(p => ({
+                npi: p.npi,
+                name: p.name ?? null,
+                providerStreet: p.providerStreet ?? null,
+                providerStreet2: p.providerStreet2 ?? null,
+                providerCity: p.providerCity ?? null,
+                providerState: p.providerState ?? null,
+                providerZip: p.providerZip ?? null,
+                pcgProviderId: p.pcgProviderId ?? null,
+                customerName: p.customer?.name ?? null,
+                providerGroupName: p.providerGroup?.name ?? null,
+            })),
+        )
+
+        let remote: PcgProviderListItem[] = []
+        try { remote = await getAllProvidersFromPCG() } catch { /* ignore */ }
+        const rows = mergeRemoteIntoBase(baseRows, remote)
+
+        return data({
+            rows,
+            meta: { totalForOrg: rows.length },
+            pcgError: null,
+            didUpdate: false as const,
+            updatedNpi: undefined,
+            updateResponse: undefined,
+            updateResponses: [],
+            regById,
+            regFetchedAt: nowIso,
+        })
+    }
+
+    // --- eMDR Register / DeRegister / Electronic Only --------------------------
+    if (intent === 'emdr-register' || intent === 'emdr-deregister' || intent === 'emdr-electronic-only') {
+        const providerId = String(form.get('provider_id') || '').trim()
+        const providerNpi = String(form.get('provider_npi') || '').trim()
+        if (!providerId) {
+            return data({ error: 'Missing provider_id. Update Provider first to obtain a Provider ID.' }, { status: 400 })
+        }
+
+        let pcgError: string | null = null
+        let updateResponse: any = null
+
+        try {
+            if (intent === 'emdr-register') updateResponse = await pcgSetEmdrRegistration(providerId, true)
+            else if (intent === 'emdr-deregister') updateResponse = await pcgSetEmdrRegistration(providerId, false)
+            else updateResponse = await pcgSetElectronicOnly(providerId)
+
+            const existing = await prisma.provider.findUnique({ where: { npi: providerNpi }, select: { id: true } })
+            if (existing) {
+                await prisma.provider.update({
+                    where: { id: existing.id },
+                    data: {
+                        pcgUpdateResponse: updateResponse,
+                        pcgUpdateAt: new Date(),
+                        pcgProviderId: updateResponse?.provider_id ?? undefined,
+                    },
+                })
+            }
+        } catch (err: any) {
+            pcgError = err?.message || 'Failed to submit eMDR registration/deregistration.'
+        }
+
+        let remote: PcgProviderListItem[] = []
+        try {
+            remote = await getAllProvidersFromPCG()
+            const now = new Date()
+            const existing = await prisma.provider.findMany({
+                where: { npi: { in: remote.map(r => r.providerNPI) } },
+                select: { npi: true },
+            })
+            const existingSet = new Set(existing.map(p => p.npi))
+            const updates = remote.filter(r => existingSet.has(r.providerNPI))
+            const chunk = <T,>(arr: T[], size: number) =>
+                Array.from({ length: Math.ceil(arr.length / size) }, (_, i) => arr.slice(i * size, (i + 1) * size))
+            for (const group of chunk(updates, 100)) {
+                await prisma.$transaction(
+                    group.map(r =>
+                        prisma.provider.update({
+                            where: { npi: r.providerNPI },
+                            data: { ...buildUpdateFromRemote(r), pcgListSnapshot: r as any, pcgListAt: now },
+                        }),
+                    ),
+                )
+            }
+        } catch { /* ignore snapshot failures */ }
+
+        const { baseRows, storedUpdates } = await loadAllLocal()
+        const rows = mergeRemoteIntoBase(baseRows, remote)
+
+        return data({
+            rows,
+            meta: { totalForOrg: rows.length },
+            pcgError,
+            didUpdate: false as const,
+            updatedNpi: providerNpi,
             updateResponse,
             updateResponses: storedUpdates,
         })
@@ -403,19 +575,102 @@ type ActionSuccess = {
     updatedNpi?: string
     updateResponse?: any
     updateResponses?: { npi: string; response: unknown | null }[]
+
+    regById?: Record<string, RegResp>
+    regFetchedAt?: string
 }
 type ActionFailure = { error: string }
 type ActionData = ActionSuccess | ActionFailure
 
 function Badge({ yes }: { yes: boolean }) {
-    const cls = yes
-        ? 'bg-green-100 text-green-800 ring-1 ring-green-300'
-        : 'bg-gray-100 text-gray-800 ring-1 ring-gray-300'
+    const cls = yes ? 'bg-green-100 text-green-800 ring-1 ring-green-300' : 'bg-gray-100 text-gray-800 ring-1 ring-gray-300'
     return <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${cls}`}>{yes ? 'Yes' : 'No'}</span>
 }
-
 function Pill({ text }: { text: string }) {
     return <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-50 text-blue-700 ring-1 ring-blue-200">{text}</span>
+}
+
+/** Confirm-with-checkbox wrapper for eMDR actions */
+function ConfirmActionButton({
+                                 intent,
+                                 providerId,
+                                 providerNpi,
+                                 label,
+                                 color = 'blue',
+                                 disabled,
+                                 warning,
+                             }: {
+    intent: 'emdr-register' | 'emdr-deregister' | 'emdr-electronic-only'
+    providerId?: string
+    providerNpi: string
+    label: string
+    color?: 'blue' | 'green' | 'rose' | 'purple'
+    disabled?: boolean
+    warning: string
+}) {
+    const [open, setOpen] = React.useState(false)
+    const [checked, setChecked] = React.useState(false)
+    const colorClass =
+        color === 'green' ? 'bg-green-600 hover:bg-green-700'
+            : color === 'rose' ? 'bg-rose-600 hover:bg-rose-700'
+                : color === 'purple' ? 'bg-purple-600 hover:bg-purple-700'
+                    : 'bg-blue-600 hover:bg-blue-700'
+
+    if (!open) {
+        return (
+            <button
+                type="button"
+                onClick={() => setOpen(true)}
+                className={`inline-flex items-center rounded-md px-3 py-1.5 text-xs font-semibold text-white shadow-sm disabled:opacity-50 ${colorClass}`}
+                disabled={disabled}
+            >
+                {label}
+            </button>
+        )
+    }
+
+    return (
+        <div className="rounded-md border p-3 space-y-2 bg-gray-50 max-w-sm">
+            <div className="flex gap-2 text-sm text-gray-800">
+                <Icon name="warning-triangle" className="h-4 w-4 text-amber-600 mt-0.5" />
+                <div>{warning}</div>
+            </div>
+            <label className="flex items-center gap-2 text-xs text-gray-700">
+                <input
+                    type="checkbox"
+                    className="h-4 w-4 rounded border-gray-300 text-blue-600"
+                    checked={checked}
+                    onChange={e => setChecked(e.target.checked)}
+                />
+                I understand and want to proceed.
+            </label>
+            <div className="flex gap-2">
+                <button
+                    type="button"
+                    onClick={() => {
+                        setOpen(false)
+                        setChecked(false)
+                    }}
+                    className="inline-flex items-center rounded-md border border-gray-300 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50"
+                >
+                    Cancel
+                </button>
+                <Form method="post">
+                    <input type="hidden" name="intent" value={intent} />
+                    <input type="hidden" name="provider_id" value={providerId || ''} />
+                    <input type="hidden" name="provider_npi" value={providerNpi} />
+                    <button
+                        type="submit"
+                        disabled={!checked || disabled || !providerId}
+                        className={`inline-flex items-center rounded-md px-3 py-1.5 text-xs font-semibold text-white shadow-sm disabled:opacity-50 ${colorClass}`}
+                        title={!providerId ? 'Provider ID required' : label}
+                    >
+                        Proceed
+                    </button>
+                </Form>
+            </div>
+        </div>
+    )
 }
 
 /* ------------------------------ Component ------------------------------ */
@@ -432,7 +687,7 @@ export default function ProviderManagementPage() {
     const rows: Row[] = hasRows ? (actionData as ActionSuccess).rows : baseRows
     const pcgError = hasRows ? (actionData as ActionSuccess).pcgError : null
 
-    // Update response sources
+    // Action response sources (last vs. persisted)
     const lastUpdatedNpi = hasRows ? (actionData as ActionSuccess).updatedNpi : undefined
     const lastUpdateResponse = hasRows ? (actionData as ActionSuccess).updateResponse : undefined
     const persistedMap = React.useMemo(() => {
@@ -443,7 +698,11 @@ export default function ProviderManagementPage() {
         return m
     }, [hasRows, actionData, updateResponses])
 
-    // Client-side customer filter (derived from the table)
+    // Registration details (ephemeral)
+    const regById = (hasRows ? (actionData as ActionSuccess).regById : undefined) || {}
+    const regFetchedAt = hasRows ? (actionData as ActionSuccess).regFetchedAt : undefined
+
+    // Client-side customer filter
     const [customerFilter, setCustomerFilter] = React.useState<'all' | 'unassigned' | string>('all')
     const customerChoices = React.useMemo(() => {
         const names = new Set<string>()
@@ -454,19 +713,14 @@ export default function ProviderManagementPage() {
     }, [rows])
 
     const filteredRows = React.useMemo(() => {
-        if (!hasRows) return [] // nothing until fetched
+        if (!hasRows) return []
         if (customerFilter === 'all') return rows
         if (customerFilter === 'unassigned') return rows.filter(r => !r.customerName)
         return rows.filter(r => r.customerName === customerFilter)
     }, [rows, customerFilter, hasRows])
 
     // Drawer state
-    const [drawer, setDrawer] = React.useState<{
-        open: boolean
-        forNpi?: string
-        seed?: Partial<PcgUpdateProviderPayload>
-    }>({ open: false })
-
+    const [drawer, setDrawer] = React.useState<{ open: boolean; forNpi?: string; seed?: Partial<PcgUpdateProviderPayload> }>({ open: false })
     function openDrawer(r: Row) {
         setDrawer({
             open: true,
@@ -482,9 +736,7 @@ export default function ProviderManagementPage() {
             },
         })
     }
-    function closeDrawer() {
-        setDrawer({ open: false })
-    }
+    function closeDrawer() { setDrawer({ open: false }) }
 
     React.useEffect(() => {
         if (hasRows) {
@@ -493,6 +745,31 @@ export default function ProviderManagementPage() {
         }
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [actionData])
+
+    function ActionResponseCell({ r }: { r: Row }) {
+        const actionJson = lastUpdatedNpi === r.providerNPI ? lastUpdateResponse : undefined
+        const persistedJson = persistedMap.get(r.providerNPI)
+        const jsonToShow = actionJson ?? persistedJson ?? null
+        return jsonToShow ? <JsonViewer data={jsonToShow} /> : <span className="text-gray-400">—</span>
+    }
+
+    function RegStatusPill({ r, reg }: { r: Row; reg?: RegResp }) {
+        const val = reg?.reg_status ?? r.reg_status
+        const cls =
+            val?.toLowerCase().includes('register') ? 'bg-green-100 text-green-800'
+                : val ? 'bg-amber-100 text-amber-800'
+                    : 'bg-gray-100 text-gray-800'
+        return <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${cls}`}>{val ?? '—'}</span>
+    }
+
+    // Show in eMDR tables only if name + address present (street2 optional)
+    const hasEmdrPrereqs = (r: Row) =>
+        Boolean((r.provider_name ?? '').trim() && (r.provider_street ?? '').trim() && (r.provider_city ?? '').trim() && (r.provider_state ?? '').trim() && (r.provider_zip ?? '').trim())
+
+    // Partition lists; all filtered by prereqs
+    const notRegisteredRows = filteredRows.filter(r => !r.registered_for_emdr && hasEmdrPrereqs(r))
+    const registeredRows = filteredRows.filter(r => r.registered_for_emdr && hasEmdrPrereqs(r))
+    const electronicOnlyRows = filteredRows.filter(r => r.registered_for_emdr_electronic_only && hasEmdrPrereqs(r))
 
     return (
         <InterexLayout
@@ -521,12 +798,9 @@ export default function ProviderManagementPage() {
                             </button>
                         </Form>
 
-                        {/* Customer filter (built from the fetched table) */}
                         <div className="flex-1" />
                         <div className="w-72">
-                            <label className="block text-sm font-medium text-gray-700 mb-1">
-                                Filter by Customer (from table)
-                            </label>
+                            <label className="block text-sm font-medium text-gray-700 mb-1">Filter by Customer (from table)</label>
                             <select
                                 value={customerFilter}
                                 onChange={e => setCustomerFilter(e.target.value as any)}
@@ -536,9 +810,7 @@ export default function ProviderManagementPage() {
                                 <option value="all">All Customers</option>
                                 <option value="unassigned">Unassigned</option>
                                 {customerChoices.map(name => (
-                                    <option key={name} value={name}>
-                                        {name}
-                                    </option>
+                                    <option key={name} value={name}>{name}</option>
                                 ))}
                             </select>
                         </div>
@@ -548,11 +820,7 @@ export default function ProviderManagementPage() {
                     ) : (
                         <p className="mt-3 text-sm text-gray-500">
                             Showing {filteredRows.length} of {rows.length} NPIs
-                            {customerFilter === 'all'
-                                ? ''
-                                : customerFilter === 'unassigned'
-                                    ? ' • Unassigned'
-                                    : ` • ${customerFilter}`}
+                            {customerFilter === 'all' ? '' : customerFilter === 'unassigned' ? ' • Unassigned' : ` • ${customerFilter}`}
                         </p>
                     )}
                 </div>
@@ -567,25 +835,19 @@ export default function ProviderManagementPage() {
                     </div>
                 ) : null}
 
-                {/* Table */}
+                {/* ======================================== */}
+                {/* Provider details & update table */}
+                {/* ======================================== */}
                 <div className="bg-white shadow rounded-lg overflow-hidden">
                     <div className="px-6 py-4 border-b border-gray-200">
-                        <h2 className="text-lg font-medium text-gray-900">eMDR Registration</h2>
+                        <h2 className="text-lg font-medium text-gray-900">Provider Details Updating</h2>
                         <p className="text-sm text-gray-500">
                             {hasRows ? (
                                 <>
                                     Showing {filteredRows.length} NPIs • Filter:&nbsp;
-                                    <span className="font-medium">
-                    {customerFilter === 'all'
-                        ? 'All Customers'
-                        : customerFilter === 'unassigned'
-                            ? 'Unassigned'
-                            : customerFilter}
-                  </span>
+                                    <span className="font-medium">{customerFilter === 'all' ? 'All Customers' : customerFilter === 'unassigned' ? 'Unassigned' : customerFilter}</span>
                                 </>
-                            ) : (
-                                'No data loaded'
-                            )}
+                            ) : 'No data loaded'}
                         </p>
                     </div>
 
@@ -610,14 +872,13 @@ export default function ProviderManagementPage() {
                                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">JSON</th>
                                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Update Provider</th>
                                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Update Response</th>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Provider ID (Post Update)</th>
                             </tr>
                             </thead>
-
                             <tbody className="bg-white divide-y divide-gray-200">
                             {!hasRows || filteredRows.length === 0 ? (
                                 <tr>
-                                    <td colSpan={18} className="px-6 py-8 text-center text-sm text-gray-500">
+                                    {/* colSpan reduced to 16 (removed the old extra column) */}
+                                    <td colSpan={16} className="px-6 py-8 text-center text-sm text-gray-500">
                                         {hasRows ? 'No rows match this filter.' : 'No data.'}
                                     </td>
                                 </tr>
@@ -626,34 +887,17 @@ export default function ProviderManagementPage() {
                                     const actionJson = lastUpdatedNpi === r.providerNPI ? lastUpdateResponse : undefined
                                     const persistedJson = persistedMap.get(r.providerNPI)
                                     const jsonToShow = actionJson ?? persistedJson ?? null
-
-                                    const providerIdPostUpdate =
-                                        jsonToShow && typeof jsonToShow === 'object' && (jsonToShow as any).provider_id
-                                            ? String((jsonToShow as any).provider_id)
-                                            : ''
-
                                     const regStatusClass =
-                                        r.reg_status?.toLowerCase().includes('register') ? 'bg-green-100 text-green-800' :
-                                            r.reg_status ? 'bg-amber-100 text-amber-800' : 'bg-gray-100 text-gray-800'
+                                        r.reg_status?.toLowerCase().includes('register') ? 'bg-green-100 text-green-800'
+                                            : r.reg_status ? 'bg-amber-100 text-amber-800'
+                                                : 'bg-gray-100 text-gray-800'
 
                                     return (
                                         <tr key={`${r.provider_id}-${r.providerNPI}`} className="hover:bg-gray-50 align-top">
                                             <td className="px-6 py-4 text-sm font-medium text-gray-900">{r.providerNPI}</td>
-
-                                            <td className="px-6 py-4 text-sm">
-                                                {r.last_submitted_transaction
-                                                    ? <Pill text={r.last_submitted_transaction} />
-                                                    : <span className="text-gray-400">—</span>}
-                                            </td>
-
-                                            <td className="px-6 py-4">
-                                                <Badge yes={Boolean(r.registered_for_emdr)} />
-                                            </td>
-
-                                            <td className="px-6 py-4">
-                                                <Badge yes={Boolean(r.registered_for_emdr_electronic_only)} />
-                                            </td>
-
+                                            <td className="px-6 py-4 text-sm">{r.last_submitted_transaction ? <Pill text={r.last_submitted_transaction} /> : <span className="text-gray-400">—</span>}</td>
+                                            <td className="px-6 py-4"><Badge yes={Boolean(r.registered_for_emdr)} /></td>
+                                            <td className="px-6 py-4"><Badge yes={Boolean(r.registered_for_emdr_electronic_only)} /></td>
                                             <td className="px-6 py-4 text-sm text-gray-700">{r.customerName ?? '—'}</td>
                                             <td className="px-6 py-4 text-sm text-gray-700">{r.providerGroupName ?? '—'}</td>
                                             <td className="px-6 py-4 text-sm text-gray-700">{r.provider_name ?? '—'}</td>
@@ -662,19 +906,11 @@ export default function ProviderManagementPage() {
                                             <td className="px-6 py-4 text-sm text-gray-700">{r.provider_city ?? '—'}</td>
                                             <td className="px-6 py-4 text-sm text-gray-700">{r.provider_zip ?? '—'}</td>
                                             <td className="px-6 py-4 text-sm text-gray-700">{r.provider_state ?? '—'}</td>
-
                                             <td className="px-6 py-4">
-                          <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${regStatusClass}`}>
-                            {r.reg_status ?? '—'}
-                          </span>
+                                                <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${regStatusClass}`}>{r.reg_status ?? '—'}</span>
                                             </td>
-
                                             <td className="px-6 py-4 text-sm text-gray-700">{r.provider_id || '—'}</td>
-
-                                            <td className="px-6 py-4 text-sm text-gray-700 align-top w-[40rem]">
-                                                <JsonViewer data={r} />
-                                            </td>
-
+                                            <td className="px-6 py-4 text-sm text-gray-700 align-top w-[40rem]"><JsonViewer data={r} /></td>
                                             <td className="px-6 py-4">
                                                 <button
                                                     type="button"
@@ -685,13 +921,8 @@ export default function ProviderManagementPage() {
                                                     Update Provider Details
                                                 </button>
                                             </td>
-
                                             <td className="px-6 py-4 text-sm text-gray-700 align-top w-[36rem]">
                                                 {jsonToShow ? <JsonViewer data={jsonToShow} /> : <span className="text-gray-400">—</span>}
-                                            </td>
-
-                                            <td className="px-6 py-4 text-sm text-gray-700">
-                                                {providerIdPostUpdate ? <Pill text={providerIdPostUpdate} /> : <span className="text-gray-400">—</span>}
                                             </td>
                                         </tr>
                                     )
@@ -699,6 +930,243 @@ export default function ProviderManagementPage() {
                             )}
                             </tbody>
                         </table>
+                    </div>
+                </div>
+
+                {/* ====================================================== */}
+                {/* eMDR Register/deRegister section (reordered)           */}
+                {/* ====================================================== */}
+                <div className="bg-white shadow rounded-lg overflow-hidden">
+                    <div className="px-6 py-4 border-b border-gray-200 flex items-center gap-3">
+                        <div className="flex-1">
+                            <h2 className="text-lg font-semibold text-gray-900">eMDR Register/deRegister</h2>
+                            <p className="text-sm text-gray-500">Only NPIs with provider name and address are shown below. Update provider details first if needed.</p>
+                        </div>
+
+                        {/* NEW: bulk fetch registration details */}
+                        <Form method="post">
+                            <input type="hidden" name="intent" value="fetch-registrations" />
+                            <button
+                                type="submit"
+                                className="inline-flex items-center rounded-md bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white shadow-sm hover:bg-indigo-700 disabled:opacity-50"
+                                disabled={!hasRows || isPending}
+                                title="Fetch PCG registration status/details for all providers with a Provider ID"
+                            >
+                                <Icon name="refresh" className="h-4 w-4 mr-1.5" />
+                                Fetch Registration Details
+                            </button>
+                        </Form>
+                    </div>
+                    {regFetchedAt ? (
+                        <div className="px-6 pt-3 text-xs text-gray-500">
+                            Last fetched registration details at <span className="font-medium">{new Date(regFetchedAt).toLocaleString()}</span>
+                        </div>
+                    ) : null}
+
+                    {/* --- Table 1: Not registered for eMDR (moved to top) --- */}
+                    <div className="px-6 py-5">
+                        <h3 className="text-sm font-semibold text-gray-800 mb-3">Not registered for eMDR</h3>
+                        <div className="overflow-x-auto">
+                            <table className="min-w-full divide-y divide-gray-200">
+                                <thead className="bg-gray-50">
+                                <tr>
+                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">NPI</th>
+                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Name</th>
+                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Reg Status</th>
+                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Stage</th>
+                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Errors</th>
+                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Provider ID</th>
+                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Actions</th>
+                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Action Response</th>
+                                </tr>
+                                </thead>
+                                <tbody className="bg-white divide-y divide-gray-200">
+                                {notRegisteredRows.length === 0 ? (
+                                    <tr><td colSpan={8} className="px-6 py-6 text-sm text-gray-500 text-center">None</td></tr>
+                                ) : (
+                                    notRegisteredRows.map(r => {
+                                        const reg = r.provider_id ? regById[r.provider_id] : undefined
+                                        const anyError =
+                                            (reg?.call_error_code || reg?.call_error_description) ||
+                                            (reg?.errorList?.length ? reg.errorList.join('; ') : '') ||
+                                            (reg?.errors?.length ? JSON.stringify(reg.errors) : '')
+                                        return (
+                                            <tr key={`unreg-${r.provider_id}-${r.providerNPI}`} className="align-top">
+                                                <td className="px-6 py-3 text-sm font-medium text-gray-900">{r.providerNPI}</td>
+                                                <td className="px-6 py-3 text-sm text-gray-700">{r.provider_name ?? '—'}</td>
+                                                <td className="px-6 py-3"><RegStatusPill r={r} reg={reg} /></td>
+                                                <td className="px-6 py-3 text-sm text-gray-700">{reg?.stage ?? r.stage ?? '—'}</td>
+                                                <td className="px-6 py-3 text-xs text-rose-700">{anyError ? <span className="inline-block max-w-xs break-words">{anyError}</span> : <span className="text-gray-400">—</span>}</td>
+                                                <td className="px-6 py-3 text-sm text-gray-700">{r.provider_id || <span className="text-gray-400">—</span>}</td>
+                                                <td className="px-6 py-3">
+                                                    <ConfirmActionButton
+                                                        intent="emdr-register"
+                                                        providerId={r.provider_id}
+                                                        providerNpi={r.providerNPI}
+                                                        label="Register"
+                                                        color="green"
+                                                        disabled={isPending || !r.provider_id}
+                                                        warning="Are you sure you want to register this NPI for eMDR? Electronic delivery will be enabled."
+                                                    />
+                                                    {!r.provider_id ? <p className="mt-2 text-xs text-amber-600">Provider ID missing — update provider details first.</p> : null}
+                                                </td>
+                                                <td className="px-6 py-3 text-sm text-gray-700 align-top w-[36rem]"><ActionResponseCell r={r} /></td>
+                                            </tr>
+                                        )
+                                    })
+                                )}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    <hr className="border-gray-200" />
+
+                    {/* --- Table 2: Registered for eMDR --- */}
+                    <div className="px-6 py-5">
+                        <h3 className="text-sm font-semibold text-gray-800 mb-3">Registered for eMDR</h3>
+                        <div className="overflow-x-auto">
+                            <table className="min-w-full divide-y divide-gray-200">
+                                <thead className="bg-gray-50">
+                                <tr>
+                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">NPI</th>
+                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Name</th>
+                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Electronic Only?</th>
+                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Reg Status</th>
+                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Stage</th>
+                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Last Change</th>
+                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Txn IDs</th>
+                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Errors</th>
+                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Provider ID</th>
+                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Actions</th>
+                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Action Response</th>
+                                </tr>
+                                </thead>
+                                <tbody className="bg-white divide-y divide-gray-200">
+                                {registeredRows.length === 0 ? (
+                                    <tr><td colSpan={11} className="px-6 py-6 text-sm text-gray-500 text-center">None</td></tr>
+                                ) : (
+                                    registeredRows.map(r => {
+                                        const reg = r.provider_id ? regById[r.provider_id] : undefined
+                                        const lastChange = reg?.status_changes?.length ? reg.status_changes[reg.status_changes.length - 1] : undefined
+                                        const txnDisplay =
+                                            typeof reg?.transaction_id_list === 'string'
+                                                ? reg.transaction_id_list.replace(/,+$/, '')
+                                                : (lastChange?.esmd_transaction_id ?? '')
+                                        const anyError =
+                                            (reg?.call_error_code || reg?.call_error_description) ||
+                                            (reg?.errorList?.length ? reg.errorList.join('; ') : '') ||
+                                            (reg?.errors?.length ? JSON.stringify(reg.errors) : '')
+                                        return (
+                                            <tr key={`reg-${r.provider_id}-${r.providerNPI}`} className="align-top">
+                                                <td className="px-6 py-3 text-sm font-medium text-gray-900">{r.providerNPI}</td>
+                                                <td className="px-6 py-3 text-sm text-gray-700">{r.provider_name ?? '—'}</td>
+                                                <td className="px-6 py-3"><Badge yes={Boolean(r.registered_for_emdr_electronic_only)} /></td>
+                                                <td className="px-6 py-3"><RegStatusPill r={r} reg={reg} /></td>
+                                                <td className="px-6 py-3 text-sm text-gray-700">{reg?.stage ?? r.stage ?? '—'}</td>
+                                                <td className="px-6 py-3 text-xs text-gray-700">
+                                                    {lastChange ? (
+                                                        <div className="space-y-0.5">
+                                                            <div><span className="font-medium">Time:</span> {lastChange.time}</div>
+                                                            <div><span className="font-medium">Title:</span> {lastChange.title}</div>
+                                                            <div><span className="font-medium">Status:</span> {lastChange.status}</div>
+                                                        </div>
+                                                    ) : <span className="text-gray-400">—</span>}
+                                                </td>
+                                                <td className="px-6 py-3 text-sm text-gray-700">{txnDisplay ? <Pill text={txnDisplay} /> : <span className="text-gray-400">—</span>}</td>
+                                                <td className="px-6 py-3 text-xs text-rose-700">{anyError ? <span className="inline-block max-w-xs break-words">{anyError}</span> : <span className="text-gray-400">—</span>}</td>
+                                                <td className="px-6 py-3 text-sm text-gray-700">{r.provider_id || '—'}</td>
+                                                <td className="px-6 py-3">
+                                                    <div className="flex gap-2 flex-col">
+                                                        <ConfirmActionButton
+                                                            intent="emdr-deregister"
+                                                            providerId={r.provider_id}
+                                                            providerNpi={r.providerNPI}
+                                                            label="Deregister"
+                                                            color="rose"
+                                                            disabled={isPending || !r.provider_id}
+                                                            warning="Are you sure you want to deregister this NPI from eMDR? Electronic delivery will stop."
+                                                        />
+                                                        {!r.registered_for_emdr_electronic_only ? (
+                                                            <ConfirmActionButton
+                                                                intent="emdr-electronic-only"
+                                                                providerId={r.provider_id}
+                                                                providerNpi={r.providerNPI}
+                                                                label="Set Electronic Only"
+                                                                color="purple"
+                                                                disabled={isPending || !r.provider_id}
+                                                                warning="Are you sure you want to set Electronic-Only ADR for this NPI? Paper mail will stop."
+                                                            />
+                                                        ) : null}
+                                                    </div>
+                                                </td>
+                                                <td className="px-6 py-3 text-sm text-gray-700 align-top w-[36rem]"><ActionResponseCell r={r} /></td>
+                                            </tr>
+                                        )
+                                    })
+                                )}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    <hr className="border-gray-200" />
+
+                    {/* --- Table 3: Registered for Electronic-Only ADR --- */}
+                    <div className="px-6 py-5">
+                        <h3 className="text-sm font-semibold text-gray-800 mb-3">Registered for Electronic-Only ADR</h3>
+                        <p className="text-xs text-gray-500 mb-2">To revert to standard delivery (mail + electronic), deregister and then register again.</p>
+                        <div className="overflow-x-auto">
+                            <table className="min-w-full divide-y divide-gray-200">
+                                <thead className="bg-gray-50">
+                                <tr>
+                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">NPI</th>
+                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Name</th>
+                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Reg Status</th>
+                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Stage</th>
+                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Errors</th>
+                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Provider ID</th>
+                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Actions</th>
+                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Action Response</th>
+                                </tr>
+                                </thead>
+                                <tbody className="bg-white divide-y divide-gray-200">
+                                {electronicOnlyRows.length === 0 ? (
+                                    <tr><td colSpan={8} className="px-6 py-6 text-sm text-gray-500 text-center">None</td></tr>
+                                ) : (
+                                    electronicOnlyRows.map(r => {
+                                        const reg = r.provider_id ? regById[r.provider_id] : undefined
+                                        const anyError =
+                                            (reg?.call_error_code || reg?.call_error_description) ||
+                                            (reg?.errorList?.length ? reg.errorList.join('; ') : '') ||
+                                            (reg?.errors?.length ? JSON.stringify(reg.errors) : '')
+                                        return (
+                                            <tr key={`eo-${r.provider_id}-${r.providerNPI}`} className="align-top">
+                                                <td className="px-6 py-3 text-sm font-medium text-gray-900">{r.providerNPI}</td>
+                                                <td className="px-6 py-3 text-sm text-gray-700">{r.provider_name ?? '—'}</td>
+                                                <td className="px-6 py-3"><RegStatusPill r={r} reg={reg} /></td>
+                                                <td className="px-6 py-3 text-sm text-gray-700">{reg?.stage ?? r.stage ?? '—'}</td>
+                                                <td className="px-6 py-3 text-xs text-rose-700">{anyError ? <span className="inline-block max-w-xs break-words">{anyError}</span> : <span className="text-gray-400">—</span>}</td>
+                                                <td className="px-6 py-3 text-sm text-gray-700">{r.provider_id || '—'}</td>
+                                                <td className="px-6 py-3">
+                                                    <ConfirmActionButton
+                                                        intent="emdr-deregister"
+                                                        providerId={r.provider_id}
+                                                        providerNpi={r.providerNPI}
+                                                        label="Deregister"
+                                                        color="rose"
+                                                        disabled={isPending || !r.provider_id}
+                                                        warning="Are you sure you want to deregister this NPI from eMDR? This will also remove Electronic-Only ADR."
+                                                    />
+                                                </td>
+                                                <td className="px-6 py-3 text-sm text-gray-700 align-top w-[36rem]"><ActionResponseCell r={r} /></td>
+                                            </tr>
+                                        )
+                                    })
+                                )}
+                                </tbody>
+                            </table>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -760,51 +1228,21 @@ export default function ProviderManagementPage() {
                         <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                             <div>
                                 <label className="block text-sm font-medium text-gray-700">City</label>
-                                <input
-                                    name="provider_city"
-                                    defaultValue={drawer.seed?.provider_city ?? ''}
-                                    required
-                                    className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
-                                />
+                                <input name="provider_city" defaultValue={drawer.seed?.provider_city ?? ''} required className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 text-sm" />
                             </div>
                             <div>
                                 <label className="block text-sm font-medium text-gray-700">State</label>
-                                <input
-                                    name="provider_state"
-                                    defaultValue={drawer.seed?.provider_state ?? ''}
-                                    required
-                                    maxLength={2}
-                                    className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 text-sm uppercase"
-                                    placeholder="MD"
-                                />
+                                <input name="provider_state" defaultValue={drawer.seed?.provider_state ?? ''} required maxLength={2} className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 text-sm uppercase" placeholder="MD" />
                             </div>
                             <div>
                                 <label className="block text-sm font-medium text-gray-700">ZIP</label>
-                                <input
-                                    name="provider_zip"
-                                    defaultValue={drawer.seed?.provider_zip ?? ''}
-                                    required
-                                    className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
-                                    placeholder="12345"
-                                />
+                                <input name="provider_zip" defaultValue={drawer.seed?.provider_zip ?? ''} required className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 text-sm" placeholder="12345" />
                             </div>
                         </div>
 
                         <div className="flex justify-end gap-3 pt-4 border-t border-gray-200">
-                            <button
-                                type="button"
-                                onClick={closeDrawer}
-                                className="inline-flex items-center rounded-md border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
-                            >
-                                Cancel
-                            </button>
-                            <button
-                                type="submit"
-                                disabled={isPending}
-                                className="inline-flex items-center rounded-md bg-blue-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-blue-700 disabled:opacity-50"
-                            >
-                                Submit
-                            </button>
+                            <button type="button" onClick={closeDrawer} className="inline-flex items-center rounded-md border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50">Cancel</button>
+                            <button type="submit" disabled={isPending} className="inline-flex items-center rounded-md bg-blue-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-blue-700 disabled:opacity-50">Submit</button>
                         </div>
                     </Form>
                 ) : null}
