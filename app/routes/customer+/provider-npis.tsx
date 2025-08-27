@@ -909,7 +909,7 @@ export default function CustomerProviderNpiPage() {
 
             {/* Create Provider Drawer */}
             <Drawer isOpen={drawerState.isOpen && drawerState.mode === 'create'} onClose={closeDrawer} title="Add Provider NPI" size="md">
-                <Form method="post" id="create-provider-form" {...getFormProps(createForm)}>
+                <Form method="post" {...getFormProps(createForm)}>
                     <input type="hidden" name="intent" value="create" />
                     <div className="space-y-6">
                         <Field
@@ -981,7 +981,7 @@ export default function CustomerProviderNpiPage() {
                 size="md"
             >
                 {selectedProvider && (
-                    <Form method="post" id="edit-provider-form" {...getFormProps(editForm)}>
+                    <Form method="post" {...getFormProps(editForm)}>
                         <input type="hidden" name="intent" value="update" />
                         <input type="hidden" name="providerId" value={selectedProvider.id} />
                         <div className="space-y-6">

@@ -30,7 +30,7 @@ export function InterexNavigation({ user, currentPath }: InterexNavigationProps)
         )
     }
 
-    // Customer Admin (REMOVED Provider & eMDR Management from here)
+    // Customer Admin
     if (userRoles.includes(INTEREX_ROLES.CUSTOMER_ADMIN)) {
         navItems.push(
             {

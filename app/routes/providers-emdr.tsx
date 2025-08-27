@@ -10,6 +10,7 @@
 // The "Fetch from PCG" action updates the central DB (same as System Admin page),
 // but the page will only display rows within the user's visibility scope.
 
+import * as React from 'react'
 import {
     type LoaderFunctionArgs,
     type ActionFunctionArgs,
@@ -18,10 +19,10 @@ import {
     useActionData,
     Form,
 } from 'react-router'
-import * as React from 'react'
 
 import { InterexLayout } from '#app/components/interex-layout.tsx'
 import { JsonViewer } from '#app/components/json-view.tsx'
+import { Drawer } from '#app/components/ui/drawer.tsx'
 import { Icon } from '#app/components/ui/icon.tsx'
 import { LoadingOverlay } from '#app/components/ui/loading-overlay.tsx'
 import {
@@ -37,7 +38,6 @@ import { requireUserId } from '#app/utils/auth.server.ts'
 import { prisma } from '#app/utils/db.server.ts'
 import { INTEREX_ROLES } from '#app/utils/interex-roles.ts'
 import { useIsPending } from '#app/utils/misc.tsx'
-import { Drawer } from '#app/components/ui/drawer.tsx'
 
 type Row = PcgProviderListItem & {
     customerName: string | null
@@ -842,7 +842,7 @@ function ConfirmActionButton({
     return (
         <div className="rounded-md border p-3 space-y-2 bg-gray-50 max-w-sm">
             <div className="flex gap-2 text-sm text-gray-800">
-                <Icon name="warning-triangle" className="h-4 w-4 text-amber-600 mt-0.5" />
+                <Icon name="question-mark-circled" className="h-4 w-4 text-amber-600 mt-0.5" />
                 <div>{warning}</div>
             </div>
             <label className="flex items-center gap-2 text-xs text-gray-700">
@@ -1008,7 +1008,7 @@ export default function ProvidersEmdrScopedPage() {
                 {pcgError ? (
                     <div className="rounded-md bg-amber-50 p-4 border border-amber-200">
                         <div className="flex">
-                            <Icon name="warning-triangle" className="h-5 w-5 text-amber-600 mt-0.5" />
+                            <Icon name="question-mark-circled" className="h-5 w-5 text-amber-600 mt-0.5" />
                             <div className="ml-3 text-sm text-amber-800">{pcgError}</div>
                         </div>
                     </div>
@@ -1133,7 +1133,7 @@ export default function ProvidersEmdrScopedPage() {
                                 disabled={!rows.length || isPending}
                                 title="Fetch PCG registration status/details for all providers with a Provider ID"
                             >
-                                <Icon name="refresh" className="h-4 w-4 mr-1.5" />
+                                <Icon name="update" className="h-4 w-4 mr-1.5" />
                                 Fetch Registration Details
                             </button>
                         </Form>
