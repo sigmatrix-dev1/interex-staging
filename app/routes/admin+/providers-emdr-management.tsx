@@ -1060,7 +1060,7 @@ export default function ProviderManagementPage() {
                         <div>
                             <h2 className="text-lg font-semibold text-gray-900">Customer Directory</h2>
                             <p className="text-sm text-gray-500">
-                                System Admins can rename customers here. This updates <code>Customer.name</code> only.
+                                System Admins can rename customers here (If any changes are required in regards to name). This updates <code>Customer.name</code> only.
                             </p>
                         </div>
                     </div>
