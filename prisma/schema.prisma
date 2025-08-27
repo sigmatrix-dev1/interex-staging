@@ -39,6 +39,10 @@ model User {
   // User can be assigned multiple NPIs
   userNpis UserNpi[]
 
+  // 2FA fields
+  twoFactorSecret   String?
+  twoFactorEnabled  Boolean @default(false)
+
   // Submissions created by this user
   submissions         Submission[]
   submissionDocuments SubmissionDocument[]
