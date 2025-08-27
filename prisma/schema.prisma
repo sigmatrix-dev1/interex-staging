@@ -249,7 +249,7 @@ model Provider {
   submissions Submission[]
   events      ProviderEvent[]
 
-  // Persist eMDR/PCG details locally
+  // Persist eMDR/PCG details locally (legacy fields kept to avoid breaking existing code)
   providerStreet  String?
   providerStreet2 String?
   providerCity    String?
@@ -260,9 +260,13 @@ model Provider {
   pcgUpdateResponse Json?
   pcgUpdateAt       DateTime?
 
-  // NEW: persist the last raw Providers List item + timestamp
-  pcgListSnapshot Json? // ADDED: stores the last /providers row from PCG as raw JSON
-  pcgListAt       DateTime? // ADDED: when we captured pcgListSnapshot
+  // Legacy snapshot of the /providers row + timestamp
+  pcgListSnapshot Json?
+  pcgListAt       DateTime?
+
+  // NEW relations to persistent tables
+  listDetail         ProviderListDetail?
+  registrationStatus ProviderRegistrationStatus?
 
   @@index([customerId])
   @@index([providerGroupId])
@@ -282,6 +286,84 @@ model UserNpi {
   @@unique([userId, providerId])
   @@index([userId])
   @@index([providerId])
+}
+
+// =============================================
+// NEW: Persistent tables for eMDR
+// =============================================
+
+/// Latest row from PCG `/providers` for each Provider (one row per provider)
+model ProviderListDetail {
+  id        String   @id @default(cuid())
+  fetchedAt DateTime @default(now())
+
+  provider   Provider @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  providerId String   @unique
+
+  // Keys / identities
+  providerNpi   String
+  pcgProviderId String?
+
+  // Flags / status
+  lastSubmittedTransaction        String?
+  registeredForEmdr               Boolean @default(false)
+  registeredForEmdrElectronicOnly Boolean @default(false)
+  stage                           String?
+  regStatus                       String?
+  status                          String?
+  esMDTransactionID               String?
+
+  // Address / name
+  providerName    String?
+  providerStreet  String?
+  providerStreet2 String?
+  providerCity    String?
+  providerState   String?
+  providerZip     String?
+
+  // Misc (as JSON blobs to retain full API payloads)
+  transactionIdList   String?
+  notificationDetails Json?
+  statusChanges       Json?
+  errors              Json?
+  errorList           Json?
+}
+
+/// Latest row from `pcgGetProviderRegistration` for each Provider (one row per provider)
+model ProviderRegistrationStatus {
+  id        String   @id @default(cuid())
+  fetchedAt DateTime @default(now())
+
+  provider   Provider @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  providerId String   @unique
+
+  // Keys / identities
+  providerNpi   String
+  pcgProviderId String
+
+  // Status
+  regStatus        String?
+  stage            String?
+  submissionStatus String?
+  status           String?
+
+  // Error surfaces
+  callErrorCode        String?
+  callErrorDescription String?
+
+  // Address / name
+  providerName    String?
+  providerStreet  String?
+  providerStreet2 String?
+  providerCity    String?
+  providerState   String?
+  providerZip     String?
+
+  // Misc
+  transactionIdList String?
+  statusChanges     Json?
+  errors            Json?
+  errorList         Json?
 }
 
 // =============================================

@@ -19,7 +19,7 @@ import {
     pcgUpdateProvider,
     pcgSetEmdrRegistration,
     pcgSetElectronicOnly,
-    pcgGetProviderRegistration, // NEW
+    pcgGetProviderRegistration,
     type PcgProviderListItem,
     type PcgUpdateProviderPayload,
 } from '#app/services/pcg-hih.server.ts'
@@ -41,68 +41,170 @@ type RegResp = Awaited<ReturnType<typeof pcgGetProviderRegistration>>
 
 /* ------------------------ Helpers (server) ------------------------ */
 
-function toBaseRows(
-    local: Array<{
-        npi: string
-        name: string | null
+/** Convert a remote list item into the normalized list-detail shape our mapper expects. */
+function mapListItemToDetail(r: PcgProviderListItem) {
+    return {
+        providerNpi: r.providerNPI,
+        pcgProviderId: (r as any).provider_id ?? null,
+        lastSubmittedTransaction: r.last_submitted_transaction ?? null,
+        registeredForEmdr: Boolean(r.registered_for_emdr),
+        registeredForEmdrElectronicOnly: Boolean(r.registered_for_emdr_electronic_only),
+        stage: r.stage ?? null,
+        regStatus: r.reg_status ?? null,
+        status: r.status ?? null,
+        esMDTransactionID: r.esMDTransactionID ?? null,
+        providerName: r.provider_name ?? null,
+        providerStreet: r.provider_street ?? null,
+        providerStreet2: r.provider_street2 ?? null,
+        providerCity: r.provider_city ?? null,
+        providerState: r.provider_state ?? null,
+        providerZip: r.provider_zip ?? null,
+        transactionIdList: Array.isArray(r.transaction_id_list)
+            ? r.transaction_id_list.join(',')
+            : (r.transaction_id_list as any as string | null),
+        notificationDetails: r.notificationDetails ?? [],
+        statusChanges: r.status_changes ?? [],
+        errors: r.errors ?? [],
+        errorList: r.errorList ?? [],
+    }
+}
+
+// Map persisted records into the UI Row shape
+function mapPersistedToRow(p: {
+    npi: string
+    name: string | null
+    pcgProviderId: string | null
+    providerStreet: string | null
+    providerStreet2: string | null
+    providerCity: string | null
+    providerState: string | null
+    providerZip: string | null
+    customerName: string | null
+    providerGroupName: string | null
+    listDetail: {
+        providerNpi: string
+        pcgProviderId: string | null
+        lastSubmittedTransaction: string | null
+        registeredForEmdr: boolean
+        registeredForEmdrElectronicOnly: boolean
+        stage: string | null
+        regStatus: string | null
+        status: string | null
+        esMDTransactionID: string | null
+        providerName: string | null
         providerStreet: string | null
         providerStreet2: string | null
         providerCity: string | null
         providerState: string | null
         providerZip: string | null
-        pcgProviderId: string | null
-        customerName: string | null
-        providerGroupName: string | null
-    }>,
-): Row[] {
-    return local
-        .map(p => ({
-            errorList: null,
-            providerNPI: p.npi,
-            last_submitted_transaction: null,
-            status_changes: [],
-            registered_for_emdr: false,
-            provider_street: p.providerStreet,
-            registered_for_emdr_electronic_only: false,
-            provider_state: p.providerState,
-            stage: null,
-            notificationDetails: [],
-            transaction_id_list: null,
-            reg_status: null,
-            provider_id: p.pcgProviderId || '',
-            provider_city: p.providerCity,
-            provider_zip: p.providerZip,
-            provider_name: p.name ?? null,
-            submission_status: null,
-            errors: [],
-            provider_street2: p.providerStreet2,
-            esMDTransactionID: null,
-            status: null,
-            customerName: p.customerName,
-            providerGroupName: p.providerGroupName,
-        }))
-        .sort((a, b) => a.providerNPI.localeCompare(b.providerNPI))
-}
+        transactionIdList: string | null
+        notificationDetails: any | null
+        statusChanges: any | null
+        errors: any | null
+        errorList: any | null
+    } | null
+    registrationStatus: null
+}): Row {
+    const ld = p.listDetail
+    const rs = null as any
+    const provider_id = rs?.pcgProviderId ?? ld?.pcgProviderId ?? p.pcgProviderId ?? ''
 
-function mergeRemoteIntoBase(base: Row[], remote: PcgProviderListItem[]): Row[] {
-    const byNpi = new Map(base.map(r => [r.providerNPI, r] as const))
-    const result = base.map(r => ({ ...r }))
-    for (const r of remote) {
-        const idx = result.findIndex(x => x.providerNPI === r.providerNPI)
-        const baseRow = byNpi.get(r.providerNPI)
-        const merged: Row = {
-            ...(baseRow as any),
-            ...r,
-            provider_name: baseRow?.provider_name ?? r.provider_name ?? null,
-            customerName: baseRow?.customerName ?? null,
-            providerGroupName: baseRow?.providerGroupName ?? null,
-        } as Row
-        if (idx >= 0) result[idx] = merged
-        else result.push(merged)
+    const r: Row = {
+        errorList: (ld?.errorList as any) ?? [],
+        providerNPI: p.npi,
+        last_submitted_transaction: ld?.lastSubmittedTransaction ?? null,
+        status_changes: (rs?.statusChanges as any) ?? (ld?.statusChanges as any) ?? [],
+        registered_for_emdr: Boolean(ld?.registeredForEmdr),
+        provider_street: ld?.providerStreet ?? p.providerStreet,
+        registered_for_emdr_electronic_only: Boolean(ld?.registeredForEmdrElectronicOnly),
+        provider_state: ld?.providerState ?? p.providerState,
+        stage: rs?.stage ?? ld?.stage ?? null,
+        notificationDetails: (ld?.notificationDetails as any) ?? [],
+        transaction_id_list: ld?.transactionIdList ? ld.transactionIdList.split(',').filter(Boolean) : null,
+        reg_status: rs?.regStatus ?? ld?.regStatus ?? null,
+        provider_id,
+        provider_city: ld?.providerCity ?? p.providerCity,
+        provider_zip: ld?.providerZip ?? p.providerZip,
+        provider_name: ld?.providerName ?? p.name ?? null,
+        submission_status: rs?.submissionStatus ?? null,
+        errors: (ld?.errors as any) ?? [],
+        provider_street2: ld?.providerStreet2 ?? p.providerStreet2,
+        esMDTransactionID: ld?.esMDTransactionID ?? null,
+        status: rs?.status ?? ld?.status ?? null,
+
+        // Extras for UI
+        customerName: p.customerName,
+        providerGroupName: p.providerGroupName,
     }
-    return result.sort((a, b) => a.providerNPI.localeCompare(b.providerNPI))
+
+    return r
 }
 
+async function composeRowsFromDb() {
+    // Pull only scalar fields from Provider to avoid relation typing issues
+    const providers = await prisma.provider.findMany({
+        select: {
+            id: true,
+            npi: true,
+            name: true,
+            pcgProviderId: true,
+            providerStreet: true,
+            providerStreet2: true,
+            providerCity: true,
+            providerState: true,
+            providerZip: true,
+            pcgUpdateResponse: true,
+            pcgListSnapshot: true,
+            customerId: true,
+            providerGroupId: true,
+        },
+        orderBy: [{ customerId: 'asc' }, { npi: 'asc' }],
+    })
+
+    // Lookup Customer / ProviderGroup names separately
+    const customerIds = Array.from(new Set(providers.map(p => p.customerId).filter(Boolean))) as string[]
+    const groupIds = Array.from(new Set(providers.map(p => p.providerGroupId).filter(Boolean))) as string[]
+
+    const [customers, groups] = await Promise.all([
+        customerIds.length
+            ? prisma.customer.findMany({ where: { id: { in: customerIds } }, select: { id: true, name: true } })
+            : Promise.resolve([]),
+        groupIds.length
+            ? prisma.providerGroup.findMany({ where: { id: { in: groupIds } }, select: { id: true, name: true } })
+            : Promise.resolve([]),
+    ])
+
+    const customerNameById = new Map(customers.map(c => [c.id, c.name] as const))
+    const groupNameById = new Map(groups.map(g => [g.id, g.name] as const))
+
+    const rows: Row[] = providers.map(p => {
+        const snapshot = (p.pcgListSnapshot as any) as PcgProviderListItem | null
+        const listDetail = snapshot ? mapListItemToDetail(snapshot) : null
+        return mapPersistedToRow({
+            npi: p.npi,
+            name: p.name ?? null,
+            pcgProviderId: p.pcgProviderId ?? null,
+            providerStreet: p.providerStreet ?? null,
+            providerStreet2: p.providerStreet2 ?? null,
+            providerCity: p.providerCity ?? null,
+            providerState: p.providerState ?? null,
+            providerZip: p.providerZip ?? null,
+            customerName: p.customerId ? customerNameById.get(p.customerId) ?? null : null,
+            providerGroupName: p.providerGroupId ? groupNameById.get(p.providerGroupId) ?? null : null,
+            listDetail,
+            registrationStatus: null,
+        })
+    })
+
+    const storedUpdates: StoredUpdate[] = providers.map(p => ({
+        npi: p.npi,
+        response: p.pcgUpdateResponse ?? null,
+    }))
+
+    return { rows, storedUpdates }
+}
+
+// Build provider update from remote item for the legacy Provider columns
 function buildUpdateFromRemote(r: PcgProviderListItem) {
     const u: Record<string, any> = {}
     if (r.provider_name !== undefined) u.name = r.provider_name ?? null
@@ -142,23 +244,6 @@ async function getAllProvidersFromPCG() {
     return all
 }
 
-// Server-side prereq check for eMDR actions
-function hasEmdrPrereqsServer(p: {
-    name: string | null
-    providerStreet: string | null
-    providerCity: string | null
-    providerState: string | null
-    providerZip: string | null
-}) {
-    return Boolean(
-        (p.name ?? '').trim() &&
-        (p.providerStreet ?? '').trim() &&
-        (p.providerCity ?? '').trim() &&
-        (p.providerState ?? '').trim() &&
-        (p.providerZip ?? '').trim(),
-    )
-}
-
 /* ----------------------------- Loader ----------------------------- */
 export async function loader({ request }: LoaderFunctionArgs) {
     const userId = await requireUserId(request)
@@ -169,10 +254,12 @@ export async function loader({ request }: LoaderFunctionArgs) {
     if (!user) throw new Response('Unauthorized', { status: 401 })
     requireRoles(user, [INTEREX_ROLES.SYSTEM_ADMIN])
 
+    const { rows, storedUpdates } = await composeRowsFromDb()
+
     return data({
         user,
-        baseRows: [] as Row[],
-        updateResponses: [] as StoredUpdate[],
+        baseRows: rows,
+        updateResponses: storedUpdates,
     })
 }
 
@@ -189,49 +276,10 @@ export async function action({ request }: ActionFunctionArgs) {
     const form = await request.formData()
     const intent = String(form.get('intent') || '')
 
-    async function loadAllLocal() {
-        const localProviders = await prisma.provider.findMany({
-            select: {
-                npi: true,
-                name: true,
-                providerStreet: true,
-                providerStreet2: true,
-                providerCity: true,
-                providerState: true,
-                providerZip: true,
-                pcgProviderId: true,
-                pcgUpdateResponse: true,
-                customer: { select: { name: true } },
-                providerGroup: { select: { name: true } },
-            },
-            orderBy: [{ customerId: 'asc' }, { npi: 'asc' }],
-        })
-        const baseRows = toBaseRows(
-            localProviders.map(p => ({
-                npi: p.npi,
-                name: p.name ?? null,
-                providerStreet: p.providerStreet ?? null,
-                providerStreet2: p.providerStreet2 ?? null,
-                providerCity: p.providerCity ?? null,
-                providerState: p.providerState ?? null,
-                providerZip: p.providerZip ?? null,
-                pcgProviderId: p.pcgProviderId ?? null,
-                customerName: p.customer?.name ?? null,
-                providerGroupName: p.providerGroup?.name ?? null,
-            })),
-        )
-        const storedUpdates: StoredUpdate[] = localProviders.map(p => ({
-            npi: p.npi,
-            response: p.pcgUpdateResponse ?? null,
-        }))
-        return { baseRows, storedUpdates }
-    }
-
     if (intent === 'fetch') {
         let pcgError: string | null = null
-        let remote: PcgProviderListItem[] = []
         try {
-            remote = await getAllProvidersFromPCG()
+            const remote = await getAllProvidersFromPCG()
 
             const systemCustomerId = await getSystemCustomerId()
             const existing = await prisma.provider.findMany({
@@ -247,6 +295,7 @@ export async function action({ request }: ActionFunctionArgs) {
             const chunk = <T,>(arr: T[], size: number) =>
                 Array.from({ length: Math.ceil(arr.length / size) }, (_, i) => arr.slice(i * size, (i + 1) * size))
 
+            // Update existing Provider rows (legacy columns + legacy snapshot)
             for (const group of chunk(updates, 100)) {
                 await prisma.$transaction(
                     group.map(r =>
@@ -258,6 +307,7 @@ export async function action({ request }: ActionFunctionArgs) {
                 )
             }
 
+            // Create missing Provider rows
             for (const group of chunk(creates, 50)) {
                 await prisma.$transaction(
                     group.map(r =>
@@ -279,13 +329,13 @@ export async function action({ request }: ActionFunctionArgs) {
                     ),
                 )
             }
+
+            // NOTE: In this compatibility version we do NOT write ProviderListDetail table.
         } catch (err: any) {
             pcgError = err?.message || 'Failed to fetch providers from PCG.'
         }
 
-        const { baseRows, storedUpdates } = await loadAllLocal()
-        const rows = mergeRemoteIntoBase(baseRows, remote)
-
+        const { rows, storedUpdates } = await composeRowsFromDb()
         return data({
             rows,
             meta: { totalForOrg: rows.length },
@@ -342,37 +392,23 @@ export async function action({ request }: ActionFunctionArgs) {
                     },
                 })
             }
+
+            // Best-effort refresh of the snapshot for this one NPI
+            try {
+                const remote = await getAllProvidersFromPCG()
+                const match = remote.find(r => r.providerNPI === payload.provider_npi)
+                if (match) {
+                    await prisma.provider.update({
+                        where: { npi: payload.provider_npi },
+                        data: { pcgListSnapshot: match as any, pcgListAt: new Date() },
+                    })
+                }
+            } catch {/* ignore */}
         } catch (err: any) {
             pcgError = err?.message || 'Failed to update provider.'
         }
 
-        let remote: PcgProviderListItem[] = []
-        try {
-            remote = await getAllProvidersFromPCG()
-            const now = new Date()
-            const existing = await prisma.provider.findMany({
-                where: { npi: { in: remote.map(r => r.providerNPI) } },
-                select: { npi: true },
-            })
-            const existingSet = new Set(existing.map(p => p.npi))
-            const updates = remote.filter(r => existingSet.has(r.providerNPI))
-            const chunk = <T,>(arr: T[], size: number) =>
-                Array.from({ length: Math.ceil(arr.length / size) }, (_, i) => arr.slice(i * size, (i + 1) * size))
-            for (const group of chunk(updates, 100)) {
-                await prisma.$transaction(
-                    group.map(r =>
-                        prisma.provider.update({
-                            where: { npi: r.providerNPI },
-                            data: { ...buildUpdateFromRemote(r), pcgListSnapshot: r as any, pcgListAt: now },
-                        }),
-                    ),
-                )
-            }
-        } catch { /* ignore */ }
-
-        const { baseRows, storedUpdates } = await loadAllLocal()
-        const rows = mergeRemoteIntoBase(baseRows, remote)
-
+        const { rows, storedUpdates } = await composeRowsFromDb()
         return data({
             rows,
             meta: { totalForOrg: rows.length },
@@ -386,9 +422,10 @@ export async function action({ request }: ActionFunctionArgs) {
 
     // --- Bulk fetch per-provider registration details --------------------------
     if (intent === 'fetch-registrations') {
-        const nowIso = new Date().toISOString()
+        const now = new Date()
+        const nowIso = now.toISOString()
 
-        // Only providers with provider_id and required address/name
+        // Only providers with provider_id and name/address present
         const candidates = await prisma.provider.findMany({
             where: {
                 NOT: [
@@ -402,6 +439,7 @@ export async function action({ request }: ActionFunctionArgs) {
                 ],
             },
             select: {
+                id: true,
                 npi: true,
                 pcgProviderId: true,
                 name: true,
@@ -446,40 +484,7 @@ export async function action({ request }: ActionFunctionArgs) {
             }
         }
 
-        // Compose latest rows view
-        const localProviders = await prisma.provider.findMany({
-            select: {
-                npi: true,
-                name: true,
-                providerStreet: true,
-                providerStreet2: true,
-                providerCity: true,
-                providerState: true,
-                providerZip: true,
-                pcgProviderId: true,
-                customer: { select: { name: true } },
-                providerGroup: { select: { name: true } },
-            },
-            orderBy: [{ customerId: 'asc' }, { npi: 'asc' }],
-        })
-        const baseRows = toBaseRows(
-            localProviders.map(p => ({
-                npi: p.npi,
-                name: p.name ?? null,
-                providerStreet: p.providerStreet ?? null,
-                providerStreet2: p.providerStreet2 ?? null,
-                providerCity: p.providerCity ?? null,
-                providerState: p.providerState ?? null,
-                providerZip: p.providerZip ?? null,
-                pcgProviderId: p.pcgProviderId ?? null,
-                customerName: p.customer?.name ?? null,
-                providerGroupName: p.providerGroup?.name ?? null,
-            })),
-        )
-
-        let remote: PcgProviderListItem[] = []
-        try { remote = await getAllProvidersFromPCG() } catch { /* ignore */ }
-        const rows = mergeRemoteIntoBase(baseRows, remote)
+        const { rows, storedUpdates } = await composeRowsFromDb()
 
         return data({
             rows,
@@ -488,7 +493,7 @@ export async function action({ request }: ActionFunctionArgs) {
             didUpdate: false as const,
             updatedNpi: undefined,
             updateResponse: undefined,
-            updateResponses: [],
+            updateResponses: storedUpdates,
             regById,
             regFetchedAt: nowIso,
         })
@@ -505,12 +510,21 @@ export async function action({ request }: ActionFunctionArgs) {
         let pcgError: string | null = null
         let updateResponse: any = null
 
+        // We'll collect a fresh registration payload for this single provider
+        const regById: Record<string, RegResp> = Object.create(null)
+        const now = new Date()
+        const nowIso = now.toISOString()
+
         try {
             if (intent === 'emdr-register') updateResponse = await pcgSetEmdrRegistration(providerId, true)
             else if (intent === 'emdr-deregister') updateResponse = await pcgSetEmdrRegistration(providerId, false)
             else updateResponse = await pcgSetElectronicOnly(providerId)
 
-            const existing = await prisma.provider.findUnique({ where: { npi: providerNpi }, select: { id: true } })
+            // Persist update response to Provider (legacy audit)
+            const existing = await prisma.provider.findUnique({
+                where: { npi: providerNpi },
+                select: { id: true, pcgProviderId: true, npi: true },
+            })
             if (existing) {
                 await prisma.provider.update({
                     where: { id: existing.id },
@@ -521,36 +535,33 @@ export async function action({ request }: ActionFunctionArgs) {
                     },
                 })
             }
+
+            // Immediately fetch registration status for this provider (ephemeral)
+            try {
+                const reg = await pcgGetProviderRegistration(providerId)
+                regById[providerId] = reg
+            } catch {
+                // ignore if fetch fails
+            }
         } catch (err: any) {
             pcgError = err?.message || 'Failed to submit eMDR registration/deregistration.'
         }
 
-        let remote: PcgProviderListItem[] = []
+        // Best-effort refresh of the list snapshot for this single provider
         try {
-            remote = await getAllProvidersFromPCG()
-            const now = new Date()
-            const existing = await prisma.provider.findMany({
-                where: { npi: { in: remote.map(r => r.providerNPI) } },
-                select: { npi: true },
-            })
-            const existingSet = new Set(existing.map(p => p.npi))
-            const updates = remote.filter(r => existingSet.has(r.providerNPI))
-            const chunk = <T,>(arr: T[], size: number) =>
-                Array.from({ length: Math.ceil(arr.length / size) }, (_, i) => arr.slice(i * size, (i + 1) * size))
-            for (const group of chunk(updates, 100)) {
-                await prisma.$transaction(
-                    group.map(r =>
-                        prisma.provider.update({
-                            where: { npi: r.providerNPI },
-                            data: { ...buildUpdateFromRemote(r), pcgListSnapshot: r as any, pcgListAt: now },
-                        }),
-                    ),
-                )
+            const remote = await getAllProvidersFromPCG()
+            const match = remote.find(r => r.providerNPI === providerNpi)
+            if (match) {
+                await prisma.provider.update({
+                    where: { npi: providerNpi },
+                    data: { pcgListSnapshot: match as any, pcgListAt: now },
+                })
             }
-        } catch { /* ignore snapshot failures */ }
+        } catch {
+            // ignore
+        }
 
-        const { baseRows, storedUpdates } = await loadAllLocal()
-        const rows = mergeRemoteIntoBase(baseRows, remote)
+        const { rows, storedUpdates } = await composeRowsFromDb()
 
         return data({
             rows,
@@ -560,6 +571,15 @@ export async function action({ request }: ActionFunctionArgs) {
             updatedNpi: providerNpi,
             updateResponse,
             updateResponses: storedUpdates,
+            regById,
+            regFetchedAt: nowIso,
+            lastAction: {
+                kind: intent as 'emdr-register' | 'emdr-deregister' | 'emdr-electronic-only',
+                npi: providerNpi,
+                providerId,
+                ok: !pcgError,
+                at: nowIso,
+            },
         })
     }
 
@@ -567,6 +587,24 @@ export async function action({ request }: ActionFunctionArgs) {
 }
 
 /* ------------------------- Client-side types ------------------------- */
+type LastActionSignal = {
+    kind: 'emdr-register' | 'emdr-deregister' | 'emdr-electronic-only'
+    npi: string
+    providerId: string
+    ok: boolean
+    at: string
+}
+
+/** Shape of individual status change entries returned by PCG. */
+type StatusChange = {
+    split_number?: string
+    time?: string
+    title?: string
+    esmd_transaction_id?: string | null
+    status?: string
+    [k: string]: any
+}
+
 type ActionSuccess = {
     rows: Row[]
     meta: { totalForOrg: number }
@@ -578,6 +616,8 @@ type ActionSuccess = {
 
     regById?: Record<string, RegResp>
     regFetchedAt?: string
+
+    lastAction?: LastActionSignal
 }
 type ActionFailure = { error: string }
 type ActionData = ActionSuccess | ActionFailure
@@ -599,6 +639,7 @@ function ConfirmActionButton({
                                  color = 'blue',
                                  disabled,
                                  warning,
+                                 resetOn,
                              }: {
     intent: 'emdr-register' | 'emdr-deregister' | 'emdr-electronic-only'
     providerId?: string
@@ -607,9 +648,18 @@ function ConfirmActionButton({
     color?: 'blue' | 'green' | 'rose' | 'purple'
     disabled?: boolean
     warning: string
+    resetOn?: string | undefined
 }) {
     const [open, setOpen] = React.useState(false)
     const [checked, setChecked] = React.useState(false)
+
+    React.useEffect(() => {
+        if (resetOn) {
+            setOpen(false)
+            setChecked(false)
+        }
+    }, [resetOn])
+
     const colorClass =
         color === 'green' ? 'bg-green-600 hover:bg-green-700'
             : color === 'rose' ? 'bg-rose-600 hover:bg-rose-700'
@@ -632,7 +682,7 @@ function ConfirmActionButton({
     return (
         <div className="rounded-md border p-3 space-y-2 bg-gray-50 max-w-sm">
             <div className="flex gap-2 text-sm text-gray-800">
-                <Icon name="warning-triangle" className="h-4 w-4 text-amber-600 mt-0.5" />
+                <Icon name="question-mark-circled" className="h-4 w-4 text-amber-600 mt-0.5" />
                 <div>{warning}</div>
             </div>
             <label className="flex items-center gap-2 text-xs text-gray-700">
@@ -698,7 +748,10 @@ export default function ProviderManagementPage() {
         return m
     }, [hasRows, actionData, updateResponses])
 
-    // Registration details (ephemeral)
+    // Signal to close confirm popovers after action completes
+    const lastAction = hasRows ? (actionData as ActionSuccess).lastAction : undefined
+
+    // Registration details (ephemeral fetch payload — optional)
     const regById = (hasRows ? (actionData as ActionSuccess).regById : undefined) || {}
     const regFetchedAt = hasRows ? (actionData as ActionSuccess).regFetchedAt : undefined
 
@@ -713,11 +766,11 @@ export default function ProviderManagementPage() {
     }, [rows])
 
     const filteredRows = React.useMemo(() => {
-        if (!hasRows) return []
+        if (!rows?.length) return []
         if (customerFilter === 'all') return rows
         if (customerFilter === 'unassigned') return rows.filter(r => !r.customerName)
         return rows.filter(r => r.customerName === customerFilter)
-    }, [rows, customerFilter, hasRows])
+    }, [rows, customerFilter])
 
     // Drawer state
     const [drawer, setDrawer] = React.useState<{ open: boolean; forNpi?: string; seed?: Partial<PcgUpdateProviderPayload> }>({ open: false })
@@ -804,7 +857,7 @@ export default function ProviderManagementPage() {
                             <select
                                 value={customerFilter}
                                 onChange={e => setCustomerFilter(e.target.value as any)}
-                                disabled={!hasRows}
+                                disabled={!rows.length}
                                 className="block w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 focus:outline-none focus:ring-1 focus:ring-blue-500 focus:border-blue-500 disabled:bg-gray-50 disabled:text-gray-400"
                             >
                                 <option value="all">All Customers</option>
@@ -815,8 +868,8 @@ export default function ProviderManagementPage() {
                             </select>
                         </div>
                     </div>
-                    {!hasRows ? (
-                        <p className="mt-3 text-sm text-gray-500">Click “Fetch from PCG” to load providers for this token.</p>
+                    {!rows.length ? (
+                        <p className="mt-3 text-sm text-gray-500">Click “Fetch from PCG” to load/refresh providers for this token.</p>
                     ) : (
                         <p className="mt-3 text-sm text-gray-500">
                             Showing {filteredRows.length} of {rows.length} NPIs
@@ -829,7 +882,7 @@ export default function ProviderManagementPage() {
                 {pcgError ? (
                     <div className="rounded-md bg-amber-50 p-4 border border-amber-200">
                         <div className="flex">
-                            <Icon name="warning-triangle" className="h-5 w-5 text-amber-600 mt-0.5" />
+                            <Icon name="question-mark-circled" className="h-5 w-5 text-amber-600 mt-0.5" />
                             <div className="ml-3 text-sm text-amber-800">{pcgError}</div>
                         </div>
                     </div>
@@ -842,7 +895,7 @@ export default function ProviderManagementPage() {
                     <div className="px-6 py-4 border-b border-gray-200">
                         <h2 className="text-lg font-medium text-gray-900">Provider Details Updating</h2>
                         <p className="text-sm text-gray-500">
-                            {hasRows ? (
+                            {rows.length ? (
                                 <>
                                     Showing {filteredRows.length} NPIs • Filter:&nbsp;
                                     <span className="font-medium">{customerFilter === 'all' ? 'All Customers' : customerFilter === 'unassigned' ? 'Unassigned' : customerFilter}</span>
@@ -875,12 +928,9 @@ export default function ProviderManagementPage() {
                             </tr>
                             </thead>
                             <tbody className="bg-white divide-y divide-gray-200">
-                            {!hasRows || filteredRows.length === 0 ? (
+                            {!filteredRows.length ? (
                                 <tr>
-                                    {/* colSpan reduced to 16 (removed the old extra column) */}
-                                    <td colSpan={16} className="px-6 py-8 text-center text-sm text-gray-500">
-                                        {hasRows ? 'No rows match this filter.' : 'No data.'}
-                                    </td>
+                                    <td colSpan={16} className="px-6 py-8 text-center text-sm text-gray-500">No rows.</td>
                                 </tr>
                             ) : (
                                 filteredRows.map((r: Row) => {
@@ -934,7 +984,7 @@ export default function ProviderManagementPage() {
                 </div>
 
                 {/* ====================================================== */}
-                {/* eMDR Register/deRegister section (reordered)           */}
+                {/* eMDR Register/deRegister section                      */}
                 {/* ====================================================== */}
                 <div className="bg-white shadow rounded-lg overflow-hidden">
                     <div className="px-6 py-4 border-b border-gray-200 flex items-center gap-3">
@@ -943,16 +993,16 @@ export default function ProviderManagementPage() {
                             <p className="text-sm text-gray-500">Only NPIs with provider name and address are shown below. Update provider details first if needed.</p>
                         </div>
 
-                        {/* NEW: bulk fetch registration details */}
+                        {/* Bulk fetch registration details */}
                         <Form method="post">
                             <input type="hidden" name="intent" value="fetch-registrations" />
                             <button
                                 type="submit"
                                 className="inline-flex items-center rounded-md bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white shadow-sm hover:bg-indigo-700 disabled:opacity-50"
-                                disabled={!hasRows || isPending}
+                                disabled={!rows.length || isPending}
                                 title="Fetch PCG registration status/details for all providers with a Provider ID"
                             >
-                                <Icon name="refresh" className="h-4 w-4 mr-1.5" />
+                                <Icon name="update" className="h-4 w-4 mr-1.5" />
                                 Fetch Registration Details
                             </button>
                         </Form>
@@ -963,7 +1013,7 @@ export default function ProviderManagementPage() {
                         </div>
                     ) : null}
 
-                    {/* --- Table 1: Not registered for eMDR (moved to top) --- */}
+                    {/* --- Table 1: Not registered for eMDR --- */}
                     <div className="px-6 py-5">
                         <h3 className="text-sm font-semibold text-gray-800 mb-3">Not registered for eMDR</h3>
                         <div className="overflow-x-auto">
@@ -989,7 +1039,8 @@ export default function ProviderManagementPage() {
                                         const anyError =
                                             (reg?.call_error_code || reg?.call_error_description) ||
                                             (reg?.errorList?.length ? reg.errorList.join('; ') : '') ||
-                                            (reg?.errors?.length ? JSON.stringify(reg.errors) : '')
+                                            (reg?.errors?.length ? JSON.stringify(reg.errors) : '') ||
+                                            (r.errors?.length ? JSON.stringify(r.errors) : '')
                                         return (
                                             <tr key={`unreg-${r.provider_id}-${r.providerNPI}`} className="align-top">
                                                 <td className="px-6 py-3 text-sm font-medium text-gray-900">{r.providerNPI}</td>
@@ -1007,6 +1058,11 @@ export default function ProviderManagementPage() {
                                                         color="green"
                                                         disabled={isPending || !r.provider_id}
                                                         warning="Are you sure you want to register this NPI for eMDR? Electronic delivery will be enabled."
+                                                        resetOn={
+                                                            lastAction && lastAction.ok && lastAction.npi === r.providerNPI
+                                                                ? lastAction.at
+                                                                : undefined
+                                                        }
                                                     />
                                                     {!r.provider_id ? <p className="mt-2 text-xs text-amber-600">Provider ID missing — update provider details first.</p> : null}
                                                 </td>
@@ -1048,15 +1104,19 @@ export default function ProviderManagementPage() {
                                 ) : (
                                     registeredRows.map(r => {
                                         const reg = r.provider_id ? regById[r.provider_id] : undefined
-                                        const lastChange = reg?.status_changes?.length ? reg.status_changes[reg.status_changes.length - 1] : undefined
+                                        const statusChanges = (reg?.status_changes ?? r.status_changes) as StatusChange[]
+                                        const lastChange: StatusChange | undefined =
+                                            Array.isArray(statusChanges) && statusChanges.length ? statusChanges[statusChanges.length - 1] : undefined
                                         const txnDisplay =
                                             typeof reg?.transaction_id_list === 'string'
                                                 ? reg.transaction_id_list.replace(/,+$/, '')
-                                                : (lastChange?.esmd_transaction_id ?? '')
+                                                : lastChange?.esmd_transaction_id
+                                                ?? (Array.isArray(r.transaction_id_list) ? (r.transaction_id_list as any[]).join(',') : '')
                                         const anyError =
                                             (reg?.call_error_code || reg?.call_error_description) ||
                                             (reg?.errorList?.length ? reg.errorList.join('; ') : '') ||
-                                            (reg?.errors?.length ? JSON.stringify(reg.errors) : '')
+                                            (reg?.errors?.length ? JSON.stringify(reg.errors) : '') ||
+                                            (r.errors?.length ? JSON.stringify(r.errors) : '')
                                         return (
                                             <tr key={`reg-${r.provider_id}-${r.providerNPI}`} className="align-top">
                                                 <td className="px-6 py-3 text-sm font-medium text-gray-900">{r.providerNPI}</td>
@@ -1086,6 +1146,11 @@ export default function ProviderManagementPage() {
                                                             color="rose"
                                                             disabled={isPending || !r.provider_id}
                                                             warning="Are you sure you want to deregister this NPI from eMDR? Electronic delivery will stop."
+                                                            resetOn={
+                                                                lastAction && lastAction.ok && lastAction.npi === r.providerNPI
+                                                                    ? lastAction.at
+                                                                    : undefined
+                                                            }
                                                         />
                                                         {!r.registered_for_emdr_electronic_only ? (
                                                             <ConfirmActionButton
@@ -1096,6 +1161,11 @@ export default function ProviderManagementPage() {
                                                                 color="purple"
                                                                 disabled={isPending || !r.provider_id}
                                                                 warning="Are you sure you want to set Electronic-Only ADR for this NPI? Paper mail will stop."
+                                                                resetOn={
+                                                                    lastAction && lastAction.ok && lastAction.npi === r.providerNPI
+                                                                        ? lastAction.at
+                                                                        : undefined
+                                                                }
                                                             />
                                                         ) : null}
                                                     </div>
@@ -1139,7 +1209,8 @@ export default function ProviderManagementPage() {
                                         const anyError =
                                             (reg?.call_error_code || reg?.call_error_description) ||
                                             (reg?.errorList?.length ? reg.errorList.join('; ') : '') ||
-                                            (reg?.errors?.length ? JSON.stringify(reg.errors) : '')
+                                            (reg?.errors?.length ? JSON.stringify(reg.errors) : '') ||
+                                            (r.errors?.length ? JSON.stringify(r.errors) : '')
                                         return (
                                             <tr key={`eo-${r.provider_id}-${r.providerNPI}`} className="align-top">
                                                 <td className="px-6 py-3 text-sm font-medium text-gray-900">{r.providerNPI}</td>
@@ -1157,6 +1228,11 @@ export default function ProviderManagementPage() {
                                                         color="rose"
                                                         disabled={isPending || !r.provider_id}
                                                         warning="Are you sure you want to deregister this NPI from eMDR? This will also remove Electronic-Only ADR."
+                                                        resetOn={
+                                                            lastAction && lastAction.ok && lastAction.npi === r.providerNPI
+                                                                ? lastAction.at
+                                                                : undefined
+                                                        }
                                                     />
                                                 </td>
                                                 <td className="px-6 py-3 text-sm text-gray-700 align-top w-[36rem]"><ActionResponseCell r={r} /></td>
