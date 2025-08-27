@@ -81,6 +81,12 @@ export function InterexHeader({
                 description: 'Manage provider NPIs',
             },
             {
+                name: 'Provider & eMDR Management',
+                href: '/providers-emdr',
+                icon: 'id-card',
+                description: 'Provider Management & eMDR Registration/deRegistration',
+            },
+            {
                 name: 'Letters',
                 href: '/customer/letters',
                 icon: 'file-text',
@@ -139,6 +145,12 @@ export function InterexHeader({
                 href: '/customer/npis',
                 icon: 'passkey',
                 description: 'View assigned NPIs',
+            },
+            {
+                name: 'Provider NPIs',
+                href: '/customer/provider-npis',
+                icon: 'id-card',
+                description: 'Manage provider NPIs',
             },
             {
                 name: 'Letters',

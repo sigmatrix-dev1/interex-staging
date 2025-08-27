@@ -58,10 +58,10 @@ export function InterexNavigation({ user, currentPath }: InterexNavigationProps)
                 description: 'Manage provider NPIs',
             },
             {
-                name: 'eMDR',
-                href: '/customer/emdr',
+                name: 'Provider & eMDR Management',
+                href: '/providers-emdr',
                 icon: 'mail',
-                description: 'Manage eMDR workflows',
+                description: 'Provider Management & eMDR Registration/deRegistration',
             },
             {
                 name: 'Letters',
@@ -94,6 +94,12 @@ export function InterexNavigation({ user, currentPath }: InterexNavigationProps)
                 description: 'Manage provider NPIs',
             },
             {
+                name: 'Provider & eMDR Management',
+                href: '/providers-emdr',
+                icon: 'mail',
+                description: 'Provider Management & eMDR Registration/deRegistration',
+            },
+            {
                 name: 'Letters',
                 href: '/customer/letters',
                 icon: 'file-text',
@@ -116,6 +122,18 @@ export function InterexNavigation({ user, currentPath }: InterexNavigationProps)
                 href: '/submissions/npis',
                 icon: 'passkey',
                 description: 'View assigned NPIs',
+            },
+            {
+                name: 'Provider NPIs',
+                href: '/customer/provider-npis',
+                icon: 'id-card',
+                description: 'Manage provider NPIs',
+            },
+            {
+                name: 'Provider & eMDR Management',
+                href: '/providers-emdr',
+                icon: 'mail',
+                description: 'Provider Management & eMDR Registration/deRegistration',
             },
             {
                 name: 'Letters',

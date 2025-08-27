@@ -1,3 +1,4 @@
+// app/routes/customer/provider-npis.tsx
 import { getFormProps, getInputProps, useForm } from '@conform-to/react'
 import { parseWithZod, getZodConstraint } from '@conform-to/zod'
 import { useState, useEffect } from 'react'
@@ -11,18 +12,18 @@ import {
     useSearchParams,
     useActionData,
 } from 'react-router'
-
 import { z } from 'zod'
+
 import { Field, ErrorList, SelectField } from '#app/components/forms.tsx'
 import { InterexLayout } from '#app/components/interex-layout.tsx'
 import { JsonViewer } from '#app/components/json-view.tsx'
 import { useToast } from '#app/components/toaster.tsx'
 import { Drawer } from '#app/components/ui/drawer.tsx'
 import { Icon } from '#app/components/ui/icon.tsx'
+import { LoadingOverlay } from '#app/components/ui/loading-overlay.tsx'
 import { StatusButton } from '#app/components/ui/status-button.tsx'
-import { INTEREX_ROLES } from '#app/utils/interex-roles.ts' // safe on client
+import { INTEREX_ROLES } from '#app/utils/interex-roles.ts'
 import { useIsPending } from '#app/utils/misc.tsx'
-import { LoadingOverlay } from '#app/components/ui/loading-overlay.tsx'  // ⬅️ added
 
 /** Helper: append a provider event (audit) — server-only import inside */
 async function logProviderEvent(input: {
@@ -85,12 +86,7 @@ const ToggleActiveSchema = z.object({
     }),
 })
 
-const SearchSchema = z.object({
-    search: z.string().optional(),
-})
-
 export async function loader({ request }: LoaderFunctionArgs) {
-    // 🔽 dynamic server imports
     const [{ requireUserId }, { prisma }, { requireRoles }, { getToast }] = await Promise.all([
         import('#app/utils/auth.server.ts'),
         import('#app/utils/db.server.ts'),
@@ -124,7 +120,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
         throw new Response('Provider group admin must be assigned to a provider group', { status: 400 })
     }
 
-    // Search params
+    // Initial snapshot of search params (used for SSR & initial render)
     const url = new URL(request.url)
     const searchParams = {
         search: url.searchParams.get('search') || '',
@@ -170,18 +166,9 @@ export async function loader({ request }: LoaderFunctionArgs) {
         take: 500,
     })
 
-    // preload editing provider (if any)
-    let editingProvider: any = null
-    if (searchParams.action === 'edit' && searchParams.providerId) {
-        editingProvider = await prisma.provider.findFirst({
-            where: { id: searchParams.providerId, customerId: user.customerId },
-            include: { providerGroup: true, _count: { select: { userNpis: true } } },
-        })
-    }
-
     const { toast, headers } = await getToast(request)
     return data(
-        { user, customer, searchParams, editingProvider, toast, events, isCustomerAdmin, isProviderGroupAdmin },
+        { user, customer, searchParams, toast, events, isCustomerAdmin, isProviderGroupAdmin },
         { headers: headers ?? undefined },
     )
 }
@@ -216,7 +203,6 @@ export async function action({ request }: ActionFunctionArgs) {
     requireRoles(user, [INTEREX_ROLES.CUSTOMER_ADMIN, INTEREX_ROLES.PROVIDER_GROUP_ADMIN])
     if (!user.customerId) throw new Response('User must be associated with a customer', { status: 400 })
 
-    // ✅ compute once and reuse everywhere in this action
     const userRoles = user.roles.map(r => r.name)
     const isCustomerAdmin = userRoles.includes(INTEREX_ROLES.CUSTOMER_ADMIN)
     const isProviderGroupAdmin = userRoles.includes(INTEREX_ROLES.PROVIDER_GROUP_ADMIN)
@@ -224,10 +210,16 @@ export async function action({ request }: ActionFunctionArgs) {
         throw new Response('Provider group admin must be assigned to a provider group', { status: 400 })
     }
 
+    // Org name (PCG expects the customer/org name)
+    const org = await prisma.customer.findUnique({
+        where: { id: user.customerId },
+        select: { name: true },
+    })
+    const orgName = org?.name ?? ''
+
     const formData = await request.formData()
     const intent = formData.get('intent')
 
-    // Fetch org NPIs from PCG
     if (intent === 'fetch-remote-npis') {
         try {
             const list = await pcgGetUserNpis()
@@ -237,7 +229,6 @@ export async function action({ request }: ActionFunctionArgs) {
         }
     }
 
-    // Create provider
     if (intent === 'create') {
         const submission = parseWithZod(formData, { schema: CreateProviderSchema })
         if (submission.status !== 'success') {
@@ -248,24 +239,38 @@ export async function action({ request }: ActionFunctionArgs) {
         const providerGroupIdRaw = submission.value.providerGroupId
         const providerGroupId = providerGroupIdRaw && providerGroupIdRaw.length > 0 ? providerGroupIdRaw : null
 
-        // Unique NPI (global)
-        const existingProvider = await prisma.provider.findFirst({ where: { npi } })
+        // Only block if the NPI already exists for THIS customer
+        const existingProvider = await prisma.provider.findFirst({
+            where: { npi, customerId: user.customerId },
+        })
         if (existingProvider) {
             return data(
-                { result: submission.reply({ fieldErrors: { npi: ['This NPI is already registered in the system'] } }) },
+                { result: submission.reply({ fieldErrors: { npi: ['This NPI is already registered for your organization'] } }) },
                 { status: 400 },
             )
         }
 
-        // PCG add — tolerate "already exists", fail on other errors
+        // Try to add in PCG; tolerate "already exists/present", fail otherwise
         try {
-            await pcgAddProviderNpi({ providerNPI: npi, customerName: name })
+            await pcgAddProviderNpi({ providerNPI: npi, customerName: orgName })
         } catch (err: any) {
             const msg = String(err?.message || '')
-            const duplicate = /already|exist|registered|duplicate/i.test(msg)
+            const duplicate = /(already|exist|registered|duplicate|present)/i.test(msg)
             if (!duplicate) {
+                // Surface + log the non-duplicate PCG failure
+                try {
+                    await logProviderEvent({
+                        providerId: 'unknown',
+                        customerId: user.customerId,
+                        actorId: userId,
+                        kind: 'PCG_ADD_ERROR',
+                        message: 'PCG AddProviderNPI failed',
+                        payload: { npi, orgName, error: msg },
+                    })
+                } catch {}
                 return data({ result: submission.reply({ formErrors: [msg || 'Failed to add NPI in PCG.'] }) }, { status: 400 })
             }
+            // else: already in PCG for this org — proceed with local create
         }
 
         // Optional group validation
@@ -281,47 +286,62 @@ export async function action({ request }: ActionFunctionArgs) {
             }
             if (isProviderGroupAdmin && !isCustomerAdmin && providerGroupId !== user.providerGroupId) {
                 return data(
-                    {
-                        result: submission.reply({
-                            fieldErrors: { providerGroupId: ['You can only assign your group'] },
-                        }),
-                    },
+                    { result: submission.reply({ fieldErrors: { providerGroupId: ['You can only assign your group'] } }) },
                     { status: 400 },
                 )
             }
         }
 
-        // Create locally
-        const created = await prisma.provider.create({
-            data: { npi, name, customerId: user.customerId, providerGroupId, active: true },
-        })
+        // Create locally (+ events)
+        try {
+            const created = await prisma.provider.create({
+                data: { npi, name, customerId: user.customerId, providerGroupId, active: true },
+            })
 
-        // Events
-        await logProviderEvent({
-            providerId: created.id,
-            customerId: user.customerId,
-            actorId: userId,
-            kind: 'PCG_ADD_ATTEMPT',
-            message: 'PCG Add Provider NPI - api call attempted ',
-            payload: { npi, name },
-        })
-        await logProviderEvent({
-            providerId: created.id,
-            customerId: user.customerId,
-            actorId: userId,
-            kind: 'CREATED',
-            message: `Provider created (${npi})`,
-            payload: { name, providerGroupId },
-        })
-        if (providerGroupId) {
             await logProviderEvent({
                 providerId: created.id,
                 customerId: user.customerId,
                 actorId: userId,
-                kind: 'GROUP_ASSIGNED',
-                message: `Assigned to group ${providerGroupId}`,
-                payload: { field: 'providerGroupId', to: providerGroupId },
+                kind: 'PCG_ADD_ATTEMPT',
+                message: 'PCG Add Provider NPI - api call attempted',
+                payload: { npi, customerName: orgName },
             })
+            await logProviderEvent({
+                providerId: created.id,
+                customerId: user.customerId,
+                actorId: userId,
+                kind: 'CREATED',
+                message: `Provider created (${npi})`,
+                payload: { name, providerGroupId },
+            })
+            if (providerGroupId) {
+                await logProviderEvent({
+                    providerId: created.id,
+                    customerId: user.customerId,
+                    actorId: userId,
+                    kind: 'GROUP_ASSIGNED',
+                    message: `Assigned to group ${providerGroupId}`,
+                    payload: { field: 'providerGroupId', to: providerGroupId },
+                })
+            }
+        } catch (err: any) {
+            // If DB still has a global unique on npi, this will trigger.
+            if (err?.code === 'P2002') {
+                return data(
+                    {
+                        result: submission.reply({
+                            fieldErrors: {
+                                npi: [
+                                    'This NPI is already registered in the system (possibly under another customer). ' +
+                                    'If you need it for this customer, contact support.',
+                                ],
+                            },
+                        }),
+                    },
+                    { status: 400 },
+                )
+            }
+            throw err
         }
 
         return redirectWithToast('/customer/provider-npis', {
@@ -331,7 +351,6 @@ export async function action({ request }: ActionFunctionArgs) {
         })
     }
 
-    // Update provider
     if (intent === 'update') {
         const submission = parseWithZod(formData, { schema: UpdateProviderSchema })
         if (submission.status !== 'success') {
@@ -362,11 +381,7 @@ export async function action({ request }: ActionFunctionArgs) {
             }
             if (newGroupId && newGroupId !== user.providerGroupId) {
                 return data(
-                    {
-                        result: submission.reply({
-                            fieldErrors: { providerGroupId: ['You can only assign your group or unassign'] },
-                        }),
-                    },
+                    { result: submission.reply({ fieldErrors: { providerGroupId: ['You can only assign your group or unassign'] } }) },
                     { status: 400 },
                 )
             }
@@ -392,11 +407,7 @@ export async function action({ request }: ActionFunctionArgs) {
 
         await prisma.provider.update({
             where: { id: providerId },
-            data: {
-                name,
-                providerGroupId: newGroupId,
-                ...(typeof active !== 'undefined' ? { active } : {}),
-            },
+            data: { name, providerGroupId: newGroupId, ...(typeof active !== 'undefined' ? { active } : {}) },
         })
 
         if (nameChanged) {
@@ -436,7 +447,6 @@ export async function action({ request }: ActionFunctionArgs) {
         })
     }
 
-    // Toggle active
     if (intent === 'toggle-active') {
         const submission = parseWithZod(formData, { schema: ToggleActiveSchema })
         if (submission.status !== 'success') {
@@ -455,15 +465,13 @@ export async function action({ request }: ActionFunctionArgs) {
             })
         }
 
-        // ✅ Authorization (final):
-        // Customer Admins can always toggle.
-        if (!isCustomerAdmin) {
-            // Only PG Admins (or none) reach here due to requireRoles
-            if (isProviderGroupAdmin) {
-                // PG Admins can toggle providers in their own group OR unassigned.
-                const inDifferentGroup =
-                    provider.providerGroupId != null && provider.providerGroupId !== user.providerGroupId
+        const userRoles2 = user.roles.map(r => r.name)
+        const isCustomerAdmin2 = userRoles2.includes(INTEREX_ROLES.CUSTOMER_ADMIN)
+        const isProviderGroupAdmin2 = userRoles2.includes(INTEREX_ROLES.PROVIDER_GROUP_ADMIN)
 
+        if (!isCustomerAdmin2) {
+            if (isProviderGroupAdmin2) {
+                const inDifferentGroup = provider.providerGroupId != null && provider.providerGroupId !== user.providerGroupId
                 if (inDifferentGroup) {
                     return redirectWithToast('/customer/provider-npis', {
                         type: 'error',
@@ -500,7 +508,7 @@ export async function action({ request }: ActionFunctionArgs) {
 }
 
 export default function CustomerProviderNpiPage() {
-    const { user, customer, searchParams, editingProvider, toast, events, isCustomerAdmin, isProviderGroupAdmin } =
+    const { user, customer, searchParams, toast, events, isCustomerAdmin, isProviderGroupAdmin } =
         useLoaderData<typeof loader>()
     const [urlSearchParams, setUrlSearchParams] = useSearchParams()
     const isPending = useIsPending()
@@ -517,21 +525,25 @@ export default function CustomerProviderNpiPage() {
         providerId?: string
     }>({ isOpen: false, mode: 'create' })
 
+    // keep drawer in sync with *live* URLSearchParams
     useEffect(() => {
-        const action = searchParams.action
-        const providerId = searchParams.providerId
+        const action = urlSearchParams.get('action') || ''
+        const providerId = urlSearchParams.get('providerId') || ''
         if (action === 'create') setDrawerState({ isOpen: true, mode: 'create' })
         else if (action === 'edit' && providerId) setDrawerState({ isOpen: true, mode: 'edit', providerId })
         else setDrawerState({ isOpen: false, mode: 'create' })
-    }, [searchParams])
+    }, [urlSearchParams])
 
     const openDrawer = (mode: 'create' | 'edit', providerId?: string) => {
+        setDrawerState({ isOpen: true, mode, providerId })
         const newParams = new URLSearchParams(urlSearchParams)
         newParams.set('action', mode)
         if (providerId) newParams.set('providerId', providerId)
+        else newParams.delete('providerId')
         setUrlSearchParams(newParams)
     }
     const closeDrawer = () => {
+        setDrawerState({ isOpen: false, mode: 'create' })
         const newParams = new URLSearchParams(urlSearchParams)
         newParams.delete('action')
         newParams.delete('providerId')
@@ -540,9 +552,13 @@ export default function CustomerProviderNpiPage() {
 
     const selectedProvider = drawerState.providerId ? customer.providers.find(p => p.id === drawerState.providerId) : null
 
+    // Wire server errors back into forms (Conform v2 uses lastResult)
+    const lastResult = actionData && 'result' in actionData ? actionData.result : undefined
+
     const [createForm, createFields] = useForm({
         id: 'create-provider-form',
         constraint: getZodConstraint(CreateProviderSchema),
+        lastResult,
         onValidate({ formData }) {
             return parseWithZod(formData, { schema: CreateProviderSchema })
         },
@@ -551,6 +567,7 @@ export default function CustomerProviderNpiPage() {
     const [editForm, editFields] = useForm({
         id: 'edit-provider-form',
         constraint: getZodConstraint(UpdateProviderSchema),
+        lastResult,
         onValidate({ formData }) {
             return parseWithZod(formData, { schema: UpdateProviderSchema })
         },
@@ -558,10 +575,8 @@ export default function CustomerProviderNpiPage() {
 
     return (
         <>
-            {/* ⬇️ global overlay during any pending navigation/form action */}
             <LoadingOverlay show={Boolean(isPending)} title="Processing…" message="Please don't refresh or close this tab." />
 
-            {/* Main content area - blur when drawer is open */}
             <div className={`transition-all duration-300 ${drawerState.isOpen ? 'blur-sm' : 'blur-none'}`}>
                 <InterexLayout
                     user={user}
@@ -630,8 +645,12 @@ export default function CustomerProviderNpiPage() {
                                         <table className="min-w-full divide-y divide-gray-200">
                                             <thead className="bg-gray-50">
                                             <tr>
-                                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">#</th>
-                                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">NPI</th>
+                                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                                    #
+                                                </th>
+                                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                                    NPI
+                                                </th>
                                             </tr>
                                             </thead>
                                             <tbody className="bg-white divide-y divide-gray-200">
@@ -707,13 +726,16 @@ export default function CustomerProviderNpiPage() {
                                                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                                                     Assigned Users
                                                 </th>
-                                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
-                                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
+                                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                                    Status
+                                                </th>
+                                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                                    Actions
+                                                </th>
                                             </tr>
                                             </thead>
                                             <tbody className="bg-white divide-y divide-gray-200">
                                             {customer.providers.map(provider => {
-                                                // ✅ UI gating mirrors server logic:
                                                 const canToggle =
                                                     isCustomerAdmin ||
                                                     (isProviderGroupAdmin &&
@@ -730,7 +752,9 @@ export default function CustomerProviderNpiPage() {
                                                         <td className="px-6 py-4 whitespace-nowrap">
                                                             <div className="text-sm text-gray-900">{provider.providerGroup?.name || 'No group'}</div>
                                                         </td>
-                                                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{provider._count.userNpis}</td>
+                                                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                                                            {provider._count.userNpis}
+                                                        </td>
                                                         <td className="px-6 py-4 whitespace-nowrap">
                                 <span
                                     className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
@@ -804,9 +828,7 @@ export default function CustomerProviderNpiPage() {
                                             <Icon name="check" className="h-8 w-8 text-green-600 mr-3" />
                                             <div>
                                                 <p className="text-sm font-medium text-green-900">Active Providers</p>
-                                                <p className="text-2xl font-bold text-green-600">
-                                                    {customer.providers.filter(p => p.active).length}
-                                                </p>
+                                                <p className="text-2xl font-bold text-green-600">{customer.providers.filter(p => p.active).length}</p>
                                             </div>
                                         </div>
                                     </div>
@@ -871,7 +893,6 @@ export default function CustomerProviderNpiPage() {
                                                         {ev.actor?.name || ev.actor?.email || '—'}
                                                     </td>
                                                     <td className="px-4 py-3 text-sm">
-                                                        {/* Toggleable JSON of the raw API body or any event payload */}
                                                         <JsonViewer data={ev.payload} />
                                                     </td>
                                                 </tr>
@@ -888,33 +909,34 @@ export default function CustomerProviderNpiPage() {
 
             {/* Create Provider Drawer */}
             <Drawer isOpen={drawerState.isOpen && drawerState.mode === 'create'} onClose={closeDrawer} title="Add Provider NPI" size="md">
-                <Form method="post" {...getFormProps(createForm)}>
+                <Form method="post" id="create-provider-form" {...getFormProps(createForm)}>
                     <input type="hidden" name="intent" value="create" />
                     <div className="space-y-6">
                         <Field
                             labelProps={{ children: 'National Provider Identifier (NPI) *' }}
                             inputProps={{
-                                ...getInputProps(createFields.npi, { type: 'text' }),
+                                ...getInputProps(createFields.npi!, { type: 'text' }),
                                 placeholder: 'Enter 10-digit NPI number',
                             }}
-                            errors={createFields.npi.errors}
+                            errors={createFields.npi?.errors}
                         />
 
                         <Field
                             labelProps={{ children: 'Provider Name *' }}
                             inputProps={{
-                                ...getInputProps(createFields.name, { type: 'text' }),
+                                ...getInputProps(createFields.name!, { type: 'text' }),
                                 placeholder: 'e.g., Dr. John Smith',
                             }}
-                            errors={createFields.name.errors}
+                            errors={createFields.name?.errors}
                         />
 
                         <SelectField
                             labelProps={{ children: 'Provider Group (Optional)' }}
                             selectProps={{
-                                ...getInputProps(createFields.providerGroupId, { type: 'text' }),
+                                ...getInputProps(createFields.providerGroupId!, { type: 'text' }),
+                                defaultValue: '',
                             }}
-                            errors={createFields.providerGroupId.errors}
+                            errors={createFields.providerGroupId?.errors}
                         >
                             <option value="">— No group —</option>
                             {customer.providerGroups.map(group => (
@@ -924,6 +946,9 @@ export default function CustomerProviderNpiPage() {
                             ))}
                         </SelectField>
 
+                        {/* hidden native submit to ensure requestSubmit() finds one */}
+                        <button type="submit" className="hidden" aria-hidden />
+
                         <div className="flex justify-end space-x-3 pt-6 border-t border-gray-200">
                             <button
                                 type="button"
@@ -932,8 +957,11 @@ export default function CustomerProviderNpiPage() {
                             >
                                 Cancel
                             </button>
+
+                            {/* Trigger a real submit even if StatusButton isn't a native submit */}
                             <StatusButton
-                                type="submit"
+                                type="button"
+                                onClick={() => (document.getElementById('create-provider-form') as HTMLFormElement | null)?.requestSubmit()}
                                 disabled={isPending}
                                 status={isPending ? 'pending' : 'idle'}
                                 className="inline-flex justify-center py-2 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
@@ -953,37 +981,32 @@ export default function CustomerProviderNpiPage() {
                 size="md"
             >
                 {selectedProvider && (
-                    <Form method="post" {...getFormProps(editForm)}>
+                    <Form method="post" id="edit-provider-form" {...getFormProps(editForm)}>
                         <input type="hidden" name="intent" value="update" />
                         <input type="hidden" name="providerId" value={selectedProvider.id} />
                         <div className="space-y-6">
                             <Field
                                 labelProps={{ children: 'National Provider Identifier (NPI) - Read Only' }}
-                                inputProps={{
-                                    type: 'text',
-                                    value: selectedProvider.npi,
-                                    disabled: true,
-                                    className: 'bg-gray-50 text-gray-500',
-                                }}
+                                inputProps={{ type: 'text', value: selectedProvider.npi, disabled: true, className: 'bg-gray-50 text-gray-500' }}
                             />
 
                             <Field
                                 labelProps={{ children: 'Provider Name *' }}
                                 inputProps={{
-                                    ...getInputProps(editFields.name, { type: 'text' }),
+                                    ...getInputProps(editFields.name!, { type: 'text' }),
                                     defaultValue: selectedProvider.name || '',
                                     placeholder: 'e.g., Dr. John Smith',
                                 }}
-                                errors={editFields.name.errors}
+                                errors={editFields.name?.errors}
                             />
 
                             <SelectField
                                 labelProps={{ children: 'Provider Group (Optional)' }}
                                 selectProps={{
-                                    ...getInputProps(editFields.providerGroupId, { type: 'text' }),
+                                    ...getInputProps(editFields.providerGroupId!, { type: 'text' }),
                                     defaultValue: selectedProvider.providerGroupId || '',
                                 }}
-                                errors={editFields.providerGroupId.errors}
+                                errors={editFields.providerGroupId?.errors}
                             >
                                 <option value="">— No group —</option>
                                 {customer.providerGroups.map(group => (
@@ -996,17 +1019,20 @@ export default function CustomerProviderNpiPage() {
                             <div>
                                 <label className="flex items-center">
                                     {/* Always send false; overridden if checkbox is checked */}
-                                    <input {...getInputProps(editFields.active, { type: 'hidden' })} value="false" />
+                                    <input {...getInputProps(editFields.active!, { type: 'hidden' })} value="false" />
                                     <input
-                                        {...getInputProps(editFields.active, { type: 'checkbox' })}
+                                        {...getInputProps(editFields.active!, { type: 'checkbox' })}
                                         value="true"
                                         defaultChecked={selectedProvider.active}
                                         className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
                                     />
                                     <span className="ml-2 block text-sm text-gray-900">Active</span>
                                 </label>
-                                <ErrorList errors={editFields.active.errors} />
+                                <ErrorList errors={editFields.active?.errors} />
                             </div>
+
+                            {/* hidden native submit */}
+                            <button type="submit" className="hidden" aria-hidden />
 
                             <div className="flex justify-end space-x-3 pt-6 border-t border-gray-200">
                                 <button
@@ -1016,8 +1042,11 @@ export default function CustomerProviderNpiPage() {
                                 >
                                     Cancel
                                 </button>
+
+                                {/* Trigger submit reliably */}
                                 <StatusButton
-                                    type="submit"
+                                    type="button"
+                                    onClick={() => (document.getElementById('edit-provider-form') as HTMLFormElement | null)?.requestSubmit()}
                                     disabled={isPending}
                                     status={isPending ? 'pending' : 'idle'}
                                     className="inline-flex justify-center py-2 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
