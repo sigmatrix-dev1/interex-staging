@@ -22,7 +22,7 @@ export function LoadingOverlay({ show, title = 'Processing…', message = "Pleas
                     <div className="text-base font-semibold text-gray-900">{title}</div>
                     <div className="mt-1 text-sm text-gray-600">{message}</div>
                     <div className="mt-3 text-xs text-gray-500">
-                        This may take a moment depending on file size and network conditions.
+                        This may take a moment depending on network conditions.
                     </div>
                 </div>
             </div>

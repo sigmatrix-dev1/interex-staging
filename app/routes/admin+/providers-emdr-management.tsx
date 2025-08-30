@@ -31,10 +31,13 @@ import { useIsPending } from '#app/utils/misc.tsx'
 import { requireRoles } from '#app/utils/role-redirect.server.ts'
 
 type Row = PcgProviderListItem & {
-    customerId: string | null // NEW
+    customerId: string | null
     customerName: string | null
     provider_name: string | null
     providerGroupName: string | null
+    // NEW: derived from Provider.userNpis -> User
+    assignedToUsernames?: string[]
+    assignedToEmails?: string[]
 }
 
 type StoredUpdate = { npi: string; response: unknown | null }
@@ -43,15 +46,11 @@ type CustomerLite = { id: string; name: string }
 
 /* ------------------------ Helpers (server) ------------------------ */
 
-/** Coerce a maybe-array/maybe-string value into a CSV string (or null). */
 function toCsv(v: unknown): string | null {
-    if (Array.isArray(v)) {
-        return (v as unknown[]).map(x => String(x)).join(',')
-    }
+    if (Array.isArray(v)) return (v as unknown[]).map(x => String(x)).join(',')
     return typeof v === 'string' ? v : null
 }
 
-/** Convert a remote list item into the normalized list-detail shape our mapper expects. */
 function mapListItemToDetail(r: PcgProviderListItem) {
     return {
         providerNpi: r.providerNPI,
@@ -77,7 +76,6 @@ function mapListItemToDetail(r: PcgProviderListItem) {
     }
 }
 
-/** Persist a single registration payload into ProviderRegistrationStatus. */
 async function upsertRegistrationStatus(opts: { providerId: string; reg: RegResp }) {
     const { providerId, reg } = opts
     const base = {
@@ -119,9 +117,12 @@ function mapPersistedToRow(p: {
     providerCity: string | null
     providerState: string | null
     providerZip: string | null
-    customerId: string | null // NEW
+    customerId: string | null
     customerName: string | null
     providerGroupName: string | null
+    // NEW
+    usernames?: (string | null)[]
+    emails?: (string | null)[]
     listDetail: {
         providerNpi: string
         pcgProviderId: string | null
@@ -190,16 +191,19 @@ function mapPersistedToRow(p: {
         status: rs?.status ?? ld?.status ?? null,
 
         // Extras for UI
-        customerId: p.customerId, // NEW
+        customerId: p.customerId,
         customerName: p.customerName,
         providerGroupName: p.providerGroupName,
+
+        // NEW: assigned users
+        assignedToUsernames: (p.usernames ?? []).filter(Boolean) as string[],
+        assignedToEmails: (p.emails ?? []).filter(Boolean) as string[],
     }
 
     return r
 }
 
 async function composeRowsFromDb() {
-    // Pull only scalar fields + latest persisted registration status
     const providers = await prisma.provider.findMany({
         select: {
             id: true,
@@ -229,11 +233,14 @@ async function composeRowsFromDb() {
                     errorList: true,
                 },
             },
+            // NEW: derive assigned usernames & emails directly
+            userNpis: {
+                select: { user: { select: { username: true, email: true } } },
+            },
         },
         orderBy: [{ customerId: 'asc' }, { npi: 'asc' }],
     })
 
-    // Lookup Customer / ProviderGroup names separately
     const customerIds = Array.from(new Set(providers.map(p => p.customerId).filter(Boolean))) as string[]
     const groupIds = Array.from(new Set(providers.map(p => p.providerGroupId).filter(Boolean))) as string[]
 
@@ -252,6 +259,15 @@ async function composeRowsFromDb() {
     const rows: Row[] = providers.map(p => {
         const snapshot = (p.pcgListSnapshot as any) as PcgProviderListItem | null
         const listDetail = snapshot ? mapListItemToDetail(snapshot) : null
+
+        // NEW: collect usernames and emails from userNpis relation
+        const usernames = (p.userNpis ?? [])
+            .map(u => u.user?.username ?? null)
+            .filter(Boolean) as string[]
+        const emails = (p.userNpis ?? [])
+            .map(u => u.user?.email ?? null)
+            .filter(Boolean) as string[]
+
         return mapPersistedToRow({
             npi: p.npi,
             name: p.name ?? null,
@@ -261,11 +277,13 @@ async function composeRowsFromDb() {
             providerCity: p.providerCity ?? null,
             providerState: p.providerState ?? null,
             providerZip: p.providerZip ?? null,
-            customerId: p.customerId, // NEW
+            customerId: p.customerId,
             customerName: p.customerId ? customerNameById.get(p.customerId) ?? null : null,
             providerGroupName: p.providerGroupId ? groupNameById.get(p.providerGroupId) ?? null : null,
             listDetail,
             registrationStatus: p.registrationStatus ? (p.registrationStatus as any) : null,
+            usernames,
+            emails,
         })
     })
 
@@ -277,7 +295,6 @@ async function composeRowsFromDb() {
     return { rows, storedUpdates }
 }
 
-// Build provider update from remote item for the legacy Provider columns
 function buildUpdateFromRemote(r: PcgProviderListItem) {
     const u: Record<string, any> = {}
     if (r.provider_name !== undefined) u.name = r.provider_name ?? null
@@ -290,7 +307,6 @@ function buildUpdateFromRemote(r: PcgProviderListItem) {
     return u
 }
 
-// Create or find the "System" customer for unassigned NPIs
 async function getSystemCustomerId() {
     const existing = await prisma.customer.findFirst({ where: { name: 'System' }, select: { id: true } })
     if (existing) return existing.id
@@ -301,7 +317,6 @@ async function getSystemCustomerId() {
     return created.id
 }
 
-// Get ALL pages of providers for the token
 async function getAllProvidersFromPCG() {
     const pageSize = 500
     let page = 1
@@ -329,7 +344,6 @@ export async function loader({ request }: LoaderFunctionArgs) {
 
     const { rows, storedUpdates } = await composeRowsFromDb()
 
-    // NEW: list of customers for rename panel
     const customers = await prisma.customer.findMany({
         select: { id: true, name: true },
         orderBy: { name: 'asc' },
@@ -356,7 +370,6 @@ export async function action({ request }: ActionFunctionArgs) {
     const form = await request.formData()
     const intent = String((form.get('intent') || '')).trim()
 
-    // --- NEW: Rename Customer (System Admin only) ----------------------
     if (intent === 'rename-customer') {
         const customerId = String(form.get('customer_id') || '').trim()
         const newName = String(form.get('name') || '').trim()
@@ -369,7 +382,6 @@ export async function action({ request }: ActionFunctionArgs) {
         const current = await prisma.customer.findUnique({ where: { id: customerId }, select: { id: true, name: true } })
         if (!current) return data({ error: 'Customer not found.' }, { status: 404 })
 
-        // Protect the special "System" customer used by getSystemCustomerId()
         if (current.name === 'System' && newName !== 'System') {
             return data({ error: 'The special "System" customer is reserved and cannot be renamed.' }, { status: 400 })
         }
@@ -377,10 +389,7 @@ export async function action({ request }: ActionFunctionArgs) {
         await prisma.customer.update({ where: { id: customerId }, data: { name: newName } })
 
         const { rows, storedUpdates } = await composeRowsFromDb()
-        const customers = await prisma.customer.findMany({
-            select: { id: true, name: true },
-            orderBy: { name: 'asc' },
-        })
+        const customers = await prisma.customer.findMany({ select: { id: true, name: true }, orderBy: { name: 'asc' } })
 
         return data({
             rows,
@@ -395,7 +404,6 @@ export async function action({ request }: ActionFunctionArgs) {
         })
     }
 
-    // --- NEW: Reassign a provider to a different customer ---------------
     if (intent === 'reassign-provider-customer') {
         const providerNpi = String(form.get('provider_npi') || '').trim()
         const customerId = String(form.get('customer_id') || '').trim()
@@ -411,16 +419,10 @@ export async function action({ request }: ActionFunctionArgs) {
         if (!provider) return data({ error: 'Provider not found.' }, { status: 404 })
         if (!customer) return data({ error: 'Customer not found.' }, { status: 404 })
 
-        await prisma.provider.update({
-            where: { id: provider.id },
-            data: { customerId: customer.id },
-        })
+        await prisma.provider.update({ where: { id: provider.id }, data: { customerId: customer.id } })
 
         const { rows, storedUpdates } = await composeRowsFromDb()
-        const customers = await prisma.customer.findMany({
-            select: { id: true, name: true },
-            orderBy: { name: 'asc' },
-        })
+        const customers = await prisma.customer.findMany({ select: { id: true, name: true }, orderBy: { name: 'asc' } })
 
         return data({
             rows,
@@ -454,7 +456,6 @@ export async function action({ request }: ActionFunctionArgs) {
             const chunk = <T,>(arr: T[], size: number) =>
                 Array.from({ length: Math.ceil(arr.length / size) }, (_, i) => arr.slice(i * size, (i + 1) * size))
 
-            // Update existing Provider rows (legacy columns + legacy snapshot)
             for (const group of chunk(updates, 100)) {
                 await prisma.$transaction(
                     group.map(r =>
@@ -466,7 +467,6 @@ export async function action({ request }: ActionFunctionArgs) {
                 )
             }
 
-            // Create missing Provider rows
             for (const group of chunk(creates, 50)) {
                 await prisma.$transaction(
                     group.map(r =>
@@ -488,18 +488,12 @@ export async function action({ request }: ActionFunctionArgs) {
                     ),
                 )
             }
-
-            // NOTE: registration status is persisted in other actions below.
         } catch (err: any) {
             pcgError = err?.message || 'Failed to fetch providers from PCG.'
         }
 
         const { rows, storedUpdates } = await composeRowsFromDb()
-        // include customers so UI stays fresh
-        const customers = await prisma.customer.findMany({
-            select: { id: true, name: true },
-            orderBy: { name: 'asc' },
-        })
+        const customers = await prisma.customer.findMany({ select: { id: true, name: true }, orderBy: { name: 'asc' } })
         return data({
             rows,
             meta: { totalForOrg: rows.length },
@@ -558,7 +552,6 @@ export async function action({ request }: ActionFunctionArgs) {
                 })
             }
 
-            // Best-effort refresh of the snapshot for this one NPI
             try {
                 const remote = await getAllProvidersFromPCG()
                 const match = remote.find(r => r.providerNPI === payload.provider_npi)
@@ -568,18 +561,13 @@ export async function action({ request }: ActionFunctionArgs) {
                         data: { pcgListSnapshot: match as any, pcgListAt: new Date() },
                     })
                 }
-            } catch {
-                /* ignore */
-            }
+            } catch { /* ignore */ }
         } catch (err: any) {
             pcgError = err?.message || 'Failed to update provider.'
         }
 
         const { rows, storedUpdates } = await composeRowsFromDb()
-        const customers = await prisma.customer.findMany({
-            select: { id: true, name: true },
-            orderBy: { name: 'asc' },
-        })
+        const customers = await prisma.customer.findMany({ select: { id: true, name: true }, orderBy: { name: 'asc' } })
         return data({
             rows,
             meta: { totalForOrg: rows.length },
@@ -592,12 +580,10 @@ export async function action({ request }: ActionFunctionArgs) {
         })
     }
 
-    // --- Bulk fetch per-provider registration details --------------------------
     if (intent === 'fetch-registrations') {
         const now = new Date()
         const nowIso = now.toISOString()
 
-        // Only providers with provider_id and name/address present
         const candidates = await prisma.provider.findMany({
             where: {
                 NOT: [
@@ -631,7 +617,6 @@ export async function action({ request }: ActionFunctionArgs) {
                 try {
                     const data = await pcgGetProviderRegistration(c.pcgProviderId!)
                     regById[c.pcgProviderId!] = data
-                    // persist latest so reload reflects it
                     await upsertRegistrationStatus({ providerId: c.id, reg: data })
                 } catch (err: any) {
                     const fallback = {
@@ -662,10 +647,7 @@ export async function action({ request }: ActionFunctionArgs) {
         }
 
         const { rows, storedUpdates } = await composeRowsFromDb()
-        const customers = await prisma.customer.findMany({
-            select: { id: true, name: true },
-            orderBy: { name: 'asc' },
-        })
+        const customers = await prisma.customer.findMany({ select: { id: true, name: true }, orderBy: { name: 'asc' } })
 
         return data({
             rows,
@@ -681,18 +663,14 @@ export async function action({ request }: ActionFunctionArgs) {
         })
     }
 
-    // --- eMDR Register / DeRegister / Electronic Only --------------------------
     if (intent === 'emdr-register' || intent === 'emdr-deregister' || intent === 'emdr-electronic-only') {
         const providerId = String(form.get('provider_id') || '').trim()
         const providerNpi = String(form.get('provider_npi') || '').trim()
-        if (!providerId) {
-            return data({ error: 'Missing provider_id. Update Provider first to obtain a Provider ID.' }, { status: 400 })
-        }
+        if (!providerId) return data({ error: 'Missing provider_id. Update Provider first to obtain a Provider ID.' }, { status: 400 })
 
         let pcgError: string | null = null
         let updateResponse: any = null
 
-        // We'll collect a fresh registration payload for this single provider
         const regById: Record<string, RegResp> = Object.create(null)
         const now = new Date()
         const nowIso = now.toISOString()
@@ -702,7 +680,6 @@ export async function action({ request }: ActionFunctionArgs) {
             else if (intent === 'emdr-deregister') updateResponse = await pcgSetEmdrRegistration(providerId, false)
             else updateResponse = await pcgSetElectronicOnly(providerId)
 
-            // Persist update response to Provider (legacy audit)
             const existing = await prisma.provider.findUnique({
                 where: { npi: providerNpi },
                 select: { id: true, pcgProviderId: true, npi: true },
@@ -718,21 +695,15 @@ export async function action({ request }: ActionFunctionArgs) {
                 })
             }
 
-            // Immediately fetch registration status for this provider (ephemeral + persist)
             try {
                 const reg = await pcgGetProviderRegistration(providerId)
                 regById[providerId] = reg
-                if (existing) {
-                    await upsertRegistrationStatus({ providerId: existing.id, reg })
-                }
-            } catch {
-                // ignore if fetch fails
-            }
+                if (existing) await upsertRegistrationStatus({ providerId: existing.id, reg })
+            } catch { /* ignore */ }
         } catch (err: any) {
             pcgError = err?.message || 'Failed to submit eMDR registration/deregistration.'
         }
 
-        // Best-effort refresh of the list snapshot for this single provider
         try {
             const remote = await getAllProvidersFromPCG()
             const match = remote.find(r => r.providerNPI === providerNpi)
@@ -742,15 +713,10 @@ export async function action({ request }: ActionFunctionArgs) {
                     data: { pcgListSnapshot: match as any, pcgListAt: now },
                 })
             }
-        } catch {
-            // ignore
-        }
+        } catch { /* ignore */ }
 
         const { rows, storedUpdates } = await composeRowsFromDb()
-        const customers = await prisma.customer.findMany({
-            select: { id: true, name: true },
-            orderBy: { name: 'asc' },
-        })
+        const customers = await prisma.customer.findMany({ select: { id: true, name: true }, orderBy: { name: 'asc' } })
 
         return data({
             rows,
@@ -785,7 +751,6 @@ type LastActionSignal = {
     at: string
 }
 
-/** Shape of individual status change entries returned by PCG. */
 type StatusChange = {
     split_number?: string
     time?: string
@@ -803,13 +768,9 @@ type ActionSuccess = {
     updatedNpi?: string
     updateResponse?: any
     updateResponses?: { npi: string; response: unknown | null }[]
-
     regById?: Record<string, RegResp>
     regFetchedAt?: string
-
     lastAction?: LastActionSignal
-
-    // NEW
     customers?: CustomerLite[]
     renamedCustomerId?: string
     reassignedNpi?: string
@@ -825,7 +786,6 @@ function Pill({ text }: { text: string }) {
     return <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-50 text-blue-700 ring-1 ring-blue-200">{text}</span>
 }
 
-/** Confirm-with-checkbox wrapper for eMDR actions */
 function ConfirmActionButton({
                                  intent,
                                  providerId,
@@ -936,10 +896,9 @@ export default function ProviderManagementPage() {
     const rows: Row[] = hasRows ? (actionData as ActionSuccess).rows : baseRows
     const pcgError = hasRows ? (actionData as ActionSuccess).pcgError : null
 
-    // Customers for rename panel: prefer action response (fresh) else loader
-    const customers: CustomerLite[] = (hasRows ? ((actionData as ActionSuccess).customers ?? initialCustomers) : initialCustomers) || []
+    const customers: CustomerLite[] =
+        (hasRows ? ((actionData as ActionSuccess).customers ?? initialCustomers) : initialCustomers) || []
 
-    // Action response sources (last vs. persisted)
     const lastUpdatedNpi = hasRows ? (actionData as ActionSuccess).updatedNpi : undefined
     const lastUpdateResponse = hasRows ? (actionData as ActionSuccess).updateResponse : undefined
     const persistedMap = React.useMemo(() => {
@@ -950,14 +909,11 @@ export default function ProviderManagementPage() {
         return m
     }, [hasRows, actionData, updateResponses])
 
-    // Signal to close confirm popovers after action completes
     const lastAction = hasRows ? (actionData as ActionSuccess).lastAction : undefined
 
-    // Registration details (ephemeral fetch payload — optional)
     const regById = (hasRows ? (actionData as ActionSuccess).regById : undefined) || {}
     const regFetchedAt = hasRows ? (actionData as ActionSuccess).regFetchedAt : undefined
 
-    // Client-side customer filter
     const [customerFilter, setCustomerFilter] = React.useState<'all' | 'unassigned' | string>('all')
     const customerChoices = React.useMemo(() => {
         const names = new Set<string>()
@@ -974,7 +930,6 @@ export default function ProviderManagementPage() {
         return rows.filter(r => r.customerName === customerFilter)
     }, [rows, customerFilter])
 
-    // Drawer state (update provider)
     const [drawer, setDrawer] = React.useState<{ open: boolean; forNpi?: string; seed?: Partial<PcgUpdateProviderPayload> }>({ open: false })
     function openDrawer(r: Row) {
         setDrawer({
@@ -1021,24 +976,18 @@ export default function ProviderManagementPage() {
         return <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${cls}`}>{val ?? '—'}</span>
     }
 
-    // Show in eMDR tables only if name + address present (street2 optional)
     const hasEmdrPrereqs = (r: Row) =>
         Boolean((r.provider_name ?? '').trim() && (r.provider_street ?? '').trim() && (r.provider_city ?? '').trim() && (r.provider_state ?? '').trim() && (r.provider_zip ?? '').trim())
 
-    // Partition lists; all filtered by prereqs
     const notRegisteredRows = filteredRows.filter(r => !r.registered_for_emdr && hasEmdrPrereqs(r))
     const registeredRows = filteredRows.filter(r => r.registered_for_emdr && hasEmdrPrereqs(r))
     const electronicOnlyRows = filteredRows.filter(r => r.registered_for_emdr_electronic_only && hasEmdrPrereqs(r))
 
-    // NEW: Rename-customer drawer state
     const [renameDrawer, setRenameDrawer] = React.useState<{ open: boolean; id?: string; currentName?: string }>({ open: false })
     const renamedCustomerId = hasRows ? (actionData as ActionSuccess).renamedCustomerId : undefined
     React.useEffect(() => {
-        if (renamedCustomerId && renameDrawer.open) {
-            setRenameDrawer({ open: false })
-        }
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [renamedCustomerId])
+        if (renamedCustomerId && renameDrawer.open) setRenameDrawer({ open: false })
+    }, [renamedCustomerId, renameDrawer.open])
 
     return (
         <InterexLayout
@@ -1051,7 +1000,7 @@ export default function ProviderManagementPage() {
         >
             <LoadingOverlay show={Boolean(isPending)} title="Loading…" message="Please don't refresh or close this tab." />
 
-            <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8">
+            <div className="max-w-11/12 mx-auto px-3 sm:px-4 lg:px-8 py-8 space-y-6">
                 {/* ====================================================== */}
                 {/* NEW: Customer Directory (rename)                      */}
                 {/* ====================================================== */}
@@ -1162,7 +1111,7 @@ export default function ProviderManagementPage() {
                 ) : null}
 
                 {/* ======================================== */}
-                {/* Provider details & update table */}
+                {/* Provider details & update table          */}
                 {/* ======================================== */}
                 <div className="bg-white shadow rounded-lg overflow-hidden">
                     <div className="px-6 py-4 border-b border-gray-200">
@@ -1172,8 +1121,8 @@ export default function ProviderManagementPage() {
                                 <>
                                     Showing {filteredRows.length} NPIs • Filter:&nbsp;
                                     <span className="font-medium">
-                                        {customerFilter === 'all' ? 'All Customers' : customerFilter === 'unassigned' ? 'Unassigned' : customerFilter}
-                                    </span>
+                    {customerFilter === 'all' ? 'All Customers' : customerFilter === 'unassigned' ? 'Unassigned' : customerFilter}
+                  </span>
                                 </>
                             ) : (
                                 'No data loaded'
@@ -1189,8 +1138,10 @@ export default function ProviderManagementPage() {
                                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Last Submitted Transaction</th>
                                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Registered for eMDR</th>
                                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Electronic Only?</th>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Customer Name</th>
+                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase min-w-[12rem]">Customer Name</th>
                                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Provider Group</th>
+                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Assigned To</th>
+                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Email IDs</th>
                                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Provider Name</th>
                                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Street</th>
                                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Street 2</th>
@@ -1207,7 +1158,7 @@ export default function ProviderManagementPage() {
                             <tbody className="bg-white divide-y divide-gray-200">
                             {!filteredRows.length ? (
                                 <tr>
-                                    <td colSpan={16} className="px-6 py-8 text-center text-sm text-gray-500">
+                                    <td colSpan={18} className="px-6 py-8 text-center text-sm text-gray-500">
                                         No rows.
                                     </td>
                                 </tr>
@@ -1229,15 +1180,11 @@ export default function ProviderManagementPage() {
                                             <td className="px-6 py-4 text-sm">
                                                 {r.last_submitted_transaction ? <Pill text={r.last_submitted_transaction} /> : <span className="text-gray-400">—</span>}
                                             </td>
-                                            <td className="px-6 py-4">
-                                                <Badge yes={Boolean(r.registered_for_emdr)} />
-                                            </td>
-                                            <td className="px-6 py-4">
-                                                <Badge yes={Boolean(r.registered_for_emdr_electronic_only)} />
-                                            </td>
+                                            <td className="px-6 py-4"><Badge yes={Boolean(r.registered_for_emdr)} /></td>
+                                            <td className="px-6 py-4"><Badge yes={Boolean(r.registered_for_emdr_electronic_only)} /></td>
 
-                                            {/* Customer Name with reassignment dropdown */}
-                                            <td className="px-6 py-4 text-sm text-gray-700">
+                                            {/* Customer Name (with reassignment control) */}
+                                            <td className="px-6 py-4 text-sm text-gray-700 min-w-[12rem]">
                                                 {customers.length === 0 ? (
                                                     r.customerName ?? '—'
                                                 ) : (
@@ -1263,6 +1210,15 @@ export default function ProviderManagementPage() {
                                             </td>
 
                                             <td className="px-6 py-4 text-sm text-gray-700">{r.providerGroupName ?? '—'}</td>
+
+                                            {/* NEW cells */}
+                                            <td className="px-6 py-4 text-sm text-gray-700">
+                                                {r.assignedToUsernames?.length ? r.assignedToUsernames.join(', ') : '—'}
+                                            </td>
+                                            <td className="px-6 py-4 text-sm text-gray-700">
+                                                {r.assignedToEmails?.length ? r.assignedToEmails.join(', ') : '—'}
+                                            </td>
+
                                             <td className="px-6 py-4 text-sm text-gray-700">{r.provider_name ?? '—'}</td>
                                             <td className="px-6 py-4 text-sm text-gray-700 break-words">{r.provider_street ?? '—'}</td>
                                             <td className="px-6 py-4 text-sm text-gray-700 break-words">{r.provider_street2 ?? '—'}</td>
@@ -1273,9 +1229,7 @@ export default function ProviderManagementPage() {
                                                 <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${regStatusClass}`}>{r.reg_status ?? '—'}</span>
                                             </td>
                                             <td className="px-6 py-4 text-sm text-gray-700 whitespace-nowrap">{r.provider_id || '—'}</td>
-                                            <td className="px-6 py-4 text-sm text-gray-700 align-top">
-                                                <JsonViewer data={r} />
-                                            </td>
+                                            <td className="px-6 py-4 text-sm text-gray-700 align-top"><JsonViewer data={r} /></td>
                                             <td className="px-6 py-4">
                                                 <button
                                                     type="button"

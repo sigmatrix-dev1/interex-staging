@@ -984,7 +984,7 @@ export default function ProvidersEmdrScopedPage() {
         >
             <LoadingOverlay show={Boolean(isPending)} title="Loading…" message="Please don't refresh or close this tab." />
 
-            <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8">
+            <div className="max-w-11/12 mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8">
                 {/* Refresh section (no customer filter in this page) */}
                 <div className="bg-white shadow rounded-lg p-6">
                     <div className="flex items-end gap-4">
@@ -1024,7 +1024,7 @@ export default function ProvidersEmdrScopedPage() {
                     </div>
 
                     <div className="overflow-x-auto">
-                        <table className="min-w-full divide-y divide-gray-200">
+                        <table className="w-full table-auto divide-y divide-gray-200">
                             <thead className="bg-gray-50">
                             <tr>
                                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Provider NPI</th>
@@ -1145,10 +1145,10 @@ export default function ProvidersEmdrScopedPage() {
                     ) : null}
 
                     {/* --- Table 1: Not registered for eMDR --- */}
-                    <div className="px-6 py-5">
+                    <div className="px-6 py-5 space-y-3">
                         <h3 className="text-sm font-semibold text-gray-800 mb-3">Not registered for eMDR</h3>
-                        <div className="overflow-x-auto">
-                            <table className="min-w-full divide-y divide-gray-200">
+                        <div className="overflow-x-auto rounded-md border border-gray-200 p-4 bg-gray-50">
+                            <table className="w-full table-fixed divide-y divide-gray-200">
                                 <thead className="bg-gray-50">
                                 <tr>
                                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">NPI</th>
@@ -1217,11 +1217,11 @@ export default function ProvidersEmdrScopedPage() {
                     <hr className="border-gray-200" />
 
                     {/* --- Table 2: Registered for eMDR --- */}
-                    <div className="px-6 py-5">
-                        <h3 className="text-sm font-semibold text-gray-800 mb-3">Registered for eMDR</h3>
-                        <div className="overflow-x-auto">
-                            <table className="min-w-full divide-y divide-gray-200">
-                                <thead className="bg-gray-50">
+                    <div className="px-6 py-5 space-y-3">
+                        <h3 className="text-sm font-semibold text-gray-800">Registered for eMDR</h3>
+                        <div className="overflow-x-auto rounded-md border border-gray-200 p-4 bg-gray-50">
+                            <table className="w-full table-fixed divide-y divide-gray-200">
+                            <thead className="bg-gray-50">
                                 <tr>
                                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">NPI</th>
                                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Name</th>
@@ -1333,12 +1333,12 @@ export default function ProvidersEmdrScopedPage() {
                     <hr className="border-gray-200" />
 
                     {/* --- Table 3: Registered for Electronic-Only ADR --- */}
-                    <div className="px-6 py-5">
-                        <h3 className="text-sm font-semibold text-gray-800 mb-3">Registered for Electronic-Only ADR</h3>
-                        <p className="text-xs text-gray-500 mb-2">To revert to standard delivery (mail + electronic), deregister and then register again.</p>
-                        <div className="overflow-x-auto">
-                            <table className="min-w-full divide-y divide-gray-200">
-                                <thead className="bg-gray-50">
+                    <div className="px-6 py-5 space-y-3">
+                        <h3 className="text-sm font-semibold text-gray-800">Registered for Electronic-Only ADR</h3>
+                        <p className="text-xs text-gray-500">To revert to standard delivery (mail + electronic), deregister and then register again.</p>
+                        <div className="overflow-x-auto rounded-md border border-gray-200 p-4 bg-gray-50">
+                            <table className="w-full table-fixed divide-y divide-gray-200">
+                            <thead className="bg-gray-50">
                                 <tr>
                                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">NPI</th>
                                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Name</th>

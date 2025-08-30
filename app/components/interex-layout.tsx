@@ -24,8 +24,8 @@ export function InterexLayout({
   currentPath 
 }: InterexLayoutProps) {
   return (
-    <div className="min-h-screen bg-gray-50">
-      <InterexHeader 
+    <div className="min-h-screen w-full bg-gray-50">
+      <InterexHeader
         user={user} 
         currentPath={currentPath}
         title={title}

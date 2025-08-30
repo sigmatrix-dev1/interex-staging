@@ -395,3 +395,69 @@ export async function pcgSetElectronicOnly(providerId: string) {
     }
     return data as { errorList: any[]; registration_status: string; provider_id: string }
 }
+
+
+// --- eMDR Letters (lists) ----------------------------------------------------
+
+export async function pcgListPrePayLetters(input: { page?: number; startDate: string; endDate: string }) {
+    const res = await callPcg(`${PCG_ENV.BASE_URL}/PrePayeMDR`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ page: input.page ?? 1, startDate: input.startDate, endDate: input.endDate }),
+    })
+    const text = await res.text()
+    const data = text ? JSON.parse(text) : null
+    if (!res.ok) throw new Error(`PrePayeMDR failed (${res.status}): ${String(text).slice(0,500)}`)
+    return data as {
+        prepayeMDRList?: any[]
+        totalResultCount?: number
+        errorList?: any[]
+    }
+}
+
+export async function pcgListPostPayLetters(input: { page?: number; startDate: string; endDate: string }) {
+    const res = await callPcg(`${PCG_ENV.BASE_URL}/PostPayeMDR`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ page: input.page ?? 1, startDate: input.startDate, endDate: input.endDate }),
+    })
+    const text = await res.text()
+    const data = text ? JSON.parse(text) : null
+    if (!res.ok) throw new Error(`PostPayeMDR failed (${res.status}): ${String(text).slice(0,500)}`)
+    return data as {
+        postpayeMDRList?: any[] // some payloads use postpayeMDRList / postPayeMDRList — handle in sync layer
+        postPayeMDRList?: any[]
+        totalResultCount?: number
+        errorList?: any[]
+    }
+}
+
+export async function pcgListPostPayOtherLetters(input: { page?: number; startDate: string; endDate: string }) {
+    const res = await callPcg(`${PCG_ENV.BASE_URL}/PostPayOthereMDR`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ page: input.page ?? 1, startDate: input.startDate, endDate: input.endDate }),
+    })
+    const text = await res.text()
+    const data = text ? JSON.parse(text) : null
+    if (!res.ok) throw new Error(`PostPayOthereMDR failed (${res.status}): ${String(text).slice(0,500)}`)
+    return data as {
+        otherPostPayEMDRList?: any[]
+        totalResultCount?: number
+        errorList?: any[]
+    }
+}
+
+// --- eMDR Letters (download) -------------------------------------------------
+
+export async function pcgDownloadEmdrLetterFile(input: { letter_id: string; letter_type: 'PREPAY' | 'POSTPAY' | 'POSTPAY_OTHER' }) {
+    const res = await callPcg(`${PCG_ENV.BASE_URL}/getEmdrLetterFileContent`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(input),
+    })
+    const text = await res.text()
+    const data = text ? JSON.parse(text) : null
+    if (!res.ok) throw new Error(`getEmdrLetterFileContent failed (${res.status}): ${String(text).slice(0,500)}`)
+    return data as { file_content?: string; errorList?: any[] }
+}

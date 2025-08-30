@@ -203,11 +203,14 @@ model Customer {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  users          User[]
-  providerGroups ProviderGroup[]
-  providers      Provider[]
-  submissions    Submission[]
-  providerEvents ProviderEvent[]
+  users              User[]
+  providerGroups     ProviderGroup[]
+  providers          Provider[]
+  submissions        Submission[]
+  providerEvents     ProviderEvent[]
+  PrepayLetter       PrepayLetter[]
+  PostpayLetter      PostpayLetter[]
+  PostpayOtherLetter PostpayOtherLetter[]
 
   @@index([name])
 }
@@ -224,8 +227,11 @@ model ProviderGroup {
   customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
   customerId String
 
-  users     User[]
-  providers Provider[]
+  users              User[]
+  providers          Provider[]
+  PrepayLetter       PrepayLetter[]
+  PostpayLetter      PostpayLetter[]
+  PostpayOtherLetter PostpayOtherLetter[]
 
   @@unique([customerId, name])
   @@index([customerId])
@@ -267,6 +273,9 @@ model Provider {
   // NEW relations to persistent tables
   listDetail         ProviderListDetail?
   registrationStatus ProviderRegistrationStatus?
+  PrepayLetter       PrepayLetter[]
+  PostpayLetter      PostpayLetter[]
+  PostpayOtherLetter PostpayOtherLetter[]
 
   @@index([customerId])
   @@index([providerGroupId])
@@ -560,4 +569,120 @@ model ProviderEvent {
 
   @@index([providerId])
   @@index([customerId, createdAt])
+}
+
+// =============================================
+// Letters (separate tables per type)
+// =============================================
+
+model PrepayLetter {
+  id               String    @id @default(cuid())
+  externalLetterId String    @unique // usually eMDRMetaData.uniqueLetterId or letterID
+  downloadId       String? // eMDRPrePayID (used by download API if present)
+  providerNpi      String
+  providerId       String?
+  provider         Provider? @relation(fields: [providerId], references: [id])
+
+  // allow filtering by customer quickly
+  customerId String?
+  customer   Customer? @relation(fields: [customerId], references: [id])
+
+  providerGroupId String?
+  providerGroup   ProviderGroup? @relation(fields: [providerGroupId], references: [id])
+
+  esmdTransactionId String?
+  hihDeliveryAt     DateTime?
+  letterDate        DateTime?
+  respondBy         DateTime?
+  jurisdiction      String?
+  programName       String?
+  stage             String?
+  language          String?
+  bSendAck          Boolean?
+  ackUniqueId       String?
+  rcOid             String?
+  letterName        String?
+
+  raw Json
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([customerId])
+  @@index([providerNpi])
+  @@index([letterDate])
+}
+
+model PostpayLetter {
+  id               String    @id @default(cuid())
+  externalLetterId String    @unique
+  downloadId       String? // e.g., eMDRPostPayID if PCG sends it
+  providerNpi      String
+  providerId       String?
+  provider         Provider? @relation(fields: [providerId], references: [id])
+
+  customerId String?
+  customer   Customer? @relation(fields: [customerId], references: [id])
+
+  providerGroupId String?
+  providerGroup   ProviderGroup? @relation(fields: [providerGroupId], references: [id])
+
+  esmdTransactionId String?
+  hihDeliveryAt     DateTime?
+  letterDate        DateTime?
+  respondBy         DateTime?
+  jurisdiction      String?
+  programName       String?
+  stage             String?
+  language          String?
+  bSendAck          Boolean?
+  ackUniqueId       String?
+  rcOid             String?
+  letterName        String?
+
+  raw Json
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([customerId])
+  @@index([providerNpi])
+  @@index([letterDate])
+}
+
+model PostpayOtherLetter {
+  id               String    @id @default(cuid())
+  externalLetterId String    @unique
+  downloadId       String? // otherPostPayEMDRId
+  providerNpi      String
+  providerId       String?
+  provider         Provider? @relation(fields: [providerId], references: [id])
+
+  customerId String?
+  customer   Customer? @relation(fields: [customerId], references: [id])
+
+  providerGroupId String?
+  providerGroup   ProviderGroup? @relation(fields: [providerGroupId], references: [id])
+
+  esmdTransactionId String?
+  hihDeliveryAt     DateTime?
+  letterDate        DateTime?
+  respondBy         DateTime?
+  jurisdiction      String?
+  programName       String?
+  stage             String?
+  language          String?
+  bSendAck          Boolean?
+  ackUniqueId       String?
+  rcOid             String?
+  letterName        String?
+
+  raw Json
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([customerId])
+  @@index([providerNpi])
+  @@index([letterDate])
 }
