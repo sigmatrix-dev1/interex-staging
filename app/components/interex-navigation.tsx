@@ -27,6 +27,12 @@ export function InterexNavigation({ user, currentPath }: InterexNavigationProps)
                 icon: 'id-card',
                 description: 'Manage providers (all customers)',
             },
+            {
+                name: 'Letters',
+                href: '/admin/all-letters',
+                icon: 'file-text',
+                description: 'All letters for your NPIs',
+            },
         )
     }
 
@@ -69,6 +75,7 @@ export function InterexNavigation({ user, currentPath }: InterexNavigationProps)
                 icon: 'file-text',
                 description: 'All letters for your NPIs',
             },
+
         )
     }
 

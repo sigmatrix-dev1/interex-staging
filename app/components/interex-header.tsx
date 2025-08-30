@@ -44,6 +44,12 @@ export function InterexHeader({
                 icon: 'id-card',
                 description: 'Manage providers (all customers)',
             },
+            {
+                name: 'Letters',
+                href: '/admin/all-letters',
+                icon: 'file-text',
+                description: 'All letters for your NPIs',
+            },
         )
     }
 
