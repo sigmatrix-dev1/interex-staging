@@ -976,6 +976,38 @@ export default function ProviderManagementPage() {
         return <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${cls}`}>{val ?? '—'}</span>
     }
 
+    // ----- Error Drawer (new) -----
+    const [errorDrawer, setErrorDrawer] = React.useState<{ open: boolean; title?: string; data?: any }>({ open: false })
+
+    function buildErrorPayload(r: Row, reg?: RegResp) {
+        const payload = {
+            providerNPI: r.providerNPI,
+            provider_id: r.provider_id || null,
+            reg_status: reg?.reg_status ?? r.reg_status ?? null,
+            stage: reg?.stage ?? r.stage ?? null,
+            call_error_code: reg?.call_error_code ?? null,
+            call_error_description: reg?.call_error_description ?? null,
+            errorList: (reg?.errorList && reg.errorList.length ? reg.errorList : r.errorList) ?? [],
+            errors: (reg?.errors && (reg.errors as any[]).length ? reg.errors : r.errors) ?? [],
+        }
+        const has =
+            Boolean(payload.call_error_code) ||
+            Boolean(payload.call_error_description) ||
+            (Array.isArray(payload.errorList) && payload.errorList.length > 0) ||
+            (Array.isArray(payload.errors) && payload.errors.length > 0)
+        return { has, payload }
+    }
+
+    async function copyErrorJSON() {
+        try {
+            if (errorDrawer.data) {
+                await navigator.clipboard.writeText(JSON.stringify(errorDrawer.data, null, 2))
+            }
+        } catch {
+            /* ignore */
+        }
+    }
+
     const hasEmdrPrereqs = (r: Row) =>
         Boolean((r.provider_name ?? '').trim() && (r.provider_street ?? '').trim() && (r.provider_city ?? '').trim() && (r.provider_state ?? '').trim() && (r.provider_zip ?? '').trim())
 
@@ -1018,7 +1050,7 @@ export default function ProviderManagementPage() {
                         <p className="mt-4 text-sm text-gray-500">No customers.</p>
                     ) : (
                         <div className="mt-4 overflow-x-auto">
-                            <table className="min-w-full table-auto divide-y divide-gray-200">
+                            <table className="w-full table-auto divide-y divide-gray-200">
                                 <thead className="bg-gray-50">
                                 <tr>
                                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Name</th>
@@ -1121,8 +1153,8 @@ export default function ProviderManagementPage() {
                                 <>
                                     Showing {filteredRows.length} NPIs • Filter:&nbsp;
                                     <span className="font-medium">
-                    {customerFilter === 'all' ? 'All Customers' : customerFilter === 'unassigned' ? 'Unassigned' : customerFilter}
-                  </span>
+                                        {customerFilter === 'all' ? 'All Customers' : customerFilter === 'unassigned' ? 'Unassigned' : customerFilter}
+                                    </span>
                                 </>
                             ) : (
                                 'No data loaded'
@@ -1130,8 +1162,8 @@ export default function ProviderManagementPage() {
                         </p>
                     </div>
 
-                    <div className="overflow-x-auto">
-                        <table className="min-w-full table-auto divide-y divide-gray-200">
+                    <div className="overflow-x-auto w-full">
+                        <table className="w-full table-auto divide-y divide-gray-200">
                             <thead className="bg-gray-50">
                             <tr>
                                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Provider NPI</th>
@@ -1251,6 +1283,7 @@ export default function ProviderManagementPage() {
                         </table>
                     </div>
                 </div>
+                <div className="h-6" />
 
                 {/* ====================================================== */}
                 {/* eMDR Register/deRegister section                      */}
@@ -1285,8 +1318,8 @@ export default function ProviderManagementPage() {
                     {/* --- Table 1: Not registered for eMDR --- */}
                     <div className="px-6 py-5">
                         <h3 className="text-sm font-semibold text-gray-800 mb-3">Not registered for eMDR</h3>
-                        <div className="overflow-x-auto">
-                            <table className="min-w-full table-auto divide-y divide-gray-200">
+                        <div className="overflow-x-auto w-full">
+                            <table className="w-full table-auto divide-y divide-gray-200">
                                 <thead className="bg-gray-50">
                                 <tr>
                                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">NPI</th>
@@ -1309,12 +1342,7 @@ export default function ProviderManagementPage() {
                                 ) : (
                                     notRegisteredRows.map(r => {
                                         const reg = r.provider_id ? regById[r.provider_id] : undefined
-                                        const anyError =
-                                            reg?.call_error_code ||
-                                            reg?.call_error_description ||
-                                            (reg?.errorList?.length ? reg.errorList.join('; ') : '') ||
-                                            (reg?.errors?.length ? JSON.stringify(reg.errors) : '') ||
-                                            (r.errors?.length ? JSON.stringify(r.errors) : '')
+                                        const { has, payload } = buildErrorPayload(r, reg)
                                         return (
                                             <tr key={`unreg-${r.provider_id}-${r.providerNPI}`} className="align-top">
                                                 <td className="px-6 py-3 text-sm font-medium text-gray-900 whitespace-nowrap">{r.providerNPI}</td>
@@ -1323,8 +1351,25 @@ export default function ProviderManagementPage() {
                                                     <RegStatusPill r={r} reg={reg} />
                                                 </td>
                                                 <td className="px-6 py-3 text-sm text-gray-700">{reg?.stage ?? r.stage ?? '—'}</td>
-                                                <td className="px-6 py-3 text-xs text-rose-700">
-                                                    {anyError ? <span className="inline-block max-w-xs break-words">{anyError}</span> : <span className="text-gray-400">—</span>}
+                                                <td className="px-6 py-3 text-xs">
+                                                    {has ? (
+                                                        <button
+                                                            type="button"
+                                                            onClick={() =>
+                                                                setErrorDrawer({
+                                                                    open: true,
+                                                                    title: `Errors • NPI ${r.providerNPI}`,
+                                                                    data: payload,
+                                                                })
+                                                            }
+                                                            className="inline-flex items-center gap-1 text-blue-600 hover:underline font-medium"
+                                                        >
+                                                            <Icon name="info-circled" className="h-3.5 w-3.5" />
+                                                            View errors
+                                                        </button>
+                                                    ) : (
+                                                        <span className="text-gray-400">—</span>
+                                                    )}
                                                 </td>
                                                 <td className="px-6 py-3 text-sm text-gray-700 whitespace-nowrap">{r.provider_id || <span className="text-gray-400">—</span>}</td>
                                                 <td className="px-6 py-3">
@@ -1351,14 +1396,15 @@ export default function ProviderManagementPage() {
                             </table>
                         </div>
                     </div>
+                    <div className="h-6" />
 
                     <hr className="border-gray-200" />
 
                     {/* --- Table 2: Registered for eMDR --- */}
                     <div className="px-6 py-5">
                         <h3 className="text-sm font-semibold text-gray-800 mb-3">Registered for eMDR</h3>
-                        <div className="overflow-x-auto">
-                            <table className="min-w-full table-auto divide-y divide-gray-200">
+                        <div className="overflow-x-auto w-full">
+                            <table className="w-full table-auto divide-y divide-gray-200">
                                 <thead className="bg-gray-50">
                                 <tr>
                                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">NPI</th>
@@ -1391,12 +1437,7 @@ export default function ProviderManagementPage() {
                                             typeof reg?.transaction_id_list === 'string'
                                                 ? reg.transaction_id_list.replace(/,+$/, '')
                                                 : lastChange?.esmd_transaction_id ?? toCsv(r.transaction_id_list) ?? ''
-                                        const anyError =
-                                            reg?.call_error_code ||
-                                            reg?.call_error_description ||
-                                            (reg?.errorList?.length ? reg.errorList.join('; ') : '') ||
-                                            (reg?.errors?.length ? JSON.stringify(reg.errors) : '') ||
-                                            (r.errors?.length ? JSON.stringify(r.errors) : '')
+                                        const { has, payload } = buildErrorPayload(r, reg)
                                         return (
                                             <tr key={`reg-${r.provider_id}-${r.providerNPI}`} className="align-top">
                                                 <td className="px-6 py-3 text-sm font-medium text-gray-900 whitespace-nowrap">{r.providerNPI}</td>
@@ -1426,8 +1467,25 @@ export default function ProviderManagementPage() {
                                                     )}
                                                 </td>
                                                 <td className="px-6 py-3 text-sm text-gray-700">{txnDisplay ? <Pill text={txnDisplay} /> : <span className="text-gray-400">—</span>}</td>
-                                                <td className="px-6 py-3 text-xs text-rose-700">
-                                                    {anyError ? <span className="inline-block max-w-xs break-words">{anyError}</span> : <span className="text-gray-400">—</span>}
+                                                <td className="px-6 py-3 text-xs">
+                                                    {has ? (
+                                                        <button
+                                                            type="button"
+                                                            onClick={() =>
+                                                                setErrorDrawer({
+                                                                    open: true,
+                                                                    title: `Errors • NPI ${r.providerNPI}`,
+                                                                    data: payload,
+                                                                })
+                                                            }
+                                                            className="inline-flex items-center gap-1 text-blue-600 hover:underline font-medium"
+                                                        >
+                                                            <Icon name="info-circled" className="h-3.5 w-3.5" />
+                                                            View errors
+                                                        </button>
+                                                    ) : (
+                                                        <span className="text-gray-400">—</span>
+                                                    )}
                                                 </td>
                                                 <td className="px-6 py-3 text-sm text-gray-700 whitespace-nowrap">{r.provider_id || '—'}</td>
                                                 <td className="px-6 py-3">
@@ -1467,6 +1525,7 @@ export default function ProviderManagementPage() {
                             </table>
                         </div>
                     </div>
+                    <div className="h-6" />
 
                     <hr className="border-gray-200" />
 
@@ -1474,8 +1533,8 @@ export default function ProviderManagementPage() {
                     <div className="px-6 py-5">
                         <h3 className="text-sm font-semibold text-gray-800 mb-3">Registered for Electronic-Only ADR</h3>
                         <p className="text-xs text-gray-500 mb-2">To revert to standard delivery (mail + electronic), deregister and then register again.</p>
-                        <div className="overflow-x-auto">
-                            <table className="min-w-full table-auto divide-y divide-gray-200">
+                        <div className="overflow-x-auto w-full">
+                            <table className="w-full table-auto divide-y divide-gray-200">
                                 <thead className="bg-gray-50">
                                 <tr>
                                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">NPI</th>
@@ -1498,12 +1557,7 @@ export default function ProviderManagementPage() {
                                 ) : (
                                     electronicOnlyRows.map(r => {
                                         const reg = r.provider_id ? regById[r.provider_id] : undefined
-                                        const anyError =
-                                            reg?.call_error_code ||
-                                            reg?.call_error_description ||
-                                            (reg?.errorList?.length ? reg.errorList.join('; ') : '') ||
-                                            (reg?.errors?.length ? JSON.stringify(reg.errors) : '') ||
-                                            (r.errors?.length ? JSON.stringify(r.errors) : '')
+                                        const { has, payload } = buildErrorPayload(r, reg)
                                         return (
                                             <tr key={`eo-${r.provider_id}-${r.providerNPI}`} className="align-top">
                                                 <td className="px-6 py-3 text-sm font-medium text-gray-900 whitespace-nowrap">{r.providerNPI}</td>
@@ -1512,8 +1566,25 @@ export default function ProviderManagementPage() {
                                                     <RegStatusPill r={r} reg={reg} />
                                                 </td>
                                                 <td className="px-6 py-3 text-sm text-gray-700">{reg?.stage ?? r.stage ?? '—'}</td>
-                                                <td className="px-6 py-3 text-xs text-rose-700">
-                                                    {anyError ? <span className="inline-block max-w-xs break-words">{anyError}</span> : <span className="text-gray-400">—</span>}
+                                                <td className="px-6 py-3 text-xs">
+                                                    {has ? (
+                                                        <button
+                                                            type="button"
+                                                            onClick={() =>
+                                                                setErrorDrawer({
+                                                                    open: true,
+                                                                    title: `Errors • NPI ${r.providerNPI}`,
+                                                                    data: payload,
+                                                                })
+                                                            }
+                                                            className="inline-flex items-center gap-1 text-blue-600 hover:underline font-medium"
+                                                        >
+                                                            <Icon name="info-circled" className="h-3.5 w-3.5" />
+                                                            View errors
+                                                        </button>
+                                                    ) : (
+                                                        <span className="text-gray-400">—</span>
+                                                    )}
                                                 </td>
                                                 <td className="px-6 py-3 text-sm text-gray-700 whitespace-nowrap">{r.provider_id || '—'}</td>
                                                 <td className="px-6 py-3">
@@ -1539,6 +1610,7 @@ export default function ProviderManagementPage() {
                             </table>
                         </div>
                     </div>
+                    <div className="h-6" />
                 </div>
             </div>
 
@@ -1615,6 +1687,29 @@ export default function ProviderManagementPage() {
                             </button>
                         </div>
                     </Form>
+                ) : null}
+            </Drawer>
+
+            {/* Drawer: Error Details */}
+            <Drawer isOpen={errorDrawer.open} onClose={() => setErrorDrawer({ open: false })} title={errorDrawer.title || 'Error Details'} size="lg">
+                {errorDrawer.open ? (
+                    <div className="space-y-3">
+                        <div className="flex items-center justify-between">
+                            <p className="text-sm text-gray-600">Detailed error payload from PCG responses and local row data.</p>
+                            <button
+                                type="button"
+                                onClick={copyErrorJSON}
+                                className="inline-flex items-center rounded-md bg-gray-800 px-3 py-1.5 text-xs font-semibold text-white shadow-sm hover:bg-gray-700"
+                                title="Copy JSON to clipboard"
+                            >
+                                <Icon name="copy" className="h-4 w-4 mr-1.5" />
+                                Copy JSON
+                            </button>
+                        </div>
+                        <div className="rounded-md border border-gray-200 p-2 bg-white">
+                            <JsonViewer data={errorDrawer.data ?? {}} />
+                        </div>
+                    </div>
                 ) : null}
             </Drawer>
 
