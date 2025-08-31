@@ -111,8 +111,12 @@ export async function action({ request }: ActionFunctionArgs) {
     const intent = String(form.get('intent') || '')
 
     if (intent === 'sync') {
-        // Only Customer Admins can sync
-        requireRoles(user, [INTEREX_ROLES.CUSTOMER_ADMIN])
+        // Allow Customer Admin, Provider Group Admin, and Basic User to sync
+        requireRoles(user, [
+            INTEREX_ROLES.CUSTOMER_ADMIN,
+            INTEREX_ROLES.PROVIDER_GROUP_ADMIN,
+            INTEREX_ROLES.BASIC_USER,
+        ])
         const type = String(form.get('type')) as TabType
         const startDate = String(form.get('startDate') || '')
         const endDate = String(form.get('endDate') || '')
@@ -152,7 +156,10 @@ export default function CustomerLettersPage() {
     const assignedUsers = (row: any) =>
         row?.provider?.userNpis?.map((x: any) => x.user.username).filter(Boolean).join(', ') || '—'
 
-    const canSync = user.roles.some(r => r.name === INTEREX_ROLES.CUSTOMER_ADMIN)
+    const canSync =
+        user.roles.some(r =>
+            [INTEREX_ROLES.CUSTOMER_ADMIN, INTEREX_ROLES.PROVIDER_GROUP_ADMIN, INTEREX_ROLES.BASIC_USER].includes(r.name),
+        )
 
     return (
         <InterexLayout
@@ -196,7 +203,7 @@ export default function CustomerLettersPage() {
                                 <input type="date" name="endDate" required className="border rounded px-2 py-1 text-sm" />
                             </div>
                             <button className="bg-blue-600 text-white text-sm font-semibold rounded px-3 py-1.5 disabled:opacity-50">
-                                <Icon name="refresh" className="inline h-4 w-4 mr-1" />
+                                <Icon name="update" className="inline h-4 w-4 mr-1" />
                                 Fetch new letters
                             </button>
                         </Form>

@@ -203,7 +203,7 @@ export default function AdminAllLettersPage() {
                             <input type="date" name="endDate" required className="border rounded px-2 py-1 text-sm" />
                         </div>
                         <button className="bg-blue-600 text-white text-sm font-semibold rounded px-3 py-1.5 disabled:opacity-50">
-                            <Icon name="refresh" className="inline h-4 w-4 mr-1" />
+                            <Icon name="update" className="inline h-4 w-4 mr-1" />
                             Fetch new letters
                         </button>
                     </Form>

@@ -1,11 +1,11 @@
 // app/services/letters.server.ts
-import { prisma } from '#app/utils/db.server.ts'
 import {
     pcgListPrePayLetters,
     pcgListPostPayLetters,
     pcgListPostPayOtherLetters,
     pcgDownloadEmdrLetterFile,
 } from '#app/services/pcg-hih.server.ts'
+import { prisma } from '#app/utils/db.server.ts'
 
 function normalizeNpi(raw?: string | null): string | null {
     if (!raw) return null
@@ -18,8 +18,12 @@ function normalizeNpi(raw?: string | null): string | null {
 function parseDateSafe(x?: string | null): Date | null {
     if (!x) return null
     const s = x.trim()
-    if (/^\d{2}\/\d{2}\/\d{4}$/.test(s)) {
-        const [mm, dd, yyyy] = s.split('/').map(Number)
+    // Use capture groups so TS knows mm/dd/yyyy are present
+    const m = s.match(/^(\d{2})\/(\d{2})\/(\d{4})$/)
+    if (m) {
+        const mm = Number(m[1])
+        const dd = Number(m[2])
+        const yyyy = Number(m[3])
         return new Date(Date.UTC(yyyy, mm - 1, dd))
     }
     const d = new Date(s)

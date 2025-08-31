@@ -19,7 +19,7 @@ async function testCustomerFieldDropdown() {
     const page = await browser.newPage();
     
     // Enable console logging
-    page.on('console', msg => console.log('🌐 PAGE LOG:', msg.text()));
+    //page.on('console', msg => console.log('🌐 PAGE LOG:', msg.text()));
     
     console.log('📋 Testing URL: http://localhost:3000/admin/users?action=add');
     await page.goto('http://localhost:3000/admin/users?action=add', { 

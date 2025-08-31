@@ -19,38 +19,38 @@ async function testHIHSubmissionCreation() {
     providerNpi: '1234567890'
   }
   
-  console.log('📋 Creating CMS HIH submission payload...')
+  // console.log('📋 Creating CMS HIH submission payload...')
   const payload = createCmsHihSubmissionPayload(testSubmissionData)
-  console.log('📤 Payload to be sent:', JSON.stringify(payload, null, 2))
+  // console.log('📤 Payload to be sent:', JSON.stringify(payload, null, 2))
   
-  console.log('\n🔐 Starting OAuth authentication with clientCreds scope...')
-  console.log('🌐 Calling CMS HIH Gateway API...')
+  // console.log('\n🔐 Starting OAuth authentication with clientCreds scope...')
+  // console.log('🌐 Calling CMS HIH Gateway API...')
   
   try {
     const response = await createCmsHihSubmission(payload)
     
-    console.log('\n📥 CMS HIH Gateway Response:')
-    console.log(JSON.stringify(response, null, 2))
+    // console.log('\n📥 CMS HIH Gateway Response:')
+    // console.log(JSON.stringify(response, null, 2))
     
     if (response.status === 'success' && response.submissionId) {
-      console.log('\n✅ SUCCESS! CMS HIH Gateway submission created successfully!')
-      console.log('🆔 Submission ID:', response.submissionId)
-      console.log('📝 Message:', response.message)
+      // console.log('\n✅ SUCCESS! CMS HIH Gateway submission created successfully!')
+      // console.log('🆔 Submission ID:', response.submissionId)
+      // console.log('📝 Message:', response.message)
       
       // In a real app, this submission ID would be stored in the database
-      console.log('\n💾 This submission ID would now be stored as fhirSubmissionId in the database')
+      // console.log('\n💾 This submission ID would now be stored as fhirSubmissionId in the database')
       
     } else if (response.status === 'error') {
-      console.log('\n❌ FAILED! CMS HIH Gateway returned an error:')
-      console.log('📝 Message:', response.message)
+      // console.log('\n❌ FAILED! CMS HIH Gateway returned an error:')
+      // console.log('📝 Message:', response.message)
       if (response.errors) {
-        console.log('🔍 Errors:')
+        // console.log('🔍 Errors:')
         response.errors.forEach((error, index) => {
-          console.log(`   ${index + 1}. ${error.code}: ${error.description}`)
+          // console.log(`   ${index + 1}. ${error.code}: ${error.description}`)
         })
       }
     } else {
-      console.log('\n⚠️  Unexpected response format:', response)
+      // console.log('\n⚠️  Unexpected response format:', response)
     }
     
   } catch (error) {

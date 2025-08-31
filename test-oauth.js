@@ -18,18 +18,18 @@ async function testOAuthAuthentication() {
     providerNpi: '1234567890'
   }
   
-  console.log('📋 Creating CMS HIH payload...')
+  // console.log('📋 Creating CMS HIH payload...')
   const payload = createCmsHihSubmissionPayload(testSubmissionData)
-  console.log('Payload:', JSON.stringify(payload, null, 2))
+  // console.log('Payload:', JSON.stringify(payload, null, 2))
   
-  console.log('🔐 Testing OAuth flow and API call...')
+  // console.log('🔐 Testing OAuth flow and API call...')
   const response = await createCmsHihSubmission(payload)
-  console.log('Response:', JSON.stringify(response, null, 2))
+  // console.log('Response:', JSON.stringify(response, null, 2))
   
   if (response.submissionId) {
-    console.log('✅ OAuth integration test successful! Submission ID:', response.submissionId)
+    // console.log('✅ OAuth integration test successful! Submission ID:', response.submissionId)
   } else {
-    console.log('❌ OAuth integration test failed:', response.message)
+    // console.log('❌ OAuth integration test failed:', response.message)
   }
 }
 
