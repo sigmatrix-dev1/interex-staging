@@ -1,6 +1,7 @@
 // app/routes/admin/providers-emdr-management.tsx
 
 import * as React from 'react'
+import { createPortal } from 'react-dom'
 import {
     type LoaderFunctionArgs,
     type ActionFunctionArgs,
@@ -881,6 +882,213 @@ function ConfirmActionButton({
     )
 }
 
+/* ----------------------- Sticky JSON Popover ----------------------- */
+function StickyJsonPopover({
+                               open,
+                               anchorEl,
+                               title,
+                               data,
+                               onClose,
+                           }: {
+    open: boolean
+    anchorEl: HTMLElement | null | undefined
+    title?: string
+    data?: any
+    onClose: () => void
+}) {
+    const panelRef = React.useRef<HTMLDivElement | null>(null)
+    const [pos, setPos] = React.useState<{ top: number; left: number }>({ top: 0, left: 0 })
+    const [placement, setPlacement] = React.useState<{ side: 'left' | 'right'; align: 'top' | 'bottom'; arrowTop: number }>({
+        side: 'right',
+        align: 'top',
+        arrowTop: 16,
+    })
+    const jsonText = React.useMemo(() => JSON.stringify(data ?? {}, null, 2), [data])
+
+    const recompute = React.useCallback(() => {
+        if (!anchorEl || typeof window === 'undefined') return
+        const rect = anchorEl.getBoundingClientRect()
+        const preferredWidth = panelRef.current?.offsetWidth || 480
+        const preferredHeight = panelRef.current?.offsetHeight || 320
+        const gap = 8
+
+        // Horizontal placement: try right of anchor, else left
+        let side: 'left' | 'right' = 'right'
+        let left = rect.right + gap
+        if (left + preferredWidth > window.innerWidth - gap) {
+            side = 'left'
+            left = Math.max(gap, rect.left - preferredWidth - gap)
+        }
+
+        // Vertical alignment: try aligning top to anchor; if overflow, align bottom to anchor
+        let align: 'top' | 'bottom' = 'top'
+        let top = rect.top
+        if (top + preferredHeight > window.innerHeight - gap) {
+            align = 'bottom'
+            top = Math.max(gap, rect.bottom - preferredHeight)
+        }
+
+        // Constrain within viewport just in case
+        top = Math.min(Math.max(gap, top), Math.max(gap, window.innerHeight - preferredHeight - gap))
+        left = Math.min(Math.max(gap, left), Math.max(gap, window.innerWidth - preferredWidth - gap))
+
+        // Arrow position (relative to panel top)
+        const anchorCenterY = rect.top + rect.height / 2
+        const arrowTop = Math.min(preferredHeight - 16, Math.max(16, anchorCenterY - top))
+
+        setPos({ top, left })
+        setPlacement({ side, align, arrowTop })
+    }, [anchorEl])
+
+    // Track scrollable ancestors so the popover truly "sticks" to the clicked button
+    const scrollParentsRef = React.useRef<HTMLElement[]>([])
+
+    React.useEffect(() => {
+        if (!open) return
+        recompute()
+        // Recompute again on the next frame to account for measured panel size
+        const raf = requestAnimationFrame(() => recompute())
+
+        const handler = () => recompute()
+
+        // Find all scrollable ancestors of the anchor element
+        const scrollParents: HTMLElement[] = []
+        if (anchorEl && typeof window !== 'undefined') {
+            let node: HTMLElement | null = anchorEl
+            const isScrollable = (el: HTMLElement) => {
+                const style = window.getComputedStyle(el)
+                const overflow = `${style.overflow}${style.overflowX}${style.overflowY}`
+                return /(auto|scroll|overlay)/.test(overflow)
+            }
+            while (node) {
+                if (isScrollable(node)) scrollParents.push(node)
+                node = node.parentElement
+            }
+        }
+
+        // Listen to scroll on all those ancestors + window to keep position in sync
+        scrollParents.forEach(p => p.addEventListener('scroll', handler, { passive: true }))
+        if (typeof window !== 'undefined') {
+            window.addEventListener('scroll', handler, { passive: true })
+            window.addEventListener('resize', handler)
+        }
+
+        // Also react to size changes of the anchor or the popover itself
+        let ro: ResizeObserver | null = null
+        if (typeof window !== 'undefined' && 'ResizeObserver' in window) {
+            ro = new ResizeObserver(() => handler())
+            if (anchorEl) ro.observe(anchorEl)
+            if (panelRef.current) ro.observe(panelRef.current)
+        }
+
+        scrollParentsRef.current = scrollParents
+
+        return () => {
+            cancelAnimationFrame(raf)
+            scrollParents.forEach(p => p.removeEventListener('scroll', handler))
+            if (typeof window !== 'undefined') {
+                window.removeEventListener('scroll', handler)
+                window.removeEventListener('resize', handler)
+            }
+            if (ro) ro.disconnect()
+        }
+    }, [open, anchorEl, recompute])
+
+    React.useEffect(() => {
+        if (!open) return
+        const onKey = (e: KeyboardEvent) => {
+            if (e.key === 'Escape') onClose()
+        }
+        const onClick = (e: MouseEvent) => {
+            const target = e.target as Node | null
+            if (!panelRef.current) return
+            const clickedInsidePanel = panelRef.current.contains(target)
+            const clickedAnchor = anchorEl ? anchorEl.contains(target) : false
+            if (!clickedInsidePanel && !clickedAnchor) onClose()
+        }
+        document.addEventListener('keydown', onKey)
+        document.addEventListener('mousedown', onClick, true)
+        return () => {
+            document.removeEventListener('keydown', onKey)
+            document.removeEventListener('mousedown', onClick, true)
+        }
+    }, [open, onClose, anchorEl])
+
+    // Lightly highlight the anchor button while popover is open
+    React.useEffect(() => {
+        if (!open || !anchorEl) return
+        anchorEl.classList.add('ring-2', 'ring-offset-2', 'ring-red-300', 'rounded')
+        return () => {
+            anchorEl.classList.remove('ring-2', 'ring-offset-2', 'ring-red-300', 'rounded')
+        }
+    }, [open, anchorEl])
+
+    const copy = async () => {
+        try {
+            await navigator.clipboard.writeText(jsonText)
+        } catch { /* ignore */ }
+    }
+
+    if (!open || typeof document === 'undefined') return null
+
+    return createPortal(
+        <div className="fixed inset-0 z-[1000] pointer-events-none">
+            <div
+                ref={panelRef}
+                style={{ top: `${pos.top}px`, left: `${pos.left}px` }}
+                className="pointer-events-auto fixed w-[480px] max-w-[90vw] max-h-[80vh] rounded-lg border border-gray-200 bg-white shadow-xl"
+            >
+                {/* Arrow that points back to the clicked button */}
+                <div
+                    aria-hidden
+                    style={{
+                        top: placement.arrowTop,
+                        [placement.side === 'right' ? 'left' : 'right']: '-6px',
+                    } as React.CSSProperties}
+                    className="absolute"
+                >
+                    <div className="w-3 h-3 rotate-45 bg-white border-t border-l border-gray-200 shadow-sm" />
+                </div>
+
+                <div className="flex items-center justify-between px-3 py-2 border-b border-gray-200">
+                    <div className="flex items-center gap-2">
+                        <Icon name="question-mark-circled" className="h-4 w-4 text-red-600" />
+                        <h4 className="text-sm font-semibold text-gray-900">{title || 'Error Details'}</h4>
+                    </div>
+                    <div className="flex items-center gap-2">
+                        <button
+                            type="button"
+                            onClick={copy}
+                            className="inline-flex items-center rounded-md bg-gray-800 px-2.5 py-1 text-xs font-semibold text-white hover:bg-gray-700"
+                            title="Copy JSON to clipboard"
+                        >
+                            <Icon name="file-text" className="h-3.5 w-3.5 mr-1" />
+                            Copy JSON
+                        </button>
+                        <button
+                            type="button"
+                            onClick={onClose}
+                            className="inline-flex items-center rounded-md border border-gray-300 bg-white px-2 py-1 text-xs font-medium text-gray-700 hover:bg-gray-50"
+                            title="Close"
+                        >
+                            <Icon name="cross-1" className="h-3.5 w-3.5" />
+                        </button>
+                    </div>
+                </div>
+                {/* Raw JSON right away */}
+                <div className="p-3">
+                    <div className="rounded-md border border-gray-200 bg-gray-50">
+                        <pre className="m-0 p-3 text-xs leading-5 text-gray-900 whitespace-pre overflow-auto max-h-[60vh]">
+{jsonText}
+                        </pre>
+                    </div>
+                </div>
+            </div>
+        </div>,
+        document.body,
+    )
+}
+
 /* ------------------------------ Component ------------------------------ */
 export default function ProviderManagementPage() {
     const { user, baseRows, updateResponses, customers: initialCustomers } = useLoaderData<{
@@ -976,8 +1184,8 @@ export default function ProviderManagementPage() {
         return <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${cls}`}>{val ?? '—'}</span>
     }
 
-    // ----- Error Drawer (new) -----
-    const [errorDrawer, setErrorDrawer] = React.useState<{ open: boolean; title?: string; data?: any }>({ open: false })
+    // ----- Error Popover (new) -----
+    const [errorPopover, setErrorPopover] = React.useState<{ open: boolean; title?: string; data?: any; anchorEl?: HTMLElement | null }>({ open: false })
 
     function buildErrorPayload(r: Row, reg?: RegResp) {
         const payload = {
@@ -1000,8 +1208,8 @@ export default function ProviderManagementPage() {
 
     async function copyErrorJSON() {
         try {
-            if (errorDrawer.data) {
-                await navigator.clipboard.writeText(JSON.stringify(errorDrawer.data, null, 2))
+            if (errorPopover.data) {
+                await navigator.clipboard.writeText(JSON.stringify(errorPopover.data, null, 2))
             }
         } catch {
             /* ignore */
@@ -1342,7 +1550,7 @@ export default function ProviderManagementPage() {
                                 ) : (
                                     notRegisteredRows.map(r => {
                                         const reg = r.provider_id ? regById[r.provider_id] : undefined
-                                        const { has, payload } = buildErrorPayload(r, reg)
+                                        const { has } = buildErrorPayload(r, reg)
                                         return (
                                             <tr key={`unreg-${r.provider_id}-${r.providerNPI}`} className="align-top">
                                                 <td className="px-6 py-3 text-sm font-medium text-gray-900 whitespace-nowrap">{r.providerNPI}</td>
@@ -1355,16 +1563,18 @@ export default function ProviderManagementPage() {
                                                     {has ? (
                                                         <button
                                                             type="button"
-                                                            onClick={() =>
-                                                                setErrorDrawer({
+                                                            onClick={(e) =>
+                                                                setErrorPopover({
                                                                     open: true,
                                                                     title: `Errors • NPI ${r.providerNPI}`,
-                                                                    data: payload,
+                                                                    // Show the full registration JSON if available; fallback to our compact payload
+                                                                    data: reg ?? buildErrorPayload(r, reg).payload,
+                                                                    anchorEl: e.currentTarget as HTMLElement,
                                                                 })
                                                             }
-                                                            className="inline-flex items-center gap-1 text-blue-600 hover:underline font-medium"
+                                                            className="inline-flex items-center gap-1 text-red-600 hover:underline font-medium"
                                                         >
-                                                            <Icon name="info-circled" className="h-3.5 w-3.5" />
+                                                            <Icon name="question-mark-circled" className="h-3.5 w-3.5" />
                                                             View errors
                                                         </button>
                                                     ) : (
@@ -1437,7 +1647,7 @@ export default function ProviderManagementPage() {
                                             typeof reg?.transaction_id_list === 'string'
                                                 ? reg.transaction_id_list.replace(/,+$/, '')
                                                 : lastChange?.esmd_transaction_id ?? toCsv(r.transaction_id_list) ?? ''
-                                        const { has, payload } = buildErrorPayload(r, reg)
+                                        const { has } = buildErrorPayload(r, reg)
                                         return (
                                             <tr key={`reg-${r.provider_id}-${r.providerNPI}`} className="align-top">
                                                 <td className="px-6 py-3 text-sm font-medium text-gray-900 whitespace-nowrap">{r.providerNPI}</td>
@@ -1471,16 +1681,17 @@ export default function ProviderManagementPage() {
                                                     {has ? (
                                                         <button
                                                             type="button"
-                                                            onClick={() =>
-                                                                setErrorDrawer({
+                                                            onClick={(e) =>
+                                                                setErrorPopover({
                                                                     open: true,
                                                                     title: `Errors • NPI ${r.providerNPI}`,
-                                                                    data: payload,
+                                                                    data: reg ?? buildErrorPayload(r, reg).payload,
+                                                                    anchorEl: e.currentTarget as HTMLElement,
                                                                 })
                                                             }
-                                                            className="inline-flex items-center gap-1 text-blue-600 hover:underline font-medium"
+                                                            className="inline-flex items-center gap-1 text-red-600 hover:underline font-medium"
                                                         >
-                                                            <Icon name="info-circled" className="h-3.5 w-3.5" />
+                                                            <Icon name="question-mark-circled" className="h-3.5 w-3.5" />
                                                             View errors
                                                         </button>
                                                     ) : (
@@ -1557,7 +1768,7 @@ export default function ProviderManagementPage() {
                                 ) : (
                                     electronicOnlyRows.map(r => {
                                         const reg = r.provider_id ? regById[r.provider_id] : undefined
-                                        const { has, payload } = buildErrorPayload(r, reg)
+                                        const { has } = buildErrorPayload(r, reg)
                                         return (
                                             <tr key={`eo-${r.provider_id}-${r.providerNPI}`} className="align-top">
                                                 <td className="px-6 py-3 text-sm font-medium text-gray-900 whitespace-nowrap">{r.providerNPI}</td>
@@ -1570,16 +1781,17 @@ export default function ProviderManagementPage() {
                                                     {has ? (
                                                         <button
                                                             type="button"
-                                                            onClick={() =>
-                                                                setErrorDrawer({
+                                                            onClick={(e) =>
+                                                                setErrorPopover({
                                                                     open: true,
                                                                     title: `Errors • NPI ${r.providerNPI}`,
-                                                                    data: payload,
+                                                                    data: reg ?? buildErrorPayload(r, reg).payload,
+                                                                    anchorEl: e.currentTarget as HTMLElement,
                                                                 })
                                                             }
-                                                            className="inline-flex items-center gap-1 text-blue-600 hover:underline font-medium"
+                                                            className="inline-flex items-center gap-1 text-red-600 hover:underline font-medium"
                                                         >
-                                                            <Icon name="info-circled" className="h-3.5 w-3.5" />
+                                                            <Icon name="question-mark-circled" className="h-3.5 w-3.5" />
                                                             View errors
                                                         </button>
                                                     ) : (
@@ -1690,28 +1902,14 @@ export default function ProviderManagementPage() {
                 ) : null}
             </Drawer>
 
-            {/* Drawer: Error Details */}
-            <Drawer isOpen={errorDrawer.open} onClose={() => setErrorDrawer({ open: false })} title={errorDrawer.title || 'Error Details'} size="lg">
-                {errorDrawer.open ? (
-                    <div className="space-y-3">
-                        <div className="flex items-center justify-between">
-                            <p className="text-sm text-gray-600">Detailed error payload from PCG responses and local row data.</p>
-                            <button
-                                type="button"
-                                onClick={copyErrorJSON}
-                                className="inline-flex items-center rounded-md bg-gray-800 px-3 py-1.5 text-xs font-semibold text-white shadow-sm hover:bg-gray-700"
-                                title="Copy JSON to clipboard"
-                            >
-                                <Icon name="copy" className="h-4 w-4 mr-1.5" />
-                                Copy JSON
-                            </button>
-                        </div>
-                        <div className="rounded-md border border-gray-200 p-2 bg-white">
-                            <JsonViewer data={errorDrawer.data ?? {}} />
-                        </div>
-                    </div>
-                ) : null}
-            </Drawer>
+            {/* Sticky Error Popover (anchored to "View errors") */}
+            <StickyJsonPopover
+                open={errorPopover.open}
+                anchorEl={errorPopover.anchorEl || null}
+                title={errorPopover.title}
+                data={errorPopover.data}
+                onClose={() => setErrorPopover({ open: false })}
+            />
 
             {/* Drawer: Rename Customer */}
             <Drawer isOpen={renameDrawer.open} onClose={() => setRenameDrawer({ open: false })} title={`Rename Customer`} size="sm">
