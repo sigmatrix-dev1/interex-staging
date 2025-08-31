@@ -11,6 +11,7 @@
 // but the page will only display rows within the user's visibility scope.
 
 import * as React from 'react'
+import { createPortal } from 'react-dom'
 import {
     type LoaderFunctionArgs,
     type ActionFunctionArgs,
@@ -43,6 +44,9 @@ type Row = PcgProviderListItem & {
     customerName: string | null
     provider_name: string | null
     providerGroupName: string | null
+    // NEW: derived from Provider.userNpis -> User
+    assignedToUsernames?: string[]
+    assignedToEmails?: string[]
 }
 
 type StoredUpdate = { npi: string; response: unknown | null }
@@ -175,6 +179,9 @@ function mapPersistedToRow(p: {
     providerZip: string | null
     customerName: string | null
     providerGroupName: string | null
+    // NEW
+    usernames?: (string | null)[]
+    emails?: (string | null)[]
     listDetail: {
         providerNpi: string
         pcgProviderId: string | null
@@ -245,6 +252,10 @@ function mapPersistedToRow(p: {
         // Extras for UI
         customerName: p.customerName,
         providerGroupName: p.providerGroupName,
+
+        // NEW: assigned users
+        assignedToUsernames: (p.usernames ?? []).filter(Boolean) as string[],
+        assignedToEmails: (p.emails ?? []).filter(Boolean) as string[],
     }
 
     return r
@@ -340,6 +351,10 @@ async function composeRows(where: any) {
                     errorList: true,
                 },
             },
+            // NEW: derive assigned usernames & emails directly
+            userNpis: {
+                select: { user: { select: { username: true, email: true } } },
+            },
         },
         orderBy: [{ npi: 'asc' }],
     })
@@ -363,6 +378,15 @@ async function composeRows(where: any) {
     const rows: Row[] = providers.map(p => {
         const snapshot = (p.pcgListSnapshot as any) as PcgProviderListItem | null
         const listDetail = snapshot ? mapListItemToDetail(snapshot) : null
+
+        // NEW: collect usernames and emails from userNpis relation
+        const usernames = (p.userNpis ?? [])
+            .map(u => (u as any).user?.username ?? null)
+            .filter(Boolean) as string[]
+        const emails = (p.userNpis ?? [])
+            .map(u => (u as any).user?.email ?? null)
+            .filter(Boolean) as string[]
+
         return mapPersistedToRow({
             npi: p.npi,
             name: p.name ?? null,
@@ -376,6 +400,8 @@ async function composeRows(where: any) {
             providerGroupName: p.providerGroupId ? groupNameById.get(p.providerGroupId) ?? null : null,
             listDetail,
             registrationStatus: p.registrationStatus ? (p.registrationStatus as any) : null,
+            usernames,
+            emails,
         })
     })
 
@@ -883,6 +909,213 @@ function ConfirmActionButton({
     )
 }
 
+/* ----------------------- Sticky JSON Popover ----------------------- */
+function StickyJsonPopover({
+                               open,
+                               anchorEl,
+                               title,
+                               data,
+                               onClose,
+                           }: {
+    open: boolean
+    anchorEl: HTMLElement | null | undefined
+    title?: string
+    data?: any
+    onClose: () => void
+}) {
+    const panelRef = React.useRef<HTMLDivElement | null>(null)
+    const [pos, setPos] = React.useState<{ top: number; left: number }>({ top: 0, left: 0 })
+    const [placement, setPlacement] = React.useState<{ side: 'left' | 'right'; align: 'top' | 'bottom'; arrowTop: number }>({
+        side: 'right',
+        align: 'top',
+        arrowTop: 16,
+    })
+    const jsonText = React.useMemo(() => JSON.stringify(data ?? {}, null, 2), [data])
+
+    const recompute = React.useCallback(() => {
+        if (!anchorEl || typeof window === 'undefined') return
+        const rect = anchorEl.getBoundingClientRect()
+        const preferredWidth = panelRef.current?.offsetWidth || 480
+        const preferredHeight = panelRef.current?.offsetHeight || 320
+        const gap = 8
+
+        // Horizontal placement: try right of anchor, else left
+        let side: 'left' | 'right' = 'right'
+        let left = rect.right + gap
+        if (left + preferredWidth > window.innerWidth - gap) {
+            side = 'left'
+            left = Math.max(gap, rect.left - preferredWidth - gap)
+        }
+
+        // Vertical alignment: try aligning top to anchor; if overflow, align bottom to anchor
+        let align: 'top' | 'bottom' = 'top'
+        let top = rect.top
+        if (top + preferredHeight > window.innerHeight - gap) {
+            align = 'bottom'
+            top = Math.max(gap, rect.bottom - preferredHeight)
+        }
+
+        // Constrain within viewport just in case
+        top = Math.min(Math.max(gap, top), Math.max(gap, window.innerHeight - preferredHeight - gap))
+        left = Math.min(Math.max(gap, left), Math.max(gap, window.innerWidth - preferredWidth - gap))
+
+        // Arrow position (relative to panel top)
+        const anchorCenterY = rect.top + rect.height / 2
+        const arrowTop = Math.min(preferredHeight - 16, Math.max(16, anchorCenterY - top))
+
+        setPos({ top, left })
+        setPlacement({ side, align, arrowTop })
+    }, [anchorEl])
+
+    // Track scrollable ancestors so the popover truly "sticks" to the clicked button
+    const scrollParentsRef = React.useRef<HTMLElement[]>([])
+
+    React.useEffect(() => {
+        if (!open) return
+        recompute()
+        // Recompute again on the next frame to account for measured panel size
+        const raf = requestAnimationFrame(() => recompute())
+
+        const handler = () => recompute()
+
+        // Find all scrollable ancestors of the anchor element
+        const scrollParents: HTMLElement[] = []
+        if (anchorEl && typeof window !== 'undefined') {
+            let node: HTMLElement | null = anchorEl
+            const isScrollable = (el: HTMLElement) => {
+                const style = window.getComputedStyle(el)
+                const overflow = `${style.overflow}${style.overflowX}${style.overflowY}`
+                return /(auto|scroll|overlay)/.test(overflow)
+            }
+            while (node) {
+                if (isScrollable(node)) scrollParents.push(node)
+                node = node.parentElement
+            }
+        }
+
+        // Listen to scroll on all those ancestors + window to keep position in sync
+        scrollParents.forEach(p => p.addEventListener('scroll', handler, { passive: true }))
+        if (typeof window !== 'undefined') {
+            window.addEventListener('scroll', handler, { passive: true })
+            window.addEventListener('resize', handler)
+        }
+
+        // Also react to size changes of the anchor or the popover itself
+        let ro: ResizeObserver | null = null
+        if (typeof window !== 'undefined' && 'ResizeObserver' in window) {
+            ro = new ResizeObserver(() => handler())
+            if (anchorEl) ro.observe(anchorEl)
+            if (panelRef.current) ro.observe(panelRef.current)
+        }
+
+        scrollParentsRef.current = scrollParents
+
+        return () => {
+            cancelAnimationFrame(raf)
+            scrollParents.forEach(p => p.removeEventListener('scroll', handler))
+            if (typeof window !== 'undefined') {
+                window.removeEventListener('scroll', handler)
+                window.removeEventListener('resize', handler)
+            }
+            if (ro) ro.disconnect()
+        }
+    }, [open, anchorEl, recompute])
+
+    React.useEffect(() => {
+        if (!open) return
+        const onKey = (e: KeyboardEvent) => {
+            if (e.key === 'Escape') onClose()
+        }
+        const onClick = (e: MouseEvent) => {
+            const target = e.target as Node | null
+            if (!panelRef.current) return
+            const clickedInsidePanel = panelRef.current.contains(target)
+            const clickedAnchor = anchorEl ? anchorEl.contains(target) : false
+            if (!clickedInsidePanel && !clickedAnchor) onClose()
+        }
+        document.addEventListener('keydown', onKey)
+        document.addEventListener('mousedown', onClick, true)
+        return () => {
+            document.removeEventListener('keydown', onKey)
+            document.removeEventListener('mousedown', onClick, true)
+        }
+    }, [open, onClose, anchorEl])
+
+    // Lightly highlight the anchor button while popover is open
+    React.useEffect(() => {
+        if (!open || !anchorEl) return
+        anchorEl.classList.add('ring-2', 'ring-offset-2', 'ring-red-300', 'rounded')
+        return () => {
+            anchorEl.classList.remove('ring-2', 'ring-offset-2', 'ring-red-300', 'rounded')
+        }
+    }, [open, anchorEl])
+
+    const copy = async () => {
+        try {
+            await navigator.clipboard.writeText(jsonText)
+        } catch { /* ignore */ }
+    }
+
+    if (!open || typeof document === 'undefined') return null
+
+    return createPortal(
+        <div className="fixed inset-0 z-[1000] pointer-events-none">
+            <div
+                ref={panelRef}
+                style={{ top: `${pos.top}px`, left: `${pos.left}px` }}
+                className="pointer-events-auto fixed w-[480px] max-w-[90vw] max-h-[80vh] rounded-lg border border-gray-200 bg-white shadow-xl"
+            >
+                {/* Arrow that points back to the clicked button */}
+                <div
+                    aria-hidden
+                    style={{
+                        top: placement.arrowTop,
+                        [placement.side === 'right' ? 'left' : 'right']: '-6px',
+                    } as React.CSSProperties}
+                    className="absolute"
+                >
+                    <div className="w-3 h-3 rotate-45 bg-white border-t border-l border-gray-200 shadow-sm" />
+                </div>
+
+                <div className="flex items-center justify-between px-3 py-2 border-b border-gray-200">
+                    <div className="flex items-center gap-2">
+                        <Icon name="question-mark-circled" className="h-4 w-4 text-red-600" />
+                        <h4 className="text-sm font-semibold text-gray-900">{title || 'Error Details'}</h4>
+                    </div>
+                    <div className="flex items-center gap-2">
+                        <button
+                            type="button"
+                            onClick={copy}
+                            className="inline-flex items-center rounded-md bg-gray-800 px-2.5 py-1 text-xs font-semibold text-white hover:bg-gray-700"
+                            title="Copy JSON to clipboard"
+                        >
+                            <Icon name="file-text" className="h-3.5 w-3.5 mr-1" />
+                            Copy JSON
+                        </button>
+                        <button
+                            type="button"
+                            onClick={onClose}
+                            className="inline-flex items-center rounded-md border border-gray-300 bg-white px-2 py-1 text-xs font-medium text-gray-700 hover:bg-gray-50"
+                            title="Close"
+                        >
+                            <Icon name="cross-1" className="h-3.5 w-3.5" />
+                        </button>
+                    </div>
+                </div>
+                {/* Raw JSON right away */}
+                <div className="p-3">
+                    <div className="rounded-md border border-gray-200 bg-gray-50">
+                        <pre className="m-0 p-3 text-xs leading-5 text-gray-900 whitespace-pre overflow-auto max-h-[60vh]">
+{jsonText}
+                        </pre>
+                    </div>
+                </div>
+            </div>
+        </div>,
+        document.body,
+    )
+}
+
 /* ------------------------------ Component ------------------------------ */
 export default function ProvidersEmdrScopedPage() {
     const { user, roleLabel, baseRows, updateResponses } = useLoaderData<{
@@ -964,6 +1197,28 @@ export default function ProvidersEmdrScopedPage() {
         return <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${cls}`}>{val ?? '—'}</span>
     }
 
+    // ----- Error Popover (new) -----
+    const [errorPopover, setErrorPopover] = React.useState<{ open: boolean; title?: string; data?: any; anchorEl?: HTMLElement | null }>({ open: false })
+
+    function buildErrorPayload(r: Row, reg?: RegResp) {
+        const payload = {
+            providerNPI: r.providerNPI,
+            provider_id: r.provider_id || null,
+            reg_status: reg?.reg_status ?? r.reg_status ?? null,
+            stage: reg?.stage ?? r.stage ?? null,
+            call_error_code: reg?.call_error_code ?? null,
+            call_error_description: reg?.call_error_description ?? null,
+            errorList: (reg?.errorList && reg.errorList.length ? reg.errorList : r.errorList) ?? [],
+            errors: (reg?.errors && (reg.errors as any[]).length ? reg.errors : r.errors) ?? [],
+        }
+        const has =
+            Boolean(payload.call_error_code) ||
+            Boolean(payload.call_error_description) ||
+            (Array.isArray(payload.errorList) && payload.errorList.length > 0) ||
+            (Array.isArray(payload.errors) && payload.errors.length > 0)
+        return { has, payload }
+    }
+
     // Show in eMDR tables only if name + address present (street2 optional)
     const hasEmdrPrereqs = (r: Row) =>
         Boolean((r.provider_name ?? '').trim() && (r.provider_street ?? '').trim() && (r.provider_city ?? '').trim() && (r.provider_state ?? '').trim() && (r.provider_zip ?? '').trim())
@@ -1033,6 +1288,9 @@ export default function ProvidersEmdrScopedPage() {
                                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Electronic Only?</th>
                                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Customer Name</th>
                                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Provider Group</th>
+                                {/* NEW: Assigned columns */}
+                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Assigned To</th>
+                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Email IDs</th>
                                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Provider Name</th>
                                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Street</th>
                                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Street 2</th>
@@ -1049,7 +1307,7 @@ export default function ProvidersEmdrScopedPage() {
                             <tbody className="bg-white divide-y divide-gray-200">
                             {!rows.length ? (
                                 <tr>
-                                    <td colSpan={16} className="px-6 py-8 text-center text-sm text-gray-500">
+                                    <td colSpan={19} className="px-6 py-8 text-center text-sm text-gray-500">
                                         No rows.
                                     </td>
                                 </tr>
@@ -1079,6 +1337,13 @@ export default function ProvidersEmdrScopedPage() {
                                             </td>
                                             <td className="px-6 py-4 text-sm text-gray-700">{r.customerName ?? '—'}</td>
                                             <td className="px-6 py-4 text-sm text-gray-700">{r.providerGroupName ?? '—'}</td>
+                                            {/* NEW cells */}
+                                            <td className="px-6 py-4 text-sm text-gray-700">
+                                                {r.assignedToUsernames?.length ? r.assignedToUsernames.join(', ') : '—'}
+                                            </td>
+                                            <td className="px-6 py-4 text-sm text-gray-700">
+                                                {r.assignedToEmails?.length ? r.assignedToEmails.join(', ') : '—'}
+                                            </td>
                                             <td className="px-6 py-4 text-sm text-gray-700">{r.provider_name ?? '—'}</td>
                                             <td className="px-6 py-4 text-sm text-gray-700 break-words">{r.provider_street ?? '—'}</td>
                                             <td className="px-6 py-4 text-sm text-gray-700 break-words">{r.provider_street2 ?? '—'}</td>
@@ -1171,12 +1436,7 @@ export default function ProvidersEmdrScopedPage() {
                                 ) : (
                                     notRegisteredRows.map(r => {
                                         const reg = r.provider_id ? regById[r.provider_id] : undefined
-                                        const anyError =
-                                            reg?.call_error_code ||
-                                            reg?.call_error_description ||
-                                            (reg?.errorList?.length ? reg.errorList.join('; ') : '') ||
-                                            (reg?.errors?.length ? JSON.stringify(reg.errors) : '') ||
-                                            (r.errors?.length ? JSON.stringify(r.errors) : '')
+                                        const { has } = buildErrorPayload(r, reg)
                                         return (
                                             <tr key={`unreg-${r.provider_id}-${r.providerNPI}`} className="align-top">
                                                 <td className="px-6 py-3 text-sm font-medium text-gray-900">{r.providerNPI}</td>
@@ -1185,8 +1445,26 @@ export default function ProvidersEmdrScopedPage() {
                                                     <RegStatusPill r={r} reg={reg} />
                                                 </td>
                                                 <td className="px-6 py-3 text-sm text-gray-700">{reg?.stage ?? r.stage ?? '—'}</td>
-                                                <td className="px-6 py-3 text-xs text-rose-700">
-                                                    {anyError ? <span className="inline-block max-w-xs break-words">{anyError}</span> : <span className="text-gray-400">—</span>}
+                                                <td className="px-6 py-3 text-xs">
+                                                    {has ? (
+                                                        <button
+                                                            type="button"
+                                                            onClick={(e) =>
+                                                                setErrorPopover({
+                                                                    open: true,
+                                                                    title: `Errors • NPI ${r.providerNPI}`,
+                                                                    data: reg ?? buildErrorPayload(r, reg).payload,
+                                                                    anchorEl: e.currentTarget as HTMLElement,
+                                                                })
+                                                            }
+                                                            className="inline-flex items-center gap-1 text-red-600 hover:underline font-medium"
+                                                        >
+                                                            <Icon name="question-mark-circled" className="h-3.5 w-3.5" />
+                                                            View errors
+                                                        </button>
+                                                    ) : (
+                                                        <span className="text-gray-400">—</span>
+                                                    )}
                                                 </td>
                                                 <td className="px-6 py-3 text-sm text-gray-700">{r.provider_id || <span className="text-gray-400">—</span>}</td>
                                                 <td className="px-6 py-3">
@@ -1221,7 +1499,7 @@ export default function ProvidersEmdrScopedPage() {
                         <h3 className="text-sm font-semibold text-gray-800">Registered for eMDR</h3>
                         <div className="overflow-x-auto rounded-md border border-gray-200 p-4 bg-gray-50">
                             <table className="w-full table-fixed divide-y divide-gray-200">
-                            <thead className="bg-gray-50">
+                                <thead className="bg-gray-50">
                                 <tr>
                                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">NPI</th>
                                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Name</th>
@@ -1253,12 +1531,7 @@ export default function ProvidersEmdrScopedPage() {
                                             typeof reg?.transaction_id_list === 'string'
                                                 ? reg.transaction_id_list.replace(/,+$/, '')
                                                 : lastChange?.esmd_transaction_id ?? toCsv(r.transaction_id_list) ?? ''
-                                        const anyError =
-                                            reg?.call_error_code ||
-                                            reg?.call_error_description ||
-                                            (reg?.errorList?.length ? reg.errorList.join('; ') : '') ||
-                                            (reg?.errors?.length ? JSON.stringify(reg.errors) : '') ||
-                                            (r.errors?.length ? JSON.stringify(r.errors) : '')
+                                        const { has } = buildErrorPayload(r, reg)
                                         return (
                                             <tr key={`reg-${r.provider_id}-${r.providerNPI}`} className="align-top">
                                                 <td className="px-6 py-3 text-sm font-medium text-gray-900">{r.providerNPI}</td>
@@ -1288,8 +1561,26 @@ export default function ProvidersEmdrScopedPage() {
                                                     )}
                                                 </td>
                                                 <td className="px-6 py-3 text-sm text-gray-700">{txnDisplay ? <Pill text={txnDisplay} /> : <span className="text-gray-400">—</span>}</td>
-                                                <td className="px-6 py-3 text-xs text-rose-700">
-                                                    {anyError ? <span className="inline-block max-w-xs break-words">{anyError}</span> : <span className="text-gray-400">—</span>}
+                                                <td className="px-6 py-3 text-xs">
+                                                    {has ? (
+                                                        <button
+                                                            type="button"
+                                                            onClick={(e) =>
+                                                                setErrorPopover({
+                                                                    open: true,
+                                                                    title: `Errors • NPI ${r.providerNPI}`,
+                                                                    data: reg ?? buildErrorPayload(r, reg).payload,
+                                                                    anchorEl: e.currentTarget as HTMLElement,
+                                                                })
+                                                            }
+                                                            className="inline-flex items-center gap-1 text-red-600 hover:underline font-medium"
+                                                        >
+                                                            <Icon name="question-mark-circled" className="h-3.5 w-3.5" />
+                                                            View errors
+                                                        </button>
+                                                    ) : (
+                                                        <span className="text-gray-400">—</span>
+                                                    )}
                                                 </td>
                                                 <td className="px-6 py-3 text-sm text-gray-700">{r.provider_id || '—'}</td>
                                                 <td className="px-6 py-3">
@@ -1338,7 +1629,7 @@ export default function ProvidersEmdrScopedPage() {
                         <p className="text-xs text-gray-500">To revert to standard delivery (mail + electronic), deregister and then register again.</p>
                         <div className="overflow-x-auto rounded-md border border-gray-200 p-4 bg-gray-50">
                             <table className="w-full table-fixed divide-y divide-gray-200">
-                            <thead className="bg-gray-50">
+                                <thead className="bg-gray-50">
                                 <tr>
                                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">NPI</th>
                                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Name</th>
@@ -1360,12 +1651,7 @@ export default function ProvidersEmdrScopedPage() {
                                 ) : (
                                     electronicOnlyRows.map(r => {
                                         const reg = r.provider_id ? regById[r.provider_id] : undefined
-                                        const anyError =
-                                            reg?.call_error_code ||
-                                            reg?.call_error_description ||
-                                            (reg?.errorList?.length ? reg.errorList.join('; ') : '') ||
-                                            (reg?.errors?.length ? JSON.stringify(reg.errors) : '') ||
-                                            (r.errors?.length ? JSON.stringify(r.errors) : '')
+                                        const { has } = buildErrorPayload(r, reg)
                                         return (
                                             <tr key={`eo-${r.provider_id}-${r.providerNPI}`} className="align-top">
                                                 <td className="px-6 py-3 text-sm font-medium text-gray-900">{r.providerNPI}</td>
@@ -1374,8 +1660,26 @@ export default function ProvidersEmdrScopedPage() {
                                                     <RegStatusPill r={r} reg={reg} />
                                                 </td>
                                                 <td className="px-6 py-3 text-sm text-gray-700">{reg?.stage ?? r.stage ?? '—'}</td>
-                                                <td className="px-6 py-3 text-xs text-rose-700">
-                                                    {anyError ? <span className="inline-block max-w-xs break-words">{anyError}</span> : <span className="text-gray-400">—</span>}
+                                                <td className="px-6 py-3 text-xs">
+                                                    {has ? (
+                                                        <button
+                                                            type="button"
+                                                            onClick={(e) =>
+                                                                setErrorPopover({
+                                                                    open: true,
+                                                                    title: `Errors • NPI ${r.providerNPI}`,
+                                                                    data: reg ?? buildErrorPayload(r, reg).payload,
+                                                                    anchorEl: e.currentTarget as HTMLElement,
+                                                                })
+                                                            }
+                                                            className="inline-flex items-center gap-1 text-red-600 hover:underline font-medium"
+                                                        >
+                                                            <Icon name="question-mark-circled" className="h-3.5 w-3.5" />
+                                                            View errors
+                                                        </button>
+                                                    ) : (
+                                                        <span className="text-gray-400">—</span>
+                                                    )}
                                                 </td>
                                                 <td className="px-6 py-3 text-sm text-gray-700">{r.provider_id || '—'}</td>
                                                 <td className="px-6 py-3">
@@ -1403,6 +1707,15 @@ export default function ProvidersEmdrScopedPage() {
                     </div>
                 </div>
             </div>
+
+            {/* Sticky Error Popover (anchored to "View errors") */}
+            <StickyJsonPopover
+                open={errorPopover.open}
+                anchorEl={errorPopover.anchorEl || null}
+                title={errorPopover.title}
+                data={errorPopover.data}
+                onClose={() => setErrorPopover({ open: false })}
+            />
 
             {/* Drawer */}
             <Drawer isOpen={drawer.open} onClose={closeDrawer} title={`Update Provider • NPI ${drawer.seed?.provider_npi ?? drawer.forNpi ?? ''}`} size="md">

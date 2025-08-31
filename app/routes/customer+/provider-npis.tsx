@@ -109,12 +109,14 @@ export async function loader({ request }: LoaderFunctionArgs) {
     })
     if (!user) throw new Response('Unauthorized', { status: 401 })
 
-    requireRoles(user, [INTEREX_ROLES.CUSTOMER_ADMIN, INTEREX_ROLES.PROVIDER_GROUP_ADMIN])
+    // Allow Customer Admin, Provider Group Admin, and Basic User to access this page
+    requireRoles(user, [INTEREX_ROLES.CUSTOMER_ADMIN, INTEREX_ROLES.PROVIDER_GROUP_ADMIN, INTEREX_ROLES.BASIC_USER])
     if (!user.customerId) throw new Response('User must be associated with a customer', { status: 400 })
 
     const userRoles = user.roles.map(r => r.name)
     const isCustomerAdmin = userRoles.includes(INTEREX_ROLES.CUSTOMER_ADMIN)
     const isProviderGroupAdmin = userRoles.includes(INTEREX_ROLES.PROVIDER_GROUP_ADMIN)
+    const isBasicUser = userRoles.includes(INTEREX_ROLES.BASIC_USER)
 
     if (isProviderGroupAdmin && !isCustomerAdmin && !user.providerGroupId) {
         throw new Response('Provider group admin must be assigned to a provider group', { status: 400 })
@@ -132,6 +134,10 @@ export async function loader({ request }: LoaderFunctionArgs) {
     const whereConditions: any = { customerId: user.customerId }
     if (isProviderGroupAdmin && !isCustomerAdmin) {
         whereConditions.providerGroupId = user.providerGroupId
+    }
+    // Basic User: only providers explicitly assigned to them
+    if (isBasicUser && !isCustomerAdmin && !isProviderGroupAdmin) {
+        whereConditions.userNpis = { some: { userId } }
     }
     if (searchParams.search) {
         whereConditions.OR = [{ npi: { contains: searchParams.search } }, { name: { contains: searchParams.search } }]
@@ -168,7 +174,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
 
     const { toast, headers } = await getToast(request)
     return data(
-        { user, customer, searchParams, toast, events, isCustomerAdmin, isProviderGroupAdmin },
+        { user, customer, searchParams, toast, events, isCustomerAdmin, isProviderGroupAdmin, isBasicUser },
         { headers: headers ?? undefined },
     )
 }
@@ -200,12 +206,14 @@ export async function action({ request }: ActionFunctionArgs) {
     })
     if (!user) throw new Response('Unauthorized', { status: 401 })
 
-    requireRoles(user, [INTEREX_ROLES.CUSTOMER_ADMIN, INTEREX_ROLES.PROVIDER_GROUP_ADMIN])
+    // Allow all three roles to post; fine-grained checks happen per intent below
+    requireRoles(user, [INTEREX_ROLES.CUSTOMER_ADMIN, INTEREX_ROLES.PROVIDER_GROUP_ADMIN, INTEREX_ROLES.BASIC_USER])
     if (!user.customerId) throw new Response('User must be associated with a customer', { status: 400 })
 
     const userRoles = user.roles.map(r => r.name)
     const isCustomerAdmin = userRoles.includes(INTEREX_ROLES.CUSTOMER_ADMIN)
     const isProviderGroupAdmin = userRoles.includes(INTEREX_ROLES.PROVIDER_GROUP_ADMIN)
+    const isBasicUser = userRoles.includes(INTEREX_ROLES.BASIC_USER)
     if (isProviderGroupAdmin && !isCustomerAdmin && !user.providerGroupId) {
         throw new Response('Provider group admin must be assigned to a provider group', { status: 400 })
     }
@@ -230,6 +238,15 @@ export async function action({ request }: ActionFunctionArgs) {
     }
 
     if (intent === 'create') {
+        // Only Customer Admin and Provider Group Admin may create
+        if (!isCustomerAdmin && !isProviderGroupAdmin) {
+            return redirectWithToast('/customer/provider-npis', {
+                type: 'error',
+                title: 'Access denied',
+                description: 'You do not have permission to add provider NPIs.',
+            })
+        }
+
         const submission = parseWithZod(formData, { schema: CreateProviderSchema })
         if (submission.status !== 'success') {
             return data({ result: submission.reply() }, { status: submission.status === 'error' ? 400 : 200 })
@@ -352,6 +369,15 @@ export async function action({ request }: ActionFunctionArgs) {
     }
 
     if (intent === 'update') {
+        // Only Customer Admin and Provider Group Admin may update
+        if (!isCustomerAdmin && !isProviderGroupAdmin) {
+            return redirectWithToast('/customer/provider-npis', {
+                type: 'error',
+                title: 'Access denied',
+                description: 'You do not have permission to edit provider NPIs.',
+            })
+        }
+
         const submission = parseWithZod(formData, { schema: UpdateProviderSchema })
         if (submission.status !== 'success') {
             return data({ result: submission.reply() }, { status: submission.status === 'error' ? 400 : 200 })
@@ -508,7 +534,7 @@ export async function action({ request }: ActionFunctionArgs) {
 }
 
 export default function CustomerProviderNpiPage() {
-    const { user, customer, searchParams, toast, events, isCustomerAdmin, isProviderGroupAdmin } =
+    const { user, customer, searchParams, toast, events, isCustomerAdmin, isProviderGroupAdmin, isBasicUser } =
         useLoaderData<typeof loader>()
     const [urlSearchParams, setUrlSearchParams] = useSearchParams()
     const isPending = useIsPending()
@@ -573,6 +599,8 @@ export default function CustomerProviderNpiPage() {
         },
     })
 
+    const canCreateOrEdit = isCustomerAdmin || isProviderGroupAdmin
+
     return (
         <>
             <LoadingOverlay show={Boolean(isPending)} title="Processing…" message="Please don't refresh or close this tab." />
@@ -620,60 +648,6 @@ export default function CustomerProviderNpiPage() {
                                 </Form>
                             </div>
 
-                            {/* User NPIs (from PCG) */}
-                            <div className="bg-white shadow rounded-lg">
-                                <div className="px-6 py-4 border-b border-gray-200"></div>
-
-                                {actionData && 'pcgError' in actionData && (
-                                    <div className="px-6 py-4">
-                                        <div className="rounded-md bg-red-50 p-4">
-                                            <div className="flex">
-                                                <div className="flex-shrink-0">
-                                                    <Icon name="question-mark-circled" className="h-5 w-5 text-red-400" />
-                                                </div>
-                                                <div className="ml-3">
-                                                    <h3 className="text-sm font-medium text-red-800">Failed to fetch NPIs</h3>
-                                                    <div className="mt-2 text-sm text-red-700">{actionData.pcgError}</div>
-                                                </div>
-                                            </div>
-                                        </div>
-                                    </div>
-                                )}
-
-                                {actionData && 'pcgNpis' in actionData && (
-                                    <div className="overflow-hidden">
-                                        <table className="min-w-full divide-y divide-gray-200">
-                                            <thead className="bg-gray-50">
-                                            <tr>
-                                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                                                    #
-                                                </th>
-                                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                                                    NPI
-                                                </th>
-                                            </tr>
-                                            </thead>
-                                            <tbody className="bg-white divide-y divide-gray-200">
-                                            {actionData.pcgNpis.npis.length === 0 ? (
-                                                <tr>
-                                                    <td className="px-6 py-4 text-sm text-gray-500" colSpan={2}>
-                                                        No NPIs returned for your organization.
-                                                    </td>
-                                                </tr>
-                                            ) : (
-                                                actionData.pcgNpis.npis.map((npi: string, idx: number) => (
-                                                    <tr key={npi} className="hover:bg-gray-50">
-                                                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{idx + 1}</td>
-                                                        <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">{npi}</td>
-                                                    </tr>
-                                                ))
-                                            )}
-                                            </tbody>
-                                        </table>
-                                    </div>
-                                )}
-                            </div>
-
                             {/* Provider NPIs List */}
                             <div className="bg-white shadow rounded-lg">
                                 <div className="px-6 py-4 border-b border-gray-200">
@@ -683,13 +657,15 @@ export default function CustomerProviderNpiPage() {
                                             <p className="text-sm text-gray-500">{customer.providers.length} total providers</p>
                                         </div>
                                         <div className="flex space-x-3">
-                                            <button
-                                                onClick={() => openDrawer('create')}
-                                                className="inline-flex items-center px-4 py-2 border border-transparent shadow-sm text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
-                                            >
-                                                <Icon name="plus" className="h-4 w-4 mr-2" />
-                                                Add Provider NPI
-                                            </button>
+                                            {canCreateOrEdit ? (
+                                                <button
+                                                    onClick={() => openDrawer('create')}
+                                                    className="inline-flex items-center px-4 py-2 border border-transparent shadow-sm text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
+                                                >
+                                                    <Icon name="plus" className="h-4 w-4 mr-2" />
+                                                    Add Provider NPI
+                                                </button>
+                                            ) : null}
                                         </div>
                                     </div>
                                 </div>
@@ -703,13 +679,15 @@ export default function CustomerProviderNpiPage() {
                                                 ? `No providers match your search criteria "${searchParams.search}".`
                                                 : 'Get started by adding your first provider NPI.'}
                                         </p>
-                                        <button
-                                            onClick={() => openDrawer('create')}
-                                            className="inline-flex items-center px-4 py-2 border border-transparent shadow-sm text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700"
-                                        >
-                                            <Icon name="plus" className="h-4 w-4 mr-2" />
-                                            Add Provider NPI
-                                        </button>
+                                        {canCreateOrEdit ? (
+                                            <button
+                                                onClick={() => openDrawer('create')}
+                                                className="inline-flex items-center px-4 py-2 border border-transparent shadow-sm text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700"
+                                            >
+                                                <Icon name="plus" className="h-4 w-4 mr-2" />
+                                                Add Provider NPI
+                                            </button>
+                                        ) : null}
                                     </div>
                                 ) : (
                                     <div className="overflow-hidden">
@@ -741,6 +719,11 @@ export default function CustomerProviderNpiPage() {
                                                     (isProviderGroupAdmin &&
                                                         (provider.providerGroupId === null || provider.providerGroupId === user.providerGroupId))
 
+                                                const canEditRow =
+                                                    isCustomerAdmin ||
+                                                    (isProviderGroupAdmin &&
+                                                        (provider.providerGroupId === null || provider.providerGroupId === user.providerGroupId))
+
                                                 return (
                                                     <tr key={provider.id} className="hover:bg-gray-50">
                                                         <td className="px-6 py-4 whitespace-nowrap">
@@ -766,13 +749,15 @@ export default function CustomerProviderNpiPage() {
                                                         </td>
                                                         <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
                                                             <div className="flex items-center space-x-2">
-                                                                <button
-                                                                    onClick={() => openDrawer('edit', provider.id)}
-                                                                    className="text-blue-600 hover:text-blue-800 p-1"
-                                                                    title="Edit provider"
-                                                                >
-                                                                    <Icon name="pencil-1" className="h-4 w-4" />
-                                                                </button>
+                                                                {canCreateOrEdit && canEditRow ? (
+                                                                    <button
+                                                                        onClick={() => openDrawer('edit', provider.id)}
+                                                                        className="text-blue-600 hover:text-blue-800 p-1"
+                                                                        title="Edit provider"
+                                                                    >
+                                                                        <Icon name="pencil-1" className="h-4 w-4" />
+                                                                    </button>
+                                                                ) : null}
 
                                                                 {/* Activate / Inactivate */}
                                                                 <Form method="post" className="inline">

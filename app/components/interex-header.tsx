@@ -154,15 +154,9 @@ export function InterexHeader({
             },
             {
                 name: 'My NPIs',
-                href: '/customer/npis',
+                href: '/my-npis',
                 icon: 'passkey',
                 description: 'View assigned NPIs',
-            },
-            {
-                name: 'Provider NPIs',
-                href: '/customer/provider-npis',
-                icon: 'id-card',
-                description: 'Manage provider NPIs',
             },
             {
                 name: 'Provider & eMDR Management',

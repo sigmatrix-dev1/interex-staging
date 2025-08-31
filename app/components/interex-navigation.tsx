@@ -126,7 +126,7 @@ export function InterexNavigation({ user, currentPath }: InterexNavigationProps)
             },
             {
                 name: 'My NPIs',
-                href: '/submissions/npis',
+                href: '/my-npis',
                 icon: 'passkey',
                 description: 'View assigned NPIs',
             },
