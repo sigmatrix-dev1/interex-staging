@@ -1,5 +1,4 @@
 // app/routes/providers-emdr.tsx
-
 import * as React from 'react'
 import { createPortal } from 'react-dom'
 import {
@@ -580,7 +579,7 @@ export async function action({ request }: ActionFunctionArgs) {
             message: pcgError ?? `Updated provider ${payload.provider_npi}`,
             payload: { updateResponse },
             meta: payload,
-    })
+        })
 
         const { rows, storedUpdates } = await composeRows(where)
         return data({
@@ -1130,9 +1129,9 @@ function StickyJsonPopover({
                 {/* Raw JSON right away */}
                 <div className="p-3">
                     <div className="rounded-md border border-gray-200 bg-gray-50">
-                        <pre className="m-0 p-3 text-xs leading-5 text-gray-900 whitespace-pre overflow-auto max-h-[60vh]">
+						<pre className="m-0 p-3 text-xs leading-5 text-gray-900 whitespace-pre overflow-auto max-h-[60vh]">
 {jsonText}
-                        </pre>
+						</pre>
                     </div>
                 </div>
             </div>
@@ -1429,187 +1428,285 @@ export default function ProvidersEmdrScopedPage() {
                         </Form>
                     </div>
                     {regFetchedAt ? (
-                    <div className="px-6 pt-3 text-xs text-gray-500">
-                    Last fetched registration details at <span className="font-medium">{new Date(regFetchedAt).toLocaleString()}</span>
-                </div>
-                ) : null}
+                        <div className="px-6 pt-3 text-xs text-gray-500">
+                            Last fetched registration details at <span className="font-medium">{new Date(regFetchedAt).toLocaleString()}</span>
+                        </div>
+                    ) : null}
 
-                {/* --- Table 1: Not registered for eMDR --- */}
-                <div className="px-6 py-5 space-y-3">
-                    <h3 className="text-sm font-semibold text-gray-800 mb-3">Not registered for eMDR</h3>
-                    <div className="overflow-x-auto rounded-md border border-gray-200 p-4 bg-gray-50">
-                        <table className="w-full table-fixed divide-y divide-gray-200">
-                            <thead className="bg-gray-50">
-                            <tr>
-                                <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">NPI</th>
-                                <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Name</th>
-                                <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Reg Status</th>
-                                <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Stage</th>
-                                <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Errors</th>
-                                <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Provider ID</th>
-                                <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Actions</th>
-                                <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Action Response</th>
-                            </tr>
-                            </thead>
-                            <tbody className="bg-white divide-y divide-gray-200">
-                            {notRegisteredRows.length === 0 ? (
+                    {/* --- Table 1: Not registered for eMDR --- */}
+                    <div className="px-6 py-5 space-y-3">
+                        <h3 className="text-sm font-semibold text-gray-800 mb-3">Not registered for eMDR</h3>
+                        <div className="overflow-x-auto rounded-md border border-gray-200 p-4 bg-gray-50">
+                            <table className="w-full table-fixed divide-y divide-gray-200">
+                                <thead className="bg-gray-50">
                                 <tr>
-                                    <td colSpan={8} className="px-6 py-6 text-sm text-gray-500 text-center">
-                                        None
-                                    </td>
+                                    <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">NPI</th>
+                                    <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Name</th>
+                                    <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Reg Status</th>
+                                    <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Stage</th>
+                                    <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Errors</th>
+                                    <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Provider ID</th>
+                                    <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Actions</th>
+                                    <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Action Response</th>
                                 </tr>
-                            ) : (
-                                notRegisteredRows.map(r => {
-                                    const reg = r.provider_id ? regById[r.provider_id] : undefined
-                                    const { has } = buildErrorPayload(r, reg)
-                                    return (
-                                        <tr key={`unreg-${r.provider_id}-${r.providerNPI}`} className="align-top">
-                                            <td className="px-6 py-3 text-sm font-medium text-gray-900">{r.providerNPI}</td>
-                                            <td className="px-6 py-3 text-sm text-gray-700">{r.provider_name ?? '—'}</td>
-                                            <td className="px-6 py-3">
-                                                <RegStatusPill r={r} reg={reg} />
-                                            </td>
-                                            <td className="px-6 py-3 text-sm text-gray-700">{reg?.stage ?? r.stage ?? '—'}</td>
-                                            <td className="px-6 py-3 text-xs">
-                                                {has ? (
-                                                    <button
-                                                        type="button"
-                                                        onClick={(e) =>
-                                                            setErrorPopover({
-                                                                open: true,
-                                                                title: `Errors • NPI ${r.providerNPI}`,
-                                                                data: reg ?? buildErrorPayload(r, reg).payload,
-                                                                anchorEl: e.currentTarget as HTMLElement,
-                                                            })
-                                                        }
-                                                        className="inline-flex items-center gap-1 text-red-600 hover:underline font-medium"
-                                                    >
-                                                        <Icon name="question-mark-circled" className="h-3.5 w-3.5" />
-                                                        View errors
-                                                    </button>
-                                                ) : (
-                                                    <span className="text-gray-400">—</span>
-                                                )}
-                                            </td>
-                                            <td className="px-6 py-3 text-sm text-gray-700">{r.provider_id || <span className="text-gray-400">—</span>}</td>
-                                            <td className="px-6 py-3">
-                                                <ConfirmActionButton
-                                                    intent="emdr-register"
-                                                    providerId={r.provider_id}
-                                                    providerNpi={r.providerNPI}
-                                                    label="Register"
-                                                    color="green"
-                                                    disabled={isPending || !r.provider_id}
-                                                    warning="Are you sure you want to register this NPI for eMDR? Electronic delivery will be enabled."
-                                                    resetOn={lastAction && lastAction.ok && lastAction.npi === r.providerNPI ? lastAction.at : undefined}
-                                                />
-                                                {!r.provider_id ? <p className="mt-2 text-xs text-amber-600">Provider ID missing — update provider details first.</p> : null}
-                                            </td>
-                                            <td className="px-6 py-3 text-sm text-gray-700 align-top w-[36rem]">
-                                                <ActionResponseCell r={r} />
-                                            </td>
-                                        </tr>
-                                    )
-                                })
-                            )}
-                            </tbody>
-                        </table>
+                                </thead>
+                                <tbody className="bg-white divide-y divide-gray-200">
+                                {notRegisteredRows.length === 0 ? (
+                                    <tr>
+                                        <td colSpan={8} className="px-6 py-6 text-sm text-gray-500 text-center">
+                                            None
+                                        </td>
+                                    </tr>
+                                ) : (
+                                    notRegisteredRows.map(r => {
+                                        const reg = r.provider_id ? regById[r.provider_id] : undefined
+                                        const { has } = buildErrorPayload(r, reg)
+                                        return (
+                                            <tr key={`unreg-${r.provider_id}-${r.providerNPI}`} className="align-top">
+                                                <td className="px-6 py-3 text-sm font-medium text-gray-900">{r.providerNPI}</td>
+                                                <td className="px-6 py-3 text-sm text-gray-700">{r.provider_name ?? '—'}</td>
+                                                <td className="px-6 py-3">
+                                                    <RegStatusPill r={r} reg={reg} />
+                                                </td>
+                                                <td className="px-6 py-3 text-sm text-gray-700">{reg?.stage ?? r.stage ?? '—'}</td>
+                                                <td className="px-6 py-3 text-xs">
+                                                    {has ? (
+                                                        <button
+                                                            type="button"
+                                                            onClick={(e) =>
+                                                                setErrorPopover({
+                                                                    open: true,
+                                                                    title: `Errors • NPI ${r.providerNPI}`,
+                                                                    data: reg ?? buildErrorPayload(r, reg).payload,
+                                                                    anchorEl: e.currentTarget as HTMLElement,
+                                                                })
+                                                            }
+                                                            className="inline-flex items-center gap-1 text-red-600 hover:underline font-medium"
+                                                        >
+                                                            <Icon name="question-mark-circled" className="h-3.5 w-3.5" />
+                                                            View errors
+                                                        </button>
+                                                    ) : (
+                                                        <span className="text-gray-400">—</span>
+                                                    )}
+                                                </td>
+                                                <td className="px-6 py-3 text-sm text-gray-700">{r.provider_id || <span className="text-gray-400">—</span>}</td>
+                                                <td className="px-6 py-3">
+                                                    <ConfirmActionButton
+                                                        intent="emdr-register"
+                                                        providerId={r.provider_id}
+                                                        providerNpi={r.providerNPI}
+                                                        label="Register"
+                                                        color="green"
+                                                        disabled={isPending || !r.provider_id}
+                                                        warning="Are you sure you want to register this NPI for eMDR? Electronic delivery will be enabled."
+                                                        resetOn={lastAction && lastAction.ok && lastAction.npi === r.providerNPI ? lastAction.at : undefined}
+                                                    />
+                                                    {!r.provider_id ? <p className="mt-2 text-xs text-amber-600">Provider ID missing — update provider details first.</p> : null}
+                                                </td>
+                                                <td className="px-6 py-3 text-sm text-gray-700 align-top w-[36rem]">
+                                                    <ActionResponseCell r={r} />
+                                                </td>
+                                            </tr>
+                                        )
+                                    })
+                                )}
+                                </tbody>
+                            </table>
+                        </div>
                     </div>
-                </div>
 
-                <hr className="border-gray-200" />
+                    <hr className="border-gray-200" />
 
-                {/* --- Table 2: Registered for eMDR --- */}
-                <div className="px-6 py-5 space-y-3">
-                    <h3 className="text-sm font-semibold text-gray-800">Registered for eMDR</h3>
-                    <div className="overflow-x-auto rounded-md border border-gray-200 p-4 bg-gray-50">
-                        <table className="w-full table-fixed divide-y divide-gray-200">
-                            <thead className="bg-gray-50">
-                            <tr>
-                                <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">NPI</th>
-                                <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Name</th>
-                                <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Electronic Only?</th>
-                                <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Reg Status</th>
-                                <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Stage</th>
-                                <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Last Change</th>
-                                <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">TXN IDs</th>
-                                <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Errors</th>
-                                <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Provider ID</th>
-                                <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Actions</th>
-                                <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Action Response</th>
-                            </tr>
-                            </thead>
-                            <tbody className="bg-white divide-y divide-gray-200">
-                            {registeredRows.length === 0 ? (
+                    {/* --- Table 2: Registered for eMDR --- */}
+                    <div className="px-6 py-5 space-y-3">
+                        <h3 className="text-sm font-semibold text-gray-800">Registered for eMDR</h3>
+                        <div className="overflow-x-auto rounded-md border border-gray-200 p-4 bg-gray-50">
+                            <table className="w-full table-fixed divide-y divide-gray-200">
+                                <thead className="bg-gray-50">
                                 <tr>
-                                    <td colSpan={11} className="px-6 py-6 text-sm text-gray-500 text-center">
-                                        None
-                                    </td>
+                                    <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">NPI</th>
+                                    <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Name</th>
+                                    <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Electronic Only?</th>
+                                    <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Reg Status</th>
+                                    <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Stage</th>
+                                    <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Last Change</th>
+                                    <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">TXN IDs</th>
+                                    <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Errors</th>
+                                    <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Provider ID</th>
+                                    <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Actions</th>
+                                    <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Action Response</th>
                                 </tr>
-                            ) : (
-                                registeredRows.map(r => {
-                                    const reg = r.provider_id ? regById[r.provider_id] : undefined
-                                    const statusChanges = (reg?.status_changes ?? r.status_changes) as StatusChange[]
-                                    const lastChange: StatusChange | undefined =
-                                        Array.isArray(statusChanges) && statusChanges.length ? statusChanges[statusChanges.length - 1] : undefined
-                                    const txnDisplay =
-                                        typeof reg?.transaction_id_list === 'string'
-                                            ? reg.transaction_id_list.replace(/,+$/, '')
-                                            : lastChange?.esmd_transaction_id ?? toCsv(r.transaction_id_list) ?? ''
-                                    const { has } = buildErrorPayload(r, reg)
-                                    return (
-                                        <tr key={`reg-${r.provider_id}-${r.providerNPI}`} className="align-top">
-                                            <td className="px-6 py-3 text-sm font-medium text-gray-900">{r.providerNPI}</td>
-                                            <td className="px-6 py-3 text-sm text-gray-700">{r.provider_name ?? '—'}</td>
-                                            <td className="px-6 py-3">
-                                                <Badge yes={Boolean(r.registered_for_emdr_electronic_only)} />
-                                            </td>
-                                            <td className="px-6 py-3">
-                                                <RegStatusPill r={r} reg={reg} />
-                                            </td>
-                                            <td className="px-6 py-3 text-sm text-gray-700">{reg?.stage ?? r.stage ?? '—'}</td>
-                                            <td className="px-6 py-3 text-xs text-gray-700">
-                                                {lastChange ? (
-                                                    <div className="space-y-0.5">
-                                                        <div>
-                                                            <span className="font-medium">Time:</span> {lastChange.time}
+                                </thead>
+                                <tbody className="bg-white divide-y divide-gray-200">
+                                {registeredRows.length === 0 ? (
+                                    <tr>
+                                        <td colSpan={11} className="px-6 py-6 text-sm text-gray-500 text-center">
+                                            None
+                                        </td>
+                                    </tr>
+                                ) : (
+                                    registeredRows.map(r => {
+                                        const reg = r.provider_id ? regById[r.provider_id] : undefined
+                                        const statusChanges = (reg?.status_changes ?? r.status_changes) as StatusChange[]
+                                        const lastChange: StatusChange | undefined =
+                                            Array.isArray(statusChanges) && statusChanges.length ? statusChanges[statusChanges.length - 1] : undefined
+                                        const txnDisplay =
+                                            typeof reg?.transaction_id_list === 'string'
+                                                ? reg.transaction_id_list.replace(/,+$/, '')
+                                                : lastChange?.esmd_transaction_id ?? toCsv(r.transaction_id_list) ?? ''
+                                        const { has } = buildErrorPayload(r, reg)
+                                        return (
+                                            <tr key={`reg-${r.provider_id}-${r.providerNPI}`} className="align-top">
+                                                <td className="px-6 py-3 text-sm font-medium text-gray-900">{r.providerNPI}</td>
+                                                <td className="px-6 py-3 text-sm text-gray-700">{r.provider_name ?? '—'}</td>
+                                                <td className="px-6 py-3">
+                                                    <Badge yes={Boolean(r.registered_for_emdr_electronic_only)} />
+                                                </td>
+                                                <td className="px-6 py-3">
+                                                    <RegStatusPill r={r} reg={reg} />
+                                                </td>
+                                                <td className="px-6 py-3 text-sm text-gray-700">{reg?.stage ?? r.stage ?? '—'}</td>
+                                                <td className="px-6 py-3 text-xs text-gray-700">
+                                                    {lastChange ? (
+                                                        <div className="space-y-0.5">
+                                                            <div>
+                                                                <span className="font-medium">Time:</span> {lastChange.time}
+                                                            </div>
+                                                            <div>
+                                                                <span className="font-medium">Title:</span> {lastChange.title}
+                                                            </div>
+                                                            <div>
+                                                                <span className="font-medium">Status:</span> {lastChange.status}
+                                                            </div>
                                                         </div>
-                                                        <div>
-                                                            <span className="font-medium">Title:</span> {lastChange.title}
-                                                        </div>
-                                                        <div>
-                                                            <span className="font-medium">Status:</span> {lastChange.status}
-                                                        </div>
+                                                    ) : (
+                                                        <span className="text-gray-400">—</span>
+                                                    )}
+                                                </td>
+                                                <td className="px-6 py-3 text-sm text-gray-700">{txnDisplay ? <Pill text={txnDisplay} /> : <span className="text-gray-400">—</span>}</td>
+                                                <td className="px-6 py-3 text-xs">
+                                                    {has ? (
+                                                        <button
+                                                            type="button"
+                                                            onClick={(e) =>
+                                                                setErrorPopover({
+                                                                    open: true,
+                                                                    title: `Errors • NPI ${r.providerNPI}`,
+                                                                    data: reg ?? buildErrorPayload(r, reg).payload,
+                                                                    anchorEl: e.currentTarget as HTMLElement,
+                                                                })
+                                                            }
+                                                            className="inline-flex items-center gap-1 text-red-600 hover:underline font-medium"
+                                                        >
+                                                            <Icon name="question-mark-circled" className="h-3.5 w-3.5" />
+                                                            View errors
+                                                        </button>
+                                                    ) : (
+                                                        <span className="text-gray-400">—</span>
+                                                    )}
+                                                </td>
+                                                <td className="px-6 py-3 text-sm text-gray-700">{r.provider_id || '—'}</td>
+                                                <td className="px-6 py-3">
+                                                    <div className="flex gap-2 flex-col">
+                                                        <ConfirmActionButton
+                                                            intent="emdr-deregister"
+                                                            providerId={r.provider_id}
+                                                            providerNpi={r.providerNPI}
+                                                            label="Deregister"
+                                                            color="rose"
+                                                            disabled={isPending || !r.provider_id}
+                                                            warning="Are you sure you want to deregister this NPI from eMDR? Electronic delivery will stop."
+                                                            resetOn={lastAction && lastAction.ok && lastAction.npi === r.providerNPI ? lastAction.at : undefined}
+                                                        />
+                                                        {!r.registered_for_emdr_electronic_only ? (
+                                                            <ConfirmActionButton
+                                                                intent="emdr-electronic-only"
+                                                                providerId={r.provider_id}
+                                                                providerNpi={r.providerNPI}
+                                                                label="Set Electronic Only"
+                                                                color="purple"
+                                                                disabled={isPending || !r.provider_id}
+                                                                warning="Are you sure you want to set Electronic-Only ADR for this NPI? Paper mail will stop."
+                                                                resetOn={lastAction && lastAction.ok && lastAction.npi === r.providerNPI ? lastAction.at : undefined}
+                                                            />
+                                                        ) : null}
                                                     </div>
-                                                ) : (
-                                                    <span className="text-gray-400">—</span>
-                                                )}
-                                            </td>
-                                            <td className="px-6 py-3 text-sm text-gray-700">{txnDisplay ? <Pill text={txnDisplay} /> : <span className="text-gray-400">—</span>}</td>
-                                            <td className="px-6 py-3 text-xs">
-                                                {has ? (
-                                                    <button
-                                                        type="button"
-                                                        onClick={(e) =>
-                                                            setErrorPopover({
-                                                                open: true,
-                                                                title: `Errors • NPI ${r.providerNPI}`,
-                                                                data: reg ?? buildErrorPayload(r, reg).payload,
-                                                                anchorEl: e.currentTarget as HTMLElement,
-                                                            })
-                                                        }
-                                                        className="inline-flex items-center gap-1 text-red-600 hover:underline font-medium"
-                                                    >
-                                                        <Icon name="question-mark-circled" className="h-3.5 w-3.5" />
-                                                        View errors
-                                                    </button>
-                                                ) : (
-                                                    <span className="text-gray-400">—</span>
-                                                )}
-                                            </td>
-                                            <td className="px-6 py-3 text-sm text-gray-700">{r.provider_id || '—'}</td>
-                                            <td className="px-6 py-3">
-                                                <div className="flex gap-2 flex-col">
+                                                </td>
+                                                <td className="px-6 py-3 text-sm text-gray-700 align-top w-[36rem]">
+                                                    <ActionResponseCell r={r} />
+                                                </td>
+                                            </tr>
+                                        )
+                                    })
+                                )}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    <hr className="border-gray-200" />
+
+                    {/* --- Table 3: Registered for Electronic-Only ADR --- */}
+                    <div className="px-6 py-5 space-y-3">
+                        <h3 className="text-sm font-semibold text-gray-800">Registered for Electronic-Only ADR</h3>
+                        <p className="text-xs text-gray-500">To revert to standard delivery (mail + electronic), deregister and then register again.</p>
+                        <div className="overflow-x-auto rounded-md border border-gray-200 p-4 bg-gray-50">
+                            <table className="w-full table-fixed divide-y divide-gray-200">
+                                <thead className="bg-gray-50">
+                                <tr>
+                                    <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">NPI</th>
+                                    <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Name</th>
+                                    <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Reg Status</th>
+                                    <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Stage</th>
+                                    <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Errors</th>
+                                    <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Provider ID</th>
+                                    <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Actions</th>
+                                    <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Action Response</th>
+                                </tr>
+                                </thead>
+                                <tbody className="bg-white divide-y divide-gray-200">
+                                {electronicOnlyRows.length === 0 ? (
+                                    <tr>
+                                        <td colSpan={8} className="px-6 py-6 text-sm text-gray-500 text-center">
+                                            None
+                                        </td>
+                                    </tr>
+                                ) : (
+                                    electronicOnlyRows.map(r => {
+                                        const reg = r.provider_id ? regById[r.provider_id] : undefined
+                                        const { has } = buildErrorPayload(r, reg)
+                                        return (
+                                            <tr key={`eo-${r.provider_id}-${r.providerNPI}`} className="align-top">
+                                                <td className="px-6 py-3 text-sm font-medium text-gray-900">{r.providerNPI}</td>
+                                                <td className="px-6 py-3 text-sm text-gray-700">{r.provider_name ?? '—'}</td>
+                                                <td className="px-6 py-3">
+                                                    <RegStatusPill r={r} reg={reg} />
+                                                </td>
+                                                <td className="px-6 py-3 text-sm text-gray-700">{reg?.stage ?? r.stage ?? '—'}</td>
+                                                <td className="px-6 py-3 text-xs">
+                                                    {has ? (
+                                                        <button
+                                                            type="button"
+                                                            onClick={(e) =>
+                                                                setErrorPopover({
+                                                                    open: true,
+                                                                    title: `Errors • NPI ${r.providerNPI}`,
+                                                                    data: reg ?? buildErrorPayload(r, reg).payload,
+                                                                    anchorEl: e.currentTarget as HTMLElement,
+                                                                })
+                                                            }
+                                                            className="inline-flex items-center gap-1 text-red-600 hover:underline font-medium"
+                                                        >
+                                                            <Icon name="question-mark-circled" className="h-3.5 w-3.5" />
+                                                            View errors
+                                                        </button>
+                                                    ) : (
+                                                        <span className="text-gray-400">—</span>
+                                                    )}
+                                                </td>
+                                                <td className="px-6 py-3 text-sm text-gray-700">{r.provider_id || '—'}</td>
+                                                <td className="px-6 py-3">
                                                     <ConfirmActionButton
                                                         intent="emdr-deregister"
                                                         providerId={r.provider_id}
@@ -1617,206 +1714,108 @@ export default function ProvidersEmdrScopedPage() {
                                                         label="Deregister"
                                                         color="rose"
                                                         disabled={isPending || !r.provider_id}
-                                                        warning="Are you sure you want to deregister this NPI from eMDR? Electronic delivery will stop."
+                                                        warning="Are you sure you want to deregister this NPI from eMDR? This will also remove Electronic-Only ADR."
                                                         resetOn={lastAction && lastAction.ok && lastAction.npi === r.providerNPI ? lastAction.at : undefined}
                                                     />
-                                                    {!r.registered_for_emdr_electronic_only ? (
-                                                        <ConfirmActionButton
-                                                            intent="emdr-electronic-only"
-                                                            providerId={r.provider_id}
-                                                            providerNpi={r.providerNPI}
-                                                            label="Set Electronic Only"
-                                                            color="purple"
-                                                            disabled={isPending || !r.provider_id}
-                                                            warning="Are you sure you want to set Electronic-Only ADR for this NPI? Paper mail will stop."
-                                                            resetOn={lastAction && lastAction.ok && lastAction.npi === r.providerNPI ? lastAction.at : undefined}
-                                                        />
-                                                    ) : null}
-                                                </div>
-                                            </td>
-                                            <td className="px-6 py-3 text-sm text-gray-700 align-top w-[36rem]">
-                                                <ActionResponseCell r={r} />
-                                            </td>
-                                        </tr>
-                                    )
-                                })
-                            )}
-                            </tbody>
-                        </table>
-                    </div>
-                </div>
-
-                <hr className="border-gray-200" />
-
-                {/* --- Table 3: Registered for Electronic-Only ADR --- */}
-                <div className="px-6 py-5 space-y-3">
-                    <h3 className="text-sm font-semibold text-gray-800">Registered for Electronic-Only ADR</h3>
-                    <p className="text-xs text-gray-500">To revert to standard delivery (mail + electronic), deregister and then register again.</p>
-                    <div className="overflow-x-auto rounded-md border border-gray-200 p-4 bg-gray-50">
-                        <table className="w-full table-fixed divide-y divide-gray-200">
-                            <thead className="bg-gray-50">
-                            <tr>
-                                <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">NPI</th>
-                                <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Name</th>
-                                <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Reg Status</th>
-                                <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Stage</th>
-                                <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Errors</th>
-                                <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Provider ID</th>
-                                <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Actions</th>
-                                <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Action Response</th>
-                            </tr>
-                            </thead>
-                            <tbody className="bg-white divide-y divide-gray-200">
-                            {electronicOnlyRows.length === 0 ? (
-                                <tr>
-                                    <td colSpan={8} className="px-6 py-6 text-sm text-gray-500 text-center">
-                                        None
-                                    </td>
-                                </tr>
-                            ) : (
-                                electronicOnlyRows.map(r => {
-                                    const reg = r.provider_id ? regById[r.provider_id] : undefined
-                                    const { has } = buildErrorPayload(r, reg)
-                                    return (
-                                        <tr key={`eo-${r.provider_id}-${r.providerNPI}`} className="align-top">
-                                            <td className="px-6 py-3 text-sm font-medium text-gray-900">{r.providerNPI}</td>
-                                            <td className="px-6 py-3 text-sm text-gray-700">{r.provider_name ?? '—'}</td>
-                                            <td className="px-6 py-3">
-                                                <RegStatusPill r={r} reg={reg} />
-                                            </td>
-                                            <td className="px-6 py-3 text-sm text-gray-700">{reg?.stage ?? r.stage ?? '—'}</td>
-                                            <td className="px-6 py-3 text-xs">
-                                                {has ? (
-                                                    <button
-                                                        type="button"
-                                                        onClick={(e) =>
-                                                            setErrorPopover({
-                                                                open: true,
-                                                                title: `Errors • NPI ${r.providerNPI}`,
-                                                                data: reg ?? buildErrorPayload(r, reg).payload,
-                                                                anchorEl: e.currentTarget as HTMLElement,
-                                                            })
-                                                        }
-                                                        className="inline-flex items-center gap-1 text-red-600 hover:underline font-medium"
-                                                    >
-                                                        <Icon name="question-mark-circled" className="h-3.5 w-3.5" />
-                                                        View errors
-                                                    </button>
-                                                ) : (
-                                                    <span className="text-gray-400">—</span>
-                                                )}
-                                            </td>
-                                            <td className="px-6 py-3 text-sm text-gray-700">{r.provider_id || '—'}</td>
-                                            <td className="px-6 py-3">
-                                                <ConfirmActionButton
-                                                    intent="emdr-deregister"
-                                                    providerId={r.provider_id}
-                                                    providerNpi={r.providerNPI}
-                                                    label="Deregister"
-                                                    color="rose"
-                                                    disabled={isPending || !r.provider_id}
-                                                    warning="Are you sure you want to deregister this NPI from eMDR? This will also remove Electronic-Only ADR."
-                                                    resetOn={lastAction && lastAction.ok && lastAction.npi === r.providerNPI ? lastAction.at : undefined}
-                                                />
-                                            </td>
-                                            <td className="px-6 py-3 text-sm text-gray-700 align-top w-[36rem]">
-                                                <ActionResponseCell r={r} />
-                                            </td>
-                                        </tr>
-                                    )
-                                })
-                            )}
-                            </tbody>
-                        </table>
+                                                </td>
+                                                <td className="px-6 py-3 text-sm text-gray-700 align-top w-[36rem]">
+                                                    <ActionResponseCell r={r} />
+                                                </td>
+                                            </tr>
+                                        )
+                                    })
+                                )}
+                                </tbody>
+                            </table>
+                        </div>
                     </div>
                 </div>
             </div>
-        </div>
 
-    {/* Sticky Error Popover (anchored to "View errors") */}
-    <StickyJsonPopover
-        open={errorPopover.open}
-        anchorEl={errorPopover.anchorEl || null}
-        title={errorPopover.title}
-        data={errorPopover.data}
-        onClose={() => setErrorPopover({ open: false })}
-    />
+            {/* Sticky Error Popover (anchored to "View errors") */}
+            <StickyJsonPopover
+                open={errorPopover.open}
+                anchorEl={errorPopover.anchorEl || null}
+                title={errorPopover.title}
+                data={errorPopover.data}
+                onClose={() => setErrorPopover({ open: false })}
+            />
 
-    {/* Drawer */}
-    <Drawer isOpen={drawer.open} onClose={closeDrawer} title={`Update Provider • NPI ${drawer.seed?.provider_npi ?? drawer.forNpi ?? ''}`} size="md">
-        {drawer.open ? (
-            <Form method="post" className="space-y-5">
-                <input type="hidden" name="intent" value="update-provider" />
+            {/* Drawer */}
+            <Drawer isOpen={drawer.open} onClose={closeDrawer} title={`Update Provider • NPI ${drawer.seed?.provider_npi ?? drawer.forNpi ?? ''}`} size="md">
+                {drawer.open ? (
+                    <Form method="post" className="space-y-5">
+                        <input type="hidden" name="intent" value="update-provider" />
 
-                <div>
-                    <label className="block text-sm font-medium text-gray-700">Provider NPI</label>
-                    <input
-                        name="provider_npi"
-                        value={drawer.seed?.provider_npi ?? ''}
-                        readOnly
-                        className="mt-1 block w-full rounded-md border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-600"
-                    />
-                    <p className="mt-1 text-xs text-gray-500">Auto-derived from the row.</p>
-                </div>
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700">Provider NPI</label>
+                            <input
+                                name="provider_npi"
+                                value={drawer.seed?.provider_npi ?? ''}
+                                readOnly
+                                className="mt-1 block w-full rounded-md border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-600"
+                            />
+                            <p className="mt-1 text-xs text-gray-500">Auto-derived from the row.</p>
+                        </div>
 
-                <div>
-                    <label className="block text-sm font-medium text-gray-700">Provider Name</label>
-                    <input
-                        name="provider_name"
-                        defaultValue={drawer.seed?.provider_name ?? ''}
-                        required
-                        className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
-                        placeholder="e.g., Smith Clinic"
-                    />
-                </div>
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700">Provider Name</label>
+                            <input
+                                name="provider_name"
+                                defaultValue={drawer.seed?.provider_name ?? ''}
+                                required
+                                className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+                                placeholder="e.g., Smith Clinic"
+                            />
+                        </div>
 
-                <div>
-                    <label className="block text-sm font-medium text-gray-700">Street</label>
-                    <input
-                        name="provider_street"
-                        defaultValue={drawer.seed?.provider_street ?? ''}
-                        required
-                        className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
-                        placeholder="123 Main St"
-                    />
-                </div>
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700">Street</label>
+                            <input
+                                name="provider_street"
+                                defaultValue={drawer.seed?.provider_street ?? ''}
+                                required
+                                className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+                                placeholder="123 Main St"
+                            />
+                        </div>
 
-                <div>
-                    <label className="block text-sm font-medium text-gray-700">Street 2 (optional)</label>
-                    <input
-                        name="provider_street2"
-                        defaultValue={drawer.seed?.provider_street2 ?? ''}
-                        className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
-                        placeholder="Suite / Apt"
-                    />
-                </div>
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700">Street 2 (optional)</label>
+                            <input
+                                name="provider_street2"
+                                defaultValue={drawer.seed?.provider_street2 ?? ''}
+                                className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+                                placeholder="Suite / Apt"
+                            />
+                        </div>
 
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                    <div>
-                        <label className="block text-sm font-medium text-gray-700">City</label>
-                        <input name="provider_city" defaultValue={drawer.seed?.provider_city ?? ''} required className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 text-sm" />
-                    </div>
-                    <div>
-                        <label className="block text-sm font-medium text-gray-700">State</label>
-                        <input name="provider_state" defaultValue={drawer.seed?.provider_state ?? ''} required maxLength={2} className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 text-sm uppercase" placeholder="MD" />
-                    </div>
-                    <div>
-                        <label className="block text-sm font-medium text-gray-700">ZIP</label>
-                        <input name="provider_zip" defaultValue={drawer.seed?.provider_zip ?? ''} required className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 text-sm" placeholder="12345" />
-                    </div>
-                </div>
+                        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700">City</label>
+                                <input name="provider_city" defaultValue={drawer.seed?.provider_city ?? ''} required className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 text-sm" />
+                            </div>
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700">State</label>
+                                <input name="provider_state" defaultValue={drawer.seed?.provider_state ?? ''} required maxLength={2} className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 text-sm uppercase" placeholder="MD" />
+                            </div>
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700">ZIP</label>
+                                <input name="provider_zip" defaultValue={drawer.seed?.provider_zip ?? ''} required className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 text-sm" placeholder="12345" />
+                            </div>
+                        </div>
 
-                <div className="flex justify-end gap-3 pt-4 border-t border-gray-200">
-                    <button type="button" onClick={closeDrawer} className="inline-flex items-center rounded-md border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50">
-                        Cancel
-                    </button>
-                    <button type="submit" disabled={isPending} className="inline-flex items-center rounded-md bg-blue-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-blue-700 disabled:opacity-50">
-                        Submit
-                    </button>
-                </div>
-            </Form>
-        ) : null}
-    </Drawer>
-</InterexLayout>
-)
+                        <div className="flex justify-end gap-3 pt-4 border-t border-gray-200">
+                            <button type="button" onClick={closeDrawer} className="inline-flex items-center rounded-md border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50">
+                                Cancel
+                            </button>
+                            <button type="submit" disabled={isPending} className="inline-flex items-center rounded-md bg-blue-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-blue-700 disabled:opacity-50">
+                                Submit
+                            </button>
+                        </div>
+                    </Form>
+                ) : null}
+            </Drawer>
+        </InterexLayout>
+    )
 }

@@ -19,6 +19,7 @@ import { prisma } from '#app/utils/db.server.ts'
 import { INTEREX_ROLES } from '#app/utils/interex-roles.ts'
 import { useIsPending } from '#app/utils/misc.tsx'
 import { requireRoles } from '#app/utils/role-redirect.server.ts'
+import { Prisma } from '@prisma/client'
 
 type TabType = 'PREPAY' | 'POSTPAY' | 'POSTPAY_OTHER'
 
@@ -116,7 +117,7 @@ export async function action({ request }: ActionFunctionArgs) {
     })
     if (!user) throw new Response('Unauthorized', { status: 401 })
 
-    // ✅ Fix: only System Admins can post to this route
+    // ✅ Only System Admins can post
     requireRoles(user, [INTEREX_ROLES.SYSTEM_ADMIN])
 
     const form = await request.formData()
@@ -136,7 +137,7 @@ export async function action({ request }: ActionFunctionArgs) {
                 entityType: 'LETTER',
                 success: true,
                 message: `Admin synced ${types.join(', ')} from ${startDate} to ${endDate}`,
-                meta: { types, startDate, endDate },
+                meta: { types, startDate, endDate } as Prisma.JsonValue,
             })
             return data({ ok: true })
         } catch (err: any) {
@@ -147,7 +148,7 @@ export async function action({ request }: ActionFunctionArgs) {
                 entityType: 'LETTER',
                 success: false,
                 message: err?.message || 'Sync failed',
-                meta: { types, startDate, endDate },
+                meta: { types, startDate, endDate, error: String(err?.message || err) } as Prisma.JsonValue,
             })
             throw err
         }
@@ -184,9 +185,6 @@ export default function AdminAllLettersPage() {
     const { user, type, customers, customerId, letters } = useLoaderData<typeof loader>()
     const isPending = useIsPending()
 
-    const assignedUsers = (row: any) =>
-        row?.provider?.userNpis?.map((x: any) => x.user.username).filter(Boolean).join(', ') || '—'
-
     return (
         <InterexLayout
             user={user}
@@ -203,7 +201,12 @@ export default function AdminAllLettersPage() {
                     <Form method="get" className="flex flex-wrap items-end gap-3">
                         <div className="flex flex-col">
                             <label className="text-xs text-gray-500">Type</label>
-                            <select name="type" defaultValue={type} className="border rounded px-2 py-1 text-sm" onChange={(e)=>e.currentTarget.form?.submit()}>
+                            <select
+                                name="type"
+                                defaultValue={type}
+                                className="border rounded px-2 py-1 text-sm"
+                                onChange={(e) => e.currentTarget.form?.submit()}
+                            >
                                 <option value="PREPAY">Pre-pay</option>
                                 <option value="POSTPAY">Post-pay</option>
                                 <option value="POSTPAY_OTHER">Post-pay (Other)</option>
@@ -211,9 +214,16 @@ export default function AdminAllLettersPage() {
                         </div>
                         <div className="flex flex-col">
                             <label className="text-xs text-gray-500">Customer</label>
-                            <select name="customerId" defaultValue={customerId} className="border rounded px-2 py-1 text-sm" onChange={(e)=>e.currentTarget.form?.submit()}>
+                            <select
+                                name="customerId"
+                                defaultValue={customerId}
+                                className="border rounded px-2 py-1 text-sm"
+                                onChange={(e) => e.currentTarget.form?.submit()}
+                            >
                                 <option value="">All customers</option>
-                                {customers.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                                {customers.map(c => (
+                                    <option key={c.id} value={c.id}>{c.name}</option>
+                                ))}
                             </select>
                         </div>
                         <div className="flex flex-col">

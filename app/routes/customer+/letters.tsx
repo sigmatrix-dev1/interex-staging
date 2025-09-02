@@ -18,9 +18,8 @@ import { prisma } from '#app/utils/db.server.ts'
 import { INTEREX_ROLES } from '#app/utils/interex-roles.ts'
 import { useIsPending } from '#app/utils/misc.tsx'
 import { requireRoles } from '#app/utils/role-redirect.server.ts'
-
 import { audit } from '#app/utils/audit.server.ts'
-import { type AuditAction } from '#app/domain/audit-enums.ts'
+import { Prisma } from '@prisma/client'
 
 type TabType = 'PREPAY' | 'POSTPAY' | 'POSTPAY_OTHER'
 
@@ -43,7 +42,10 @@ export async function loader({ request }: LoaderFunctionArgs) {
         INTEREX_ROLES.PROVIDER_GROUP_ADMIN,
         INTEREX_ROLES.BASIC_USER,
     ])
-    if (!user.customerId) throw new Response('User must be associated with a customer', { status: 400 })
+    if (!user.customerId)
+        throw new Response('User must be associated with a customer', {
+            status: 400,
+        })
 
     const url = new URL(request.url)
     const type = (url.searchParams.get('type') as TabType) ?? 'PREPAY'
@@ -133,7 +135,7 @@ export async function action({ request }: ActionFunctionArgs) {
                 entityType: 'LETTER',
                 success: true,
                 message: `Synced ${types.join(', ')} from ${startDate} to ${endDate}`,
-                meta: { types, startDate, endDate },
+                meta: { types, startDate, endDate } as Prisma.JsonValue,
             })
             return data({ ok: true })
         } catch (err: any) {
@@ -144,7 +146,12 @@ export async function action({ request }: ActionFunctionArgs) {
                 entityType: 'LETTER',
                 success: false,
                 message: err?.message || 'Sync failed',
-                meta: { types, startDate, endDate },
+                meta: {
+                    types,
+                    startDate,
+                    endDate,
+                    error: String(err?.message || err),
+                } as Prisma.JsonValue,
             })
             throw err
         }
@@ -159,21 +166,34 @@ export async function action({ request }: ActionFunctionArgs) {
         ])
         const type = String(form.get('type')) as TabType
         const externalLetterId = String(form.get('externalLetterId') || '')
+        if (!externalLetterId)
+            return data({ error: 'Missing externalLetterId' }, { status: 400 })
 
-        if (!externalLetterId) return data({ error: 'Missing externalLetterId' }, { status: 400 })
-                const modelByType = {
-                  PREPAY: prisma.prepayLetter,
-                  POSTPAY: prisma.postpayLetter,
-                  POSTPAY_OTHER: prisma.postpayOtherLetter,
-                }[type]
-            const letter = await modelByType.findFirst({
-                  where: { externalLetterId, customerId: user.customerId! },
-              select: { id: true },
+        // ---- FIX: branch per type so the Prisma call is type-safe
+        let letter: { id: string } | null = null
+        if (type === 'PREPAY') {
+            letter = await prisma.prepayLetter.findFirst({
+                where: { externalLetterId, customerId: user.customerId! },
+                select: { id: true },
             })
-            if (!letter) return data({ error: 'Not found or not authorized' }, { status: 404 })
+        } else if (type === 'POSTPAY') {
+            letter = await prisma.postpayLetter.findFirst({
+                where: { externalLetterId, customerId: user.customerId! },
+                select: { id: true },
+            })
+        } else {
+            letter = await prisma.postpayOtherLetter.findFirst({
+                where: { externalLetterId, customerId: user.customerId! },
+                select: { id: true },
+            })
+        }
+        // ---- end fix
+
+        if (!letter) return data({ error: 'Not found or not authorized' }, { status: 404 })
 
         const { fileBase64, filename } = await downloadLetterPdf({ type, externalLetterId })
         if (!fileBase64) return data({ error: 'No file returned' }, { status: 400 })
+
         await audit({
             request,
             user,
@@ -201,13 +221,9 @@ export default function CustomerLettersPage() {
     const { user, type, letters } = useLoaderData<typeof loader>()
     const isPending = useIsPending()
 
-    const assignedUsers = (row: any) =>
-        row?.provider?.userNpis?.map((x: any) => x.user.username).filter(Boolean).join(', ') || '—'
-
-    const canSync =
-        user.roles.some(r =>
-            [INTEREX_ROLES.CUSTOMER_ADMIN, INTEREX_ROLES.PROVIDER_GROUP_ADMIN, INTEREX_ROLES.BASIC_USER].includes(r.name),
-        )
+    const canSync = user.roles.some(r =>
+        [INTEREX_ROLES.CUSTOMER_ADMIN, INTEREX_ROLES.PROVIDER_GROUP_ADMIN, INTEREX_ROLES.BASIC_USER].includes(r.name),
+    )
 
     return (
         <InterexLayout
@@ -225,7 +241,12 @@ export default function CustomerLettersPage() {
                     <Form method="get" className="flex flex-wrap items-end gap-3">
                         <div className="flex flex-col">
                             <label className="text-xs text-gray-500">Type</label>
-                            <select name="type" defaultValue={type} className="border rounded px-2 py-1 text-sm" onChange={(e)=>e.currentTarget.form?.submit()}>
+                            <select
+                                name="type"
+                                defaultValue={type}
+                                className="border rounded px-2 py-1 text-sm"
+                                onChange={e => e.currentTarget.form?.submit()}
+                            >
                                 <option value="PREPAY">Pre-pay</option>
                                 <option value="POSTPAY">Post-pay</option>
                                 <option value="POSTPAY_OTHER">Post-pay (Other)</option>
@@ -233,9 +254,15 @@ export default function CustomerLettersPage() {
                         </div>
                         <div className="flex flex-col">
                             <label className="text-xs text-gray-500">Search</label>
-                            <input name="search" placeholder="NPI / Letter ID / Program…" className="border rounded px-2 py-1 text-sm" />
+                            <input
+                                name="search"
+                                placeholder="NPI / Letter ID / Program…"
+                                className="border rounded px-2 py-1 text-sm"
+                            />
                         </div>
-                        <button className="bg-gray-800 text-white text-sm rounded px-3 py-1.5">Apply</button>
+                        <button className="bg-gray-800 text-white text-sm rounded px-3 py-1.5">
+                            Apply
+                        </button>
                     </Form>
 
                     {canSync && (
@@ -279,35 +306,45 @@ export default function CustomerLettersPage() {
                         </thead>
                         <tbody className="bg-white divide-y divide-gray-200">
                         {letters.length === 0 ? (
-                            <tr><td colSpan={13} className="px-4 py-6 text-sm text-gray-500 text-center">No letters found.</td></tr>
-                        ) : letters.map((row: any) => (
-                            <tr key={row.externalLetterId} className="hover:bg-gray-50">
-                                <td className="px-4 py-2 text-sm font-mono">{row.externalLetterId}</td>
-                                <td className="px-4 py-2 text-sm">{row.providerNpi}</td>
-                                <td className="px-4 py-2 text-sm">{row.provider?.name ?? '—'}</td>
-                                <td className="px-4 py-2 text-sm">{row.customer?.name ?? '—'}</td>
-                                <td className="px-4 py-2 text-sm">{row.provider?.providerGroup?.name ?? '—'}</td>
-                                <td className="px-4 py-2 text-sm">
-                                    {row?.provider?.userNpis?.map((x: any) => x.user.username).filter(Boolean).join(', ') || '—'}
-                                </td>
-                                <td className="px-4 py-2 text-sm">{row.letterDate ? new Date(row.letterDate).toLocaleDateString() : '—'}</td>
-                                <td className="px-4 py-2 text-sm">{row.respondBy ? new Date(row.respondBy).toLocaleDateString() : '—'}</td>
-                                <td className="px-4 py-2 text-sm">{row.jurisdiction ?? '—'}</td>
-                                <td className="px-4 py-2 text-sm">{row.programName ?? '—'}</td>
-                                <td className="px-4 py-2 text-sm">{row.stage ?? '—'}</td>
-                                <td className="px-4 py-2 text-sm">
-                                    <Form method="post">
-                                        <input type="hidden" name="intent" value="download" />
-                                        <input type="hidden" name="type" value={type} />
-                                        <input type="hidden" name="externalLetterId" value={row.externalLetterId} />
-                                        <button className="text-blue-600 hover:text-blue-800">Download</button>
-                                    </Form>
-                                </td>
-                                <td className="px-4 py-2 text-sm">
-                                    <JsonViewer data={row.raw} />
+                            <tr>
+                                <td colSpan={13} className="px-4 py-6 text-sm text-gray-500 text-center">
+                                    No letters found.
                                 </td>
                             </tr>
-                        ))}
+                        ) : (
+                            letters.map((row: any) => (
+                                <tr key={row.externalLetterId} className="hover:bg-gray-50">
+                                    <td className="px-4 py-2 text-sm font-mono">{row.externalLetterId}</td>
+                                    <td className="px-4 py-2 text-sm">{row.providerNpi}</td>
+                                    <td className="px-4 py-2 text-sm">{row.provider?.name ?? '—'}</td>
+                                    <td className="px-4 py-2 text-sm">{row.customer?.name ?? '—'}</td>
+                                    <td className="px-4 py-2 text-sm">{row.provider?.providerGroup?.name ?? '—'}</td>
+                                    <td className="px-4 py-2 text-sm">
+                                        {row?.provider?.userNpis?.map((x: any) => x.user.username).filter(Boolean).join(', ') || '—'}
+                                    </td>
+                                    <td className="px-4 py-2 text-sm">
+                                        {row.letterDate ? new Date(row.letterDate).toLocaleDateString() : '—'}
+                                    </td>
+                                    <td className="px-4 py-2 text-sm">
+                                        {row.respondBy ? new Date(row.respondBy).toLocaleDateString() : '—'}
+                                    </td>
+                                    <td className="px-4 py-2 text-sm">{row.jurisdiction ?? '—'}</td>
+                                    <td className="px-4 py-2 text-sm">{row.programName ?? '—'}</td>
+                                    <td className="px-4 py-2 text-sm">{row.stage ?? '—'}</td>
+                                    <td className="px-4 py-2 text-sm">
+                                        <Form method="post">
+                                            <input type="hidden" name="intent" value="download" />
+                                            <input type="hidden" name="type" value={type} />
+                                            <input type="hidden" name="externalLetterId" value={row.externalLetterId} />
+                                            <button className="text-blue-600 hover:text-blue-800">Download</button>
+                                        </Form>
+                                    </td>
+                                    <td className="px-4 py-2 text-sm">
+                                        <JsonViewer data={row.raw} />
+                                    </td>
+                                </tr>
+                            ))
+                        )}
                         </tbody>
                     </table>
                 </div>
