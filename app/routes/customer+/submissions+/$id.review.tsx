@@ -1,6 +1,6 @@
 import { getFormProps, getInputProps, getSelectProps, useForm } from '@conform-to/react'
 import { getZodConstraint, parseWithZod } from '@conform-to/zod'
-import { SubmissionEventKind, SubmissionPurpose as PrismaSubmissionPurpose } from '@prisma/client'
+import { SubmissionEventKind, type SubmissionPurpose as PrismaSubmissionPurpose } from '@prisma/client'
 import * as React from 'react'
 import {
     data,
@@ -32,8 +32,8 @@ import {
 import { buildCreateSubmissionPayload, pcgUpdateSubmission } from '#app/services/pcg-hih.server.ts'
 import { requireUserId } from '#app/utils/auth.server.ts'
 import { prisma } from '#app/utils/db.server.ts'
-import { redirectWithToast } from '#app/utils/toast.server.ts'
 import { draftKey, moveCachedFile, subKey, getCachedFile, setCachedFile } from '#app/utils/file-cache.ts'
+import { redirectWithToast } from '#app/utils/toast.server.ts'
 
 type PcgEvent = { kind?: string; payload?: any }
 type PcgStageSource = { responseMessage?: string | null; events?: PcgEvent[] | any[] }
@@ -231,7 +231,10 @@ export async function action({ request }: ActionFunctionArgs) {
         } else if (!isCustomerAdmin) {
             const hasAccess = user.userNpis.some(un => un.providerId === v.providerId)
             if (!hasAccess) {
-                return data({ result: parsed.reply({ formErrors: ['You can only use NPIs assigned to you'] }) }, { status: 400 })
+                return data(
+                    { result: parsed.reply({ formErrors: ['You can only use NPIs assigned to you'] }) },
+                    { status: 400 },
+                )
             }
         }
     }
@@ -263,6 +266,9 @@ export async function action({ request }: ActionFunctionArgs) {
     try {
         const resp = await pcgUpdateSubmission(submission.pcgSubmissionId, pcgPayload)
 
+        const authorTypeDb =
+            v.authorType === 'institutional' ? 'Institutional' : 'Individual'
+
         await prisma.submission.update({
             where: { id: v.submissionId },
             data: {
@@ -275,7 +281,7 @@ export async function action({ request }: ActionFunctionArgs) {
                 autoSplit: v.autoSplit,
                 sendInX12: v.sendInX12,
                 threshold: v.threshold,
-                authorType: v.authorType,
+                authorType: authorTypeDb,
                 providerId: v.providerId,
                 updatedAt: new Date(),
             },
@@ -293,6 +299,50 @@ export async function action({ request }: ActionFunctionArgs) {
             },
         })
 
+        // Audit log (success) with changed fields diff
+        try {
+            const prev: Record<string, unknown> | null = (() => {
+                if (!v?._initial_json) return null
+                try {
+                    return JSON.parse(v._initial_json) as Record<string, unknown>
+                } catch {
+                    return null
+                }
+            })()
+            const changed: string[] = []
+            if (prev) {
+                const keys = [
+                    'title','authorType','purposeOfSubmission','recipient',
+                    'providerId','claimId','caseId','comments','autoSplit','sendInX12','threshold'
+                ]
+                for (const k of keys) {
+                    const beforeVal = String((prev as Record<string, unknown>)[k] ?? '')
+                    const afterVal  = String((k === 'authorType'
+                        ? (v.authorType === 'institutional' ? 'Institutional' : 'Individual')
+                        : v[k]) ?? '')
+                    if (beforeVal !== afterVal) changed.push(k)
+                }
+            }
+
+            await prisma.auditLog.create({
+                data: {
+                    userId: user.id,
+                    userEmail: user.email ?? null,
+                    userName: user.name ?? null,
+                    rolesCsv: user.roles.map(r => r.name).join(','),
+                    customerId: submission.customerId ?? null,
+                    action: 'SUBMISSION_UPDATE',
+                    entityType: 'SUBMISSION',
+                    entityId: v.submissionId,
+                    route: '/customer/submissions/:id/review',
+                    success: true,
+                    message: 'Submission metadata updated',
+                    meta: { pcgSubmissionId: submission.pcgSubmissionId, changed },
+                    payload: pcgPayload,
+                },
+            })
+        } catch {}
+
         return await redirectWithToast(`/customer/submissions/${v.submissionId}/review`, {
             type: 'success',
             title: 'Submission Updated',
@@ -302,6 +352,28 @@ export async function action({ request }: ActionFunctionArgs) {
         await prisma.submissionEvent.create({
             data: { submissionId: v.submissionId, kind: 'PCG_UPDATE_ERROR', message: e?.message?.toString?.() ?? 'Update failed' },
         })
+
+        // Audit log (failure)
+        try {
+            await prisma.auditLog.create({
+                data: {
+                    userId: user.id,
+                    userEmail: user.email ?? null,
+                    userName: user.name ?? null,
+                    rolesCsv: user.roles.map(r => r.name).join(','),
+                    customerId: submission.customerId ?? null,
+                    action: 'SUBMISSION_UPDATE',
+                    entityType: 'SUBMISSION',
+                    entityId: v.submissionId,
+                    route: '/customer/submissions/:id/review',
+                    success: false,
+                    message: e?.message?.toString?.() ?? 'Update failed',
+                    meta: { pcgSubmissionId: submission.pcgSubmissionId },
+                    payload: pcgPayload,
+                },
+            })
+        } catch {}
+
         return await redirectWithToast(`/customer/submissions/${v.submissionId}/review`, {
             type: 'error',
             title: 'Update Failed',
@@ -705,7 +777,7 @@ export default function ReviewSubmission() {
                         {/* ===== Split Settings ===== */}
                         <div className="rounded-lg border border-indigo-200 bg-indigo-50 p-4">
                             <h4 className="text-sm font-semibold text-indigo-900 mb-3">Split Settings</h4>
-                            <div className="grid grid-cols-1 md:grid-cols-12 gap-4">
+                            <div className="grid grid-cols-1 md-grid-cols-12 gap-4 md:grid-cols-12">
                                 <div className="md:col-span-6">
                                     <label className="block text-sm font-medium text-gray-700">Split kind *</label>
                                     <select
@@ -804,7 +876,7 @@ export default function ReviewSubmission() {
                                             </div>
 
                                             <div className="md:col-span-6">
-                                                <label className="block text-sm text-gray-700">Filename (.pdf) *</label>
+                                                <label className="block text sm text-gray-700">Filename (.pdf) *</label>
                                                 <input
                                                     name={`doc_filename_${i}`}
                                                     type="text"

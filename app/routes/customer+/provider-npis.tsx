@@ -24,6 +24,8 @@ import { LoadingOverlay } from '#app/components/ui/loading-overlay.tsx'
 import { StatusButton } from '#app/components/ui/status-button.tsx'
 import { INTEREX_ROLES } from '#app/utils/interex-roles.ts'
 import { useIsPending } from '#app/utils/misc.tsx'
+import type { Prisma } from '@prisma/client'
+
 
 /** Helper: append a provider event (audit) — server-only import inside */
 async function logProviderEvent(input: {
@@ -51,6 +53,46 @@ async function logProviderEvent(input: {
             kind: input.kind as any,
             message: input.message,
             payload: (input.payload ?? null) as any,
+        },
+    })
+}
+
+/** Centralized audit log writer */
+async function writeAudit(input: {
+    userId: string
+    userEmail?: string | null
+    userName?: string | null
+    rolesCsv: string
+    customerId: string | null
+    action:
+        | 'PROVIDER_CREATE'
+        | 'PROVIDER_UPDATE'
+        | 'PROVIDER_TOGGLE_ACTIVE'
+        | 'PCG_ADD_PROVIDER_NPI'
+        | 'PROVIDER_FETCH_REMOTE_NPIS'
+    entityId?: string | null
+    success: boolean
+    message?: string | null
+    route?: string
+    meta?: Prisma.InputJsonValue | null          // <-- change
+    payload?: Prisma.InputJsonValue | null       // <-- change
+}) {
+    const { prisma } = await import('#app/utils/db.server.ts')
+    await prisma.auditLog.create({
+        data: {
+            userId: input.userId,
+            userEmail: input.userEmail ?? null,
+            userName: input.userName ?? null,
+            rolesCsv: input.rolesCsv,
+            customerId: input.customerId,
+            action: input.action,
+            entityType: 'PROVIDER',
+            entityId: input.entityId ?? null,
+            route: input.route ?? '/customer/provider-npis',
+            success: input.success,
+            message: input.message ?? null,
+            meta: (input.meta ?? {}) as Prisma.InputJsonValue,        // <-- cast default
+            payload: (input.payload ?? {}) as Prisma.InputJsonValue,  // <-- cast default
         },
     })
 }
@@ -211,6 +253,7 @@ export async function action({ request }: ActionFunctionArgs) {
     if (!user.customerId) throw new Response('User must be associated with a customer', { status: 400 })
 
     const userRoles = user.roles.map(r => r.name)
+    const rolesCsv = userRoles.join(',')
     const isCustomerAdmin = userRoles.includes(INTEREX_ROLES.CUSTOMER_ADMIN)
     const isProviderGroupAdmin = userRoles.includes(INTEREX_ROLES.PROVIDER_GROUP_ADMIN)
     const isBasicUser = userRoles.includes(INTEREX_ROLES.BASIC_USER)
@@ -231,8 +274,30 @@ export async function action({ request }: ActionFunctionArgs) {
     if (intent === 'fetch-remote-npis') {
         try {
             const list = await pcgGetUserNpis()
+            try {
+                await writeAudit({
+                    userId,
+                    rolesCsv,
+                    customerId: user.customerId,
+                    action: 'PROVIDER_FETCH_REMOTE_NPIS',
+                    success: true,
+                    message: 'Fetched provider NPIs from PCG',
+                    payload: { total: list?.total, page: list?.page, pageSize: list?.pageSize },
+                })
+            } catch {}
             return data({ pcgNpis: list })
         } catch (err: any) {
+            try {
+                await writeAudit({
+                    userId,
+                    rolesCsv,
+                    customerId: user.customerId,
+                    action: 'PROVIDER_FETCH_REMOTE_NPIS',
+                    success: false,
+                    message: 'Failed to fetch provider NPIs from PCG',
+                    payload: { error: String(err?.message || err) },
+                })
+            } catch {}
             return data({ pcgError: err?.message ?? 'Failed to fetch NPIs from PCG.' }, { status: 500 })
         }
     }
@@ -268,8 +333,22 @@ export async function action({ request }: ActionFunctionArgs) {
         }
 
         // Try to add in PCG; tolerate "already exists/present", fail otherwise
+        let pcgAddOkOrDuplicate = false
         try {
             await pcgAddProviderNpi({ providerNPI: npi, customerName: orgName })
+            pcgAddOkOrDuplicate = true
+            try {
+                await writeAudit({
+                    userId,
+                    rolesCsv,
+                    customerId: user.customerId,
+                    action: 'PCG_ADD_PROVIDER_NPI',
+                    entityId: null,
+                    success: true,
+                    message: 'PCG AddProviderNPI ok',
+                    payload: { npi, customerName: orgName },
+                })
+            } catch {}
         } catch (err: any) {
             const msg = String(err?.message || '')
             const duplicate = /(already|exist|registered|duplicate|present)/i.test(msg)
@@ -285,9 +364,34 @@ export async function action({ request }: ActionFunctionArgs) {
                         payload: { npi, orgName, error: msg },
                     })
                 } catch {}
+                try {
+                    await writeAudit({
+                        userId,
+                        rolesCsv,
+                        customerId: user.customerId,
+                        action: 'PCG_ADD_PROVIDER_NPI',
+                        entityId: null,
+                        success: false,
+                        message: 'PCG AddProviderNPI failed',
+                        payload: { npi, customerName: orgName, error: msg },
+                    })
+                } catch {}
                 return data({ result: submission.reply({ formErrors: [msg || 'Failed to add NPI in PCG.'] }) }, { status: 400 })
+            } else {
+                pcgAddOkOrDuplicate = true
+                try {
+                    await writeAudit({
+                        userId,
+                        rolesCsv,
+                        customerId: user.customerId,
+                        action: 'PCG_ADD_PROVIDER_NPI',
+                        entityId: null,
+                        success: true,
+                        message: 'PCG AddProviderNPI duplicate (already present)',
+                        payload: { npi, customerName: orgName },
+                    })
+                } catch {}
             }
-            // else: already in PCG for this org — proceed with local create
         }
 
         // Optional group validation
@@ -341,6 +445,19 @@ export async function action({ request }: ActionFunctionArgs) {
                     payload: { field: 'providerGroupId', to: providerGroupId },
                 })
             }
+
+            try {
+                await writeAudit({
+                    userId,
+                    rolesCsv,
+                    customerId: user.customerId,
+                    action: 'PROVIDER_CREATE',
+                    entityId: created.id,
+                    success: true,
+                    message: `Provider created (${npi})`,
+                    payload: { npi, name, providerGroupId, pcgAddAttempted: pcgAddOkOrDuplicate },
+                })
+            } catch {}
         } catch (err: any) {
             // If DB still has a global unique on npi, this will trigger.
             if (err?.code === 'P2002') {
@@ -466,6 +583,25 @@ export async function action({ request }: ActionFunctionArgs) {
             })
         }
 
+        try {
+            const changed = [
+                ...(nameChanged ? ['name'] : []),
+                ...(groupChanged ? ['providerGroupId'] : []),
+                ...(activeChanged ? ['active'] : []),
+            ]
+            await writeAudit({
+                userId,
+                rolesCsv,
+                customerId: user.customerId,
+                action: 'PROVIDER_UPDATE',
+                entityId: providerId,
+                success: true,
+                message: 'Provider updated',
+                meta: { changed },
+                payload: { name, providerGroupId: newGroupId, ...(typeof active !== 'undefined' ? { active } : {}) },
+            })
+        } catch {}
+
         return redirectWithToast('/customer/provider-npis', {
             type: 'success',
             title: 'Provider NPI updated',
@@ -522,6 +658,19 @@ export async function action({ request }: ActionFunctionArgs) {
             kind: active ? 'ACTIVATED' : 'INACTIVATED',
             message: active ? 'Provider activated' : 'Provider inactivated',
         })
+
+        try {
+            await writeAudit({
+                userId,
+                rolesCsv,
+                customerId: user.customerId,
+                action: 'PROVIDER_TOGGLE_ACTIVE',
+                entityId: providerId,
+                success: true,
+                message: active ? 'Activated' : 'Inactivated',
+                payload: { active },
+            })
+        } catch {}
 
         return redirectWithToast('/customer/provider-npis', {
             type: 'success',

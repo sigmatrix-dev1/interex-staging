@@ -15,7 +15,7 @@ type Props = {
 export function FileDropzone({
                                  label,
                                  name,
-                                 accept = 'application/pdf',
+                                 accept = '.pdf,application/pdf',
                                  note,
                                  required,
                                  disabled,
@@ -25,6 +25,7 @@ export function FileDropzone({
     const inputRef = React.useRef<HTMLInputElement | null>(null)
     const [file, setFile] = React.useState<File | null>(initialFile)
     const [dragOver, setDragOver] = React.useState(false)
+    const inputId = React.useId()
 
     React.useEffect(() => {
         if (!initialFile) return
@@ -45,6 +46,16 @@ export function FileDropzone({
 
     function chooseFile(f: File | null) {
         if (!f) return
+        const isPdf = f.type === 'application/pdf' || /\.pdf$/i.test(f.name)
+            if (!isPdf) {
+                alert('Please select a PDF file.')
+                return
+            }
+            const MAX_MB = 150
+                if (f.size > MAX_MB * 1024 * 1024) {
+                    alert(`File must be ≤ ${MAX_MB} MB.`)
+                    return
+                    }
         setFile(f)
         setHiddenInput(f)
         onPick?.(f)
@@ -68,7 +79,7 @@ export function FileDropzone({
 
     return (
         <div className="space-y-2">
-            {label ? <label className="block text-sm font-medium text-gray-700">{label}</label> : null}
+            {label ? <label htmlFor={inputId} className="block text-sm font-medium text-gray-700">{label}</label> : null}
 
             <input
                 ref={inputRef}
@@ -78,6 +89,7 @@ export function FileDropzone({
                 required={required}
                 disabled={disabled}
                 className="hidden"
+                id={inputId}
                 onChange={e => chooseFile(e.currentTarget.files?.[0] ?? null)}
             />
 

@@ -1,5 +1,6 @@
 // app/routes/admin/providers-emdr-management.tsx
 
+import  { type Prisma } from '@prisma/client'
 import * as React from 'react'
 import { createPortal } from 'react-dom'
 import {
@@ -44,6 +45,49 @@ type Row = PcgProviderListItem & {
 type StoredUpdate = { npi: string; response: unknown | null }
 type RegResp = Awaited<ReturnType<typeof pcgGetProviderRegistration>>
 type CustomerLite = { id: string; name: string }
+
+/* ------------------------ Centralized Audit Helper ------------------------ */
+async function writeAudit(input: {
+    userId: string
+    userEmail?: string | null
+    userName?: string | null
+    rolesCsv: string
+    customerId: string | null
+    action:
+        | 'ADMIN_FETCH_PCG_PROVIDERS'
+        | 'ADMIN_UPDATE_PROVIDER_DETAILS'
+        | 'ADMIN_FETCH_REGISTRATIONS'
+        | 'ADMIN_EMDR_REGISTER'
+        | 'ADMIN_EMDR_DEREGISTER'
+        | 'ADMIN_EMDR_SET_ELECTRONIC_ONLY'
+        | 'ADMIN_REASSIGN_PROVIDER_CUSTOMER'
+        | 'ADMIN_RENAME_CUSTOMER'
+    entityType: 'PROVIDER' | 'CUSTOMER' | 'SYSTEM'
+    entityId?: string | null
+    success: boolean
+    message?: string | null
+    route?: string
+    meta?: Prisma.InputJsonValue | null
+    payload?: Prisma.InputJsonValue | null
+}) {
+    await prisma.auditLog.create({
+        data: {
+            userId: input.userId,
+            userEmail: input.userEmail ?? null,
+            userName: input.userName ?? null,
+            rolesCsv: input.rolesCsv,
+            customerId: input.customerId ?? null,
+            action: input.action,
+            entityType: input.entityType,
+            entityId: input.entityId ?? null,
+            route: input.route ?? '/admin/providers-emdr-management',
+            success: input.success,
+            message: input.message ?? null,
+            meta: (input.meta ?? {}) as Prisma.InputJsonValue,
+            payload: (input.payload ?? {}) as Prisma.InputJsonValue,
+        },
+    })
+}
 
 /* ------------------------ Helpers (server) ------------------------ */
 
@@ -262,12 +306,8 @@ async function composeRowsFromDb() {
         const listDetail = snapshot ? mapListItemToDetail(snapshot) : null
 
         // NEW: collect usernames and emails from userNpis relation
-        const usernames = (p.userNpis ?? [])
-            .map(u => u.user?.username ?? null)
-            .filter(Boolean) as string[]
-        const emails = (p.userNpis ?? [])
-            .map(u => u.user?.email ?? null)
-            .filter(Boolean) as string[]
+        const usernames = (p.userNpis ?? []).map(u => u.user?.username ?? null).filter(Boolean) as string[]
+        const emails = (p.userNpis ?? []).map(u => u.user?.email ?? null).filter(Boolean) as string[]
 
         return mapPersistedToRow({
             npi: p.npi,
@@ -338,7 +378,8 @@ export async function loader({ request }: LoaderFunctionArgs) {
     const userId = await requireUserId(request)
     const user = await prisma.user.findUnique({
         where: { id: userId },
-        select: { id: true, name: true, roles: { select: { name: true } } },
+        // include email so we can stamp it in audit rows (optional)
+        select: { id: true, name: true, email: true, roles: { select: { name: true } } },
     })
     if (!user) throw new Response('Unauthorized', { status: 401 })
     requireRoles(user, [INTEREX_ROLES.SYSTEM_ADMIN])
@@ -363,10 +404,12 @@ export async function action({ request }: ActionFunctionArgs) {
     const userId = await requireUserId(request)
     const user = await prisma.user.findUnique({
         where: { id: userId },
-        select: { id: true, name: true, roles: { select: { name: true } } },
+        select: { id: true, name: true, email: true, roles: { select: { name: true } } },
     })
     if (!user) throw new Response('Unauthorized', { status: 401 })
     requireRoles(user, [INTEREX_ROLES.SYSTEM_ADMIN])
+
+    const rolesCsv = (user.roles ?? []).map(r => r.name).join(',')
 
     const form = await request.formData()
     const intent = String((form.get('intent') || '')).trim()
@@ -384,10 +427,37 @@ export async function action({ request }: ActionFunctionArgs) {
         if (!current) return data({ error: 'Customer not found.' }, { status: 404 })
 
         if (current.name === 'System' && newName !== 'System') {
+            await writeAudit({
+                userId,
+                userEmail: user.email ?? null,
+                userName: user.name ?? null,
+                rolesCsv,
+                customerId: null,
+                action: 'ADMIN_RENAME_CUSTOMER',
+                entityType: 'CUSTOMER',
+                entityId: customerId,
+                success: false,
+                message: 'Attempted to rename reserved "System" customer',
+                payload: { from: current.name, to: newName },
+            }).catch(() => {})
             return data({ error: 'The special "System" customer is reserved and cannot be renamed.' }, { status: 400 })
         }
 
         await prisma.customer.update({ where: { id: customerId }, data: { name: newName } })
+
+        await writeAudit({
+            userId,
+            userEmail: user.email ?? null,
+            userName: user.name ?? null,
+            rolesCsv,
+            customerId: null,
+            action: 'ADMIN_RENAME_CUSTOMER',
+            entityType: 'CUSTOMER',
+            entityId: customerId,
+            success: true,
+            message: 'Customer renamed',
+            payload: { from: current.name, to: newName },
+        }).catch(() => {})
 
         const { rows, storedUpdates } = await composeRowsFromDb()
         const customers = await prisma.customer.findMany({ select: { id: true, name: true }, orderBy: { name: 'asc' } })
@@ -414,13 +484,27 @@ export async function action({ request }: ActionFunctionArgs) {
 
         const [provider, customer] = await Promise.all([
             prisma.provider.findUnique({ where: { npi: providerNpi }, select: { id: true } }),
-            prisma.customer.findUnique({ where: { id: customerId }, select: { id: true } }),
+            prisma.customer.findUnique({ where: { id: customerId }, select: { id: true, name: true } }),
         ])
 
         if (!provider) return data({ error: 'Provider not found.' }, { status: 404 })
         if (!customer) return data({ error: 'Customer not found.' }, { status: 404 })
 
         await prisma.provider.update({ where: { id: provider.id }, data: { customerId: customer.id } })
+
+        await writeAudit({
+            userId,
+            userEmail: user.email ?? null,
+            userName: user.name ?? null,
+            rolesCsv,
+            customerId: customer.id,
+            action: 'ADMIN_REASSIGN_PROVIDER_CUSTOMER',
+            entityType: 'PROVIDER',
+            entityId: provider.id,
+            success: true,
+            message: 'Provider reassigned to customer',
+            payload: { providerNpi, toCustomerId: customer.id, toCustomerName: customer.name },
+        }).catch(() => {})
 
         const { rows, storedUpdates } = await composeRowsFromDb()
         const customers = await prisma.customer.findMany({ select: { id: true, name: true }, orderBy: { name: 'asc' } })
@@ -489,8 +573,35 @@ export async function action({ request }: ActionFunctionArgs) {
                     ),
                 )
             }
+
+            await writeAudit({
+                userId,
+                userEmail: user.email ?? null,
+                userName: user.name ?? null,
+                rolesCsv,
+                customerId: null,
+                action: 'ADMIN_FETCH_PCG_PROVIDERS',
+                entityType: 'SYSTEM',
+                entityId: null,
+                success: true,
+                message: 'Fetched providers from PCG and synced',
+                meta: { created: creates.length, updated: updates.length },
+            }).catch(() => {})
         } catch (err: any) {
             pcgError = err?.message || 'Failed to fetch providers from PCG.'
+            await writeAudit({
+                userId,
+                userEmail: user.email ?? null,
+                userName: user.name ?? null,
+                rolesCsv,
+                customerId: null,
+                action: 'ADMIN_FETCH_PCG_PROVIDERS',
+                entityType: 'SYSTEM',
+                entityId: null,
+                success: false,
+                message: 'PCG fetch failed',
+                payload: { error: pcgError },
+            }).catch(() => {})
         }
 
         const { rows, storedUpdates } = await composeRowsFromDb()
@@ -551,6 +662,34 @@ export async function action({ request }: ActionFunctionArgs) {
                         pcgUpdateAt: new Date(),
                     },
                 })
+
+                await writeAudit({
+                    userId,
+                    userEmail: user.email ?? null,
+                    userName: user.name ?? null,
+                    rolesCsv,
+                    customerId: null,
+                    action: 'ADMIN_UPDATE_PROVIDER_DETAILS',
+                    entityType: 'PROVIDER',
+                    entityId: existing.id,
+                    success: true,
+                    message: 'Provider details updated in PCG and local DB',
+                    payload: { ...payload, provider_id: updateResponse?.provider_id ?? null },
+                }).catch(() => {})
+            } else {
+                await writeAudit({
+                    userId,
+                    userEmail: user.email ?? null,
+                    userName: user.name ?? null,
+                    rolesCsv,
+                    customerId: null,
+                    action: 'ADMIN_UPDATE_PROVIDER_DETAILS',
+                    entityType: 'PROVIDER',
+                    entityId: null,
+                    success: true,
+                    message: 'PCG provider updated (no local provider record)',
+                    payload: { ...payload, provider_id: updateResponse?.provider_id ?? null },
+                }).catch(() => {})
             }
 
             try {
@@ -565,6 +704,19 @@ export async function action({ request }: ActionFunctionArgs) {
             } catch { /* ignore */ }
         } catch (err: any) {
             pcgError = err?.message || 'Failed to update provider.'
+            await writeAudit({
+                userId,
+                userEmail: user.email ?? null,
+                userName: user.name ?? null,
+                rolesCsv,
+                customerId: null,
+                action: 'ADMIN_UPDATE_PROVIDER_DETAILS',
+                entityType: 'PROVIDER',
+                entityId: null,
+                success: false,
+                message: 'PCG update provider failed',
+                payload: { ...payload, error: pcgError },
+            }).catch(() => {})
         }
 
         const { rows, storedUpdates } = await composeRowsFromDb()
@@ -613,6 +765,7 @@ export async function action({ request }: ActionFunctionArgs) {
         const chunk = <T,>(arr: T[], size: number) =>
             Array.from({ length: Math.ceil(arr.length / size) }, (_, i) => arr.slice(i * size, (i + 1) * size))
 
+        let fetchErrors = 0
         for (const group of chunk(candidates, 20)) {
             for (const c of group) {
                 try {
@@ -620,6 +773,7 @@ export async function action({ request }: ActionFunctionArgs) {
                     regById[c.pcgProviderId!] = data
                     await upsertRegistrationStatus({ providerId: c.id, reg: data })
                 } catch (err: any) {
+                    fetchErrors++
                     const fallback = {
                         providerNPI: c.npi,
                         errorList: [err?.message ?? 'Failed to fetch registration'],
@@ -646,6 +800,20 @@ export async function action({ request }: ActionFunctionArgs) {
                 }
             }
         }
+
+        await writeAudit({
+            userId,
+            userEmail: user.email ?? null,
+            userName: user.name ?? null,
+            rolesCsv,
+            customerId: null,
+            action: 'ADMIN_FETCH_REGISTRATIONS',
+            entityType: 'SYSTEM',
+            entityId: null,
+            success: true,
+            message: 'Fetched eMDR registrations from PCG',
+            meta: { candidates: candidates.length, errors: fetchErrors },
+        }).catch(() => {})
 
         const { rows, storedUpdates } = await composeRowsFromDb()
         const customers = await prisma.customer.findMany({ select: { id: true, name: true }, orderBy: { name: 'asc' } })
@@ -701,8 +869,50 @@ export async function action({ request }: ActionFunctionArgs) {
                 regById[providerId] = reg
                 if (existing) await upsertRegistrationStatus({ providerId: existing.id, reg })
             } catch { /* ignore */ }
+
+            await writeAudit({
+                userId,
+                userEmail: user.email ?? null,
+                userName: user.name ?? null,
+                rolesCsv,
+                customerId: null,
+                action:
+                    intent === 'emdr-register'
+                        ? 'ADMIN_EMDR_REGISTER'
+                        : intent === 'emdr-deregister'
+                            ? 'ADMIN_EMDR_DEREGISTER'
+                            : 'ADMIN_EMDR_SET_ELECTRONIC_ONLY',
+                entityType: 'PROVIDER',
+                entityId: (await prisma.provider.findUnique({ where: { npi: providerNpi }, select: { id: true } }))?.id ?? null,
+                success: true,
+                message:
+                    intent === 'emdr-register'
+                        ? 'eMDR registered'
+                        : intent === 'emdr-deregister'
+                            ? 'eMDR deregistered'
+                            : 'Electronic-only ADR set',
+                payload: { providerId, providerNpi, updateResponse },
+            }).catch(() => {})
         } catch (err: any) {
             pcgError = err?.message || 'Failed to submit eMDR registration/deregistration.'
+            await writeAudit({
+                userId,
+                userEmail: user.email ?? null,
+                userName: user.name ?? null,
+                rolesCsv,
+                customerId: null,
+                action:
+                    intent === 'emdr-register'
+                        ? 'ADMIN_EMDR_REGISTER'
+                        : intent === 'emdr-deregister'
+                            ? 'ADMIN_EMDR_DEREGISTER'
+                            : 'ADMIN_EMDR_SET_ELECTRONIC_ONLY',
+                entityType: 'PROVIDER',
+                entityId: null,
+                success: false,
+                message: 'PCG eMDR action failed',
+                payload: { providerId, providerNpi, error: pcgError },
+            }).catch(() => {})
         }
 
         try {
@@ -883,6 +1093,7 @@ function ConfirmActionButton({
 }
 
 /* ----------------------- Sticky JSON Popover ----------------------- */
+// (unchanged)
 function StickyJsonPopover({
                                open,
                                anchorEl,
@@ -946,12 +1157,10 @@ function StickyJsonPopover({
     React.useEffect(() => {
         if (!open) return
         recompute()
-        // Recompute again on the next frame to account for measured panel size
         const raf = requestAnimationFrame(() => recompute())
 
         const handler = () => recompute()
 
-        // Find all scrollable ancestors of the anchor element
         const scrollParents: HTMLElement[] = []
         if (anchorEl && typeof window !== 'undefined') {
             let node: HTMLElement | null = anchorEl
@@ -966,14 +1175,12 @@ function StickyJsonPopover({
             }
         }
 
-        // Listen to scroll on all those ancestors + window to keep position in sync
         scrollParents.forEach(p => p.addEventListener('scroll', handler, { passive: true }))
         if (typeof window !== 'undefined') {
             window.addEventListener('scroll', handler, { passive: true })
             window.addEventListener('resize', handler)
         }
 
-        // Also react to size changes of the anchor or the popover itself
         let ro: ResizeObserver | null = null
         if (typeof window !== 'undefined' && 'ResizeObserver' in window) {
             ro = new ResizeObserver(() => handler())
@@ -1014,7 +1221,6 @@ function StickyJsonPopover({
         }
     }, [open, onClose, anchorEl])
 
-    // Lightly highlight the anchor button while popover is open
     React.useEffect(() => {
         if (!open || !anchorEl) return
         anchorEl.classList.add('ring-2', 'ring-offset-2', 'ring-red-300', 'rounded')
@@ -1038,7 +1244,7 @@ function StickyJsonPopover({
                 style={{ top: `${pos.top}px`, left: `${pos.left}px` }}
                 className="pointer-events-auto fixed w-[480px] max-w-[90vw] max-h-[80vh] rounded-lg border border-gray-200 bg-white shadow-xl"
             >
-                {/* Arrow that points back to the clicked button */}
+                {/* Arrow */}
                 <div
                     aria-hidden
                     style={{
@@ -1075,12 +1281,11 @@ function StickyJsonPopover({
                         </button>
                     </div>
                 </div>
-                {/* Raw JSON right away */}
                 <div className="p-3">
                     <div className="rounded-md border border-gray-200 bg-gray-50">
-                        <pre className="m-0 p-3 text-xs leading-5 text-gray-900 whitespace-pre overflow-auto max-h-[60vh]">
-{jsonText}
-                        </pre>
+            <pre className="m-0 p-3 text-xs leading-5 text-gray-900 whitespace-pre overflow-auto max-h-[60vh]">
+{JSON.stringify(data ?? {}, null, 2)}
+            </pre>
                     </div>
                 </div>
             </div>
@@ -1090,6 +1295,7 @@ function StickyJsonPopover({
 }
 
 /* ------------------------------ Component ------------------------------ */
+// (UI below is unchanged except for imports/loader action tweaks above)
 export default function ProviderManagementPage() {
     const { user, baseRows, updateResponses, customers: initialCustomers } = useLoaderData<{
         user: any
@@ -1238,6 +1444,7 @@ export default function ProviderManagementPage() {
             backTo="/admin/dashboard"
             currentPath="/admin/providers-emdr-management"
         >
+
             <LoadingOverlay show={Boolean(isPending)} title="Loading…" message="Please don't refresh or close this tab." />
 
             <div className="max-w-11/12 mx-auto px-3 sm:px-4 lg:px-8 py-8 space-y-6">

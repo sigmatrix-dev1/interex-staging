@@ -18,7 +18,7 @@ export function JsonViewer({ data }: { data: unknown }) {
             mt-2 rounded bg-gray-50 p-3 text-xs text-gray-800
             whitespace-pre-wrap break-words
             max-h-96 overflow-auto
-            w-full min-w-[40rem] max-w-[80vw]
+            w-full sm:min-w-[40rem] max-w-[90vw]
           "
                 >
           {JSON.stringify(data, null, 2)}

@@ -14,6 +14,7 @@ import {
     type ActionFunctionArgs,
 } from 'react-router'
 import { z } from 'zod'
+import { FileDropzone } from '#app/components/file-dropzone.tsx'
 import { InterexLayout } from '#app/components/interex-layout.tsx'
 import { SubmissionActivityLog } from '#app/components/submission-activity-log.tsx'
 import { Drawer } from '#app/components/ui/drawer.tsx'
@@ -24,7 +25,6 @@ import { requireUserId } from '#app/utils/auth.server.ts'
 import { prisma } from '#app/utils/db.server.ts'
 import { getCachedFile, subKey } from '#app/utils/file-cache.ts'
 import { redirectWithToast } from '#app/utils/toast.server.ts'
-import { FileDropzone } from '#app/components/file-dropzone.tsx'
 
 type PcgEvent = { kind?: string; payload?: any }
 type PcgStageSource = { responseMessage?: string | null; events?: PcgEvent[] | any[] }
@@ -207,6 +207,28 @@ export async function action({ request }: ActionFunctionArgs) {
             },
         })
 
+        // Audit: document upload success
+        try {
+            await prisma.auditLog.create({
+                data: {
+                    userId: user.id,
+                    userEmail: user.email ?? null,
+                    userName: user.name ?? null,
+                    rolesCsv: user.roles.map(r => r.name).join(','),
+                    customerId: submission.customerId ?? null,
+                    action: 'SUBMISSION_UPLOAD_DOCUMENT',
+                    entityType: 'SUBMISSION',
+                    entityId: submissionId,
+                    route: '/customer/submissions/:id/upload',
+                    success: true,
+                    message: `Uploaded ${files.length} document(s)`,
+                    meta: { pcgSubmissionId: submission.pcgSubmissionId },
+                    payload: { files: files.map(f => ({ name: f.name, size: f.size })) },
+                },
+            })
+        } catch {}
+
+        // Optionally pull PCG status and log it
         try {
             const statusResp = await pcgGetStatus(submission.pcgSubmissionId!)
             await prisma.submissionEvent.create({
@@ -225,6 +247,27 @@ export async function action({ request }: ActionFunctionArgs) {
                     updatedAt: new Date(),
                 },
             })
+
+            // Audit: status update success
+            try {
+                await prisma.auditLog.create({
+                    data: {
+                        userId: user.id,
+                        userEmail: user.email ?? null,
+                        userName: user.name ?? null,
+                        rolesCsv: user.roles.map(r => r.name).join(','),
+                        customerId: submission.customerId ?? null,
+                        action: 'SUBMISSION_STATUS_UPDATE',
+                        entityType: 'SUBMISSION',
+                        entityId: submissionId,
+                        route: '/customer/submissions/:id/upload',
+                        success: true,
+                        message: statusResp.stage ?? 'PCG status retrieved',
+                        meta: { pcgSubmissionId: submission.pcgSubmissionId },
+                        payload: statusResp,
+                    },
+                })
+            } catch {}
         } catch {}
 
         return await redirectWithToast(`/customer/submissions`, {
@@ -244,6 +287,27 @@ export async function action({ request }: ActionFunctionArgs) {
         await prisma.submissionEvent.create({
             data: { submissionId, kind: 'PCG_UPLOAD_ERROR', message: e?.message?.toString?.() ?? 'Upload failed' },
         })
+
+        // Audit: document upload failure
+        try {
+            await prisma.auditLog.create({
+                data: {
+                    userId: user.id,
+                    userEmail: user.email ?? null,
+                    userName: user.name ?? null,
+                    rolesCsv: user.roles.map(r => r.name).join(','),
+                    customerId: submission?.customerId ?? null,
+                    action: 'SUBMISSION_UPLOAD_DOCUMENT',
+                    entityType: 'SUBMISSION',
+                    entityId: submissionId,
+                    route: '/customer/submissions/:id/upload',
+                    success: false,
+                    message: e?.message?.toString?.() ?? 'Upload failed',
+                    meta: { pcgSubmissionId: submission?.pcgSubmissionId ?? null },
+                },
+            })
+        } catch {}
+
         return await redirectWithToast(`/customer/submissions/${submissionId}/upload`, {
             type: 'error',
             title: 'Upload Failed',

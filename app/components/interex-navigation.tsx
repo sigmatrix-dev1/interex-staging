@@ -22,6 +22,12 @@ export function InterexNavigation({ user, currentPath }: InterexNavigationProps)
                 description: 'System administration',
             },
             {
+                name: 'Audit Logs',
+                href: '/admin/audit-logs',
+                icon: 'file-text',
+                description: 'System audit trail',
+            },
+            {
                 name: 'Provider & eMDR Management',
                 href: '/admin/providers-emdr-management',
                 icon: 'id-card',
@@ -120,7 +126,7 @@ export function InterexNavigation({ user, currentPath }: InterexNavigationProps)
         navItems.push(
             {
                 name: 'Submissions',
-                href: '/submissions',
+                href: '/customer/submissions',
                 icon: 'file-text',
                 description: 'Submit documentation',
             },

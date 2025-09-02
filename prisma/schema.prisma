@@ -184,7 +184,7 @@ model Passkey {
   backedUp       Boolean
   transports     String?
 
-  @@index(userId)
+  @@index([userId])
 }
 
 // =============================================
@@ -685,4 +685,45 @@ model PostpayOtherLetter {
   @@index([customerId])
   @@index([providerNpi])
   @@index([letterDate])
+}
+
+// ============================
+// Audit Log
+// ============================
+model AuditLog {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+
+  // who
+  userId    String?
+  userEmail String?
+  userName  String?
+  rolesCsv  String? // cached roles for quick filtering
+
+  // scope
+  customerId String?
+
+  // what
+  action     String // e.g. LETTERS_SYNC, LETTER_DOWNLOAD, PCG_FETCH, PROVIDER_UPDATE, EMDR_REGISTER, ...
+  entityType String? // e.g. LETTER, PROVIDER
+  entityId   String? // e.g. externalLetterId or providerId/NPI
+
+  // request context
+  route     String? // e.g. /customer/letters
+  ip        String?
+  userAgent String?
+
+  // result
+  success Boolean @default(true)
+  message String?
+
+  // raw payloads (kept small)
+  meta    Json?
+  payload Json?
+
+  @@index([createdAt])
+  @@index([action, createdAt])
+  @@index([entityType, entityId])
+  @@index([userId, createdAt])
+  @@index([customerId, createdAt])
 }

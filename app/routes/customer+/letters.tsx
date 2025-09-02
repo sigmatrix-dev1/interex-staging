@@ -8,16 +8,19 @@ import {
     Form,
 } from 'react-router'
 
-import { prisma } from '#app/utils/db.server.ts'
-import { requireUserId } from '#app/utils/auth.server.ts'
-import { requireRoles } from '#app/utils/role-redirect.server.ts'
-import { INTEREX_ROLES } from '#app/utils/interex-roles.ts'
 import { InterexLayout } from '#app/components/interex-layout.tsx'
-import { LoadingOverlay } from '#app/components/ui/loading-overlay.tsx'
-import { Icon } from '#app/components/ui/icon.tsx'
 import { JsonViewer } from '#app/components/json-view.tsx'
-import { useIsPending } from '#app/utils/misc.tsx'
+import { Icon } from '#app/components/ui/icon.tsx'
+import { LoadingOverlay } from '#app/components/ui/loading-overlay.tsx'
 import { syncLetters, downloadLetterPdf } from '#app/services/letters.server.ts'
+import { requireUserId } from '#app/utils/auth.server.ts'
+import { prisma } from '#app/utils/db.server.ts'
+import { INTEREX_ROLES } from '#app/utils/interex-roles.ts'
+import { useIsPending } from '#app/utils/misc.tsx'
+import { requireRoles } from '#app/utils/role-redirect.server.ts'
+
+import { audit } from '#app/utils/audit.server.ts'
+import { type AuditAction } from '#app/domain/audit-enums.ts'
 
 type TabType = 'PREPAY' | 'POSTPAY' | 'POSTPAY_OTHER'
 
@@ -121,8 +124,30 @@ export async function action({ request }: ActionFunctionArgs) {
         const startDate = String(form.get('startDate') || '')
         const endDate = String(form.get('endDate') || '')
         const types: TabType[] = type ? [type] : ['PREPAY', 'POSTPAY', 'POSTPAY_OTHER']
-        await syncLetters({ startDate, endDate, types })
-        return data({ ok: true })
+        try {
+            await syncLetters({ startDate, endDate, types })
+            await audit({
+                request,
+                user,
+                action: 'LETTERS_SYNC',
+                entityType: 'LETTER',
+                success: true,
+                message: `Synced ${types.join(', ')} from ${startDate} to ${endDate}`,
+                meta: { types, startDate, endDate },
+            })
+            return data({ ok: true })
+        } catch (err: any) {
+            await audit({
+                request,
+                user,
+                action: 'LETTERS_SYNC',
+                entityType: 'LETTER',
+                success: false,
+                message: err?.message || 'Sync failed',
+                meta: { types, startDate, endDate },
+            })
+            throw err
+        }
     }
 
     if (intent === 'download') {
@@ -134,8 +159,31 @@ export async function action({ request }: ActionFunctionArgs) {
         ])
         const type = String(form.get('type')) as TabType
         const externalLetterId = String(form.get('externalLetterId') || '')
+
+        if (!externalLetterId) return data({ error: 'Missing externalLetterId' }, { status: 400 })
+                const modelByType = {
+                  PREPAY: prisma.prepayLetter,
+                  POSTPAY: prisma.postpayLetter,
+                  POSTPAY_OTHER: prisma.postpayOtherLetter,
+                }[type]
+            const letter = await modelByType.findFirst({
+                  where: { externalLetterId, customerId: user.customerId! },
+              select: { id: true },
+            })
+            if (!letter) return data({ error: 'Not found or not authorized' }, { status: 404 })
+
         const { fileBase64, filename } = await downloadLetterPdf({ type, externalLetterId })
         if (!fileBase64) return data({ error: 'No file returned' }, { status: 400 })
+        await audit({
+            request,
+            user,
+            action: 'LETTER_DOWNLOAD',
+            entityType: 'LETTER',
+            entityId: externalLetterId,
+            success: true,
+            message: `Downloaded ${type} letter ${externalLetterId}`,
+        })
+
         const buf = Buffer.from(fileBase64, 'base64')
         return new Response(buf, {
             headers: {

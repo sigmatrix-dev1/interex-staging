@@ -13,6 +13,7 @@ interface InterexHeaderProps {
     showBackButton?: boolean
     backTo?: string
     actions?: React.ReactNode
+    hideBrandBar?: boolean
 }
 
 export function InterexHeader({
@@ -23,6 +24,7 @@ export function InterexHeader({
                                   showBackButton = false,
                                   backTo = '/customer',
                                   actions,
+                                  hideBrandBar = false,
                               }: InterexHeaderProps) {
     const userRoles = user.roles.map(r => r.name)
     const loggedInUser = useOptionalUser()
@@ -37,6 +39,12 @@ export function InterexHeader({
                 href: '/admin/dashboard',
                 icon: 'settings',
                 description: 'System administration',
+            },
+            {
+                name: 'Audit Logs',
+                href: '/admin/audit-logs',
+                icon: 'file-text',
+                description: 'System audit trail',
             },
             {
                 name: 'Provider & eMDR Management',
@@ -176,7 +184,8 @@ export function InterexHeader({
     return (
         <header className="bg-white shadow">
             {/* Navigation Bar */}
-            <nav className="border-b border-gray-200">
+            {!hideBrandBar && (
+                <nav className="border-b border-gray-200">
                 <div className="max-w-9xl mx-auto px-4 sm:px-6 lg:px-8">
                     <div className="flex justify-between h-16">
                         <div className="flex">
@@ -247,6 +256,7 @@ export function InterexHeader({
                     </div>
                 </div>
             </nav>
+            )}
 
             {/* Page Header Section */}
             {title && (

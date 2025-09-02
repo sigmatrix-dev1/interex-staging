@@ -79,7 +79,6 @@ export default function MyNpisPage() {
     const isPending = useIsPending()
     useToast(toast)
 
-    // Hide the extra top header only while this page is mounted.
     React.useEffect(() => {
         const headers = Array.from(document.querySelectorAll('header')) as HTMLElement[]
         // If there are 2 headers, the first is the outer brand bar; hide just that one.

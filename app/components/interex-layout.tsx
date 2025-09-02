@@ -11,6 +11,7 @@ interface InterexLayoutProps {
   backTo?: string
   actions?: React.ReactNode
   currentPath?: string
+  hideBrandBar?: boolean
 }
 
 export function InterexLayout({ 
@@ -20,8 +21,9 @@ export function InterexLayout({
   subtitle, 
   showBackButton, 
   backTo, 
-  actions, 
-  currentPath 
+  actions,
+  currentPath,
+  hideBrandBar = false,
 }: InterexLayoutProps) {
   return (
     <div className="min-h-screen w-full bg-gray-50">
@@ -33,6 +35,7 @@ export function InterexLayout({
         showBackButton={showBackButton}
         backTo={backTo}
         actions={actions}
+        hideBrandBar={hideBrandBar}
       />
       <main>
         {children ?? <Outlet />}

@@ -1,14 +1,4 @@
 // app/routes/providers-emdr.tsx
-//
-// New shared page for Customer Admin, Provider Group Admin, and Basic User.
-// Everyone can use this module. Data shown is scoped by the signed-in user's role:
-//
-// - Customer Admin:     All NPIs for their Customer
-// - Provider Group Admin: Only NPIs in their Provider Group(s)
-// - Basic User:         Only NPIs explicitly assigned to them
-//
-// The "Fetch from PCG" action updates the central DB (same as System Admin page),
-// but the page will only display rows within the user's visibility scope.
 
 import * as React from 'react'
 import { createPortal } from 'react-dom'
@@ -39,6 +29,7 @@ import { requireUserId } from '#app/utils/auth.server.ts'
 import { prisma } from '#app/utils/db.server.ts'
 import { INTEREX_ROLES } from '#app/utils/interex-roles.ts'
 import { useIsPending } from '#app/utils/misc.tsx'
+import { audit } from '#app/utils/audit.server.ts'
 
 type Row = PcgProviderListItem & {
     customerName: string | null
@@ -305,8 +296,6 @@ async function buildScopeWhere(userId: string) {
         return { where: groupIds.length ? { providerGroupId: { in: groupIds } } : { id: { in: [] as string[] } }, roleNames }
     }
 
-    // Basic User: only providers explicitly assigned to the user (via Provider.userNpis)
-    // and scoped to the user's customer. This matches the pattern used in /my-npis.
     return {
         where: {
             customerId: user.customerId ?? undefined,
@@ -497,6 +486,14 @@ export async function action({ request }: ActionFunctionArgs) {
         } catch (err: any) {
             pcgError = err?.message || 'Failed to fetch providers from PCG.'
         }
+        await audit({
+            request,
+            user: await prisma.user.findUnique({ where: { id: userId }, select: { id: true, email: true, name: true, roles: { select: { name: true } }, customerId: true } }),
+            action: 'PCG_FETCH',
+            entityType: 'PROVIDER',
+            success: !pcgError,
+            message: pcgError ?? 'Fetched providers from PCG',
+        })
 
         const { rows, storedUpdates } = await composeRows(where)
         return data({
@@ -573,6 +570,17 @@ export async function action({ request }: ActionFunctionArgs) {
         } catch (err: any) {
             pcgError = err?.message || 'Failed to update provider.'
         }
+        await audit({
+            request,
+            user: await prisma.user.findUnique({ where: { id: userId }, select: { id: true, email: true, name: true, roles: { select: { name: true } }, customerId: true } }),
+            action: 'PROVIDER_UPDATE',
+            entityType: 'PROVIDER',
+            entityId: payload.provider_npi,
+            success: !pcgError,
+            message: pcgError ?? `Updated provider ${payload.provider_npi}`,
+            payload: { updateResponse },
+            meta: payload,
+    })
 
         const { rows, storedUpdates } = await composeRows(where)
         return data({
@@ -658,6 +666,14 @@ export async function action({ request }: ActionFunctionArgs) {
         }
 
         const { rows, storedUpdates } = await composeRows(where)
+        await audit({
+            request,
+            user: await prisma.user.findUnique({ where: { id: userId }, select: { id: true, email: true, name: true, roles: { select: { name: true } }, customerId: true } }),
+            action: 'REG_FETCH',
+            entityType: 'PROVIDER',
+            success: true,
+            message: `Fetched registration details for ${Object.keys(regById).length} providers`,
+        })
 
         return data({
             rows,
@@ -740,7 +756,7 @@ export async function action({ request }: ActionFunctionArgs) {
 
         const { rows, storedUpdates } = await composeRows(where)
 
-        return data({
+        const result = data({
             rows,
             meta: { totalForScope: rows.length },
             pcgError,
@@ -759,6 +775,18 @@ export async function action({ request }: ActionFunctionArgs) {
             },
             roleLabel: roleLabelFrom(roleNames),
         })
+        await audit({
+            request,
+            user: await prisma.user.findUnique({ where: { id: userId }, select: { id: true, email: true, name: true, roles: { select: { name: true } }, customerId: true } }),
+            action: intent === 'emdr-register' ? 'EMDR_REGISTER' : intent === 'emdr-deregister' ? 'EMDR_DEREGISTER' : 'EMDR_ELECTRONIC_ONLY',
+            entityType: 'PROVIDER',
+            entityId: providerNpi,
+            success: !pcgError,
+            message: pcgError ?? `eMDR action ${intent} for NPI ${providerNpi}`,
+            payload: { updateResponse, regById },
+            meta: { providerId, providerNpi },
+        })
+        return result
     }
 
     return data({ error: 'Invalid action' }, { status: 400 })
@@ -1413,14 +1441,14 @@ export default function ProvidersEmdrScopedPage() {
                         <table className="w-full table-fixed divide-y divide-gray-200">
                             <thead className="bg-gray-50">
                             <tr>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">NPI</th>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Name</th>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Reg Status</th>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Stage</th>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Errors</th>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Provider ID</th>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Actions</th>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Action Response</th>
+                                <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">NPI</th>
+                                <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Name</th>
+                                <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Reg Status</th>
+                                <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Stage</th>
+                                <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Errors</th>
+                                <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Provider ID</th>
+                                <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Actions</th>
+                                <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Action Response</th>
                             </tr>
                             </thead>
                             <tbody className="bg-white divide-y divide-gray-200">
@@ -1498,17 +1526,17 @@ export default function ProvidersEmdrScopedPage() {
                         <table className="w-full table-fixed divide-y divide-gray-200">
                             <thead className="bg-gray-50">
                             <tr>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">NPI</th>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Name</th>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Electronic Only?</th>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Reg Status</th>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Stage</th>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Last Change</th>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">TXN IDs</th>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Errors</th>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Provider ID</th>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Actions</th>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Action Response</th>
+                                <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">NPI</th>
+                                <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Name</th>
+                                <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Electronic Only?</th>
+                                <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Reg Status</th>
+                                <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Stage</th>
+                                <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Last Change</th>
+                                <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">TXN IDs</th>
+                                <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Errors</th>
+                                <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Provider ID</th>
+                                <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Actions</th>
+                                <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Action Response</th>
                             </tr>
                             </thead>
                             <tbody className="bg-white divide-y divide-gray-200">
@@ -1628,14 +1656,14 @@ export default function ProvidersEmdrScopedPage() {
                         <table className="w-full table-fixed divide-y divide-gray-200">
                             <thead className="bg-gray-50">
                             <tr>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">NPI</th>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Name</th>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Reg Status</th>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Stage</th>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Errors</th>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Provider ID</th>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Actions</th>
-                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Action Response</th>
+                                <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">NPI</th>
+                                <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Name</th>
+                                <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Reg Status</th>
+                                <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Stage</th>
+                                <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Errors</th>
+                                <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Provider ID</th>
+                                <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Actions</th>
+                                <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Action Response</th>
                             </tr>
                             </thead>
                             <tbody className="bg-white divide-y divide-gray-200">

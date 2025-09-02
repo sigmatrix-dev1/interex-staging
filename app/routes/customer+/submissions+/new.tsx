@@ -217,10 +217,13 @@ export async function action({ request }: ActionFunctionArgs) {
         }
     }
 
+    const authorTypeDb =
+        authorType === 'institutional' ? 'Institutional' : 'Individual'
+
     const newSubmission = await prisma.submission.create({
         data: {
             title,
-            authorType,
+            authorType: authorType,
             purposeOfSubmission: purposeOfSubmission as PrismaSubmissionPurpose,
             recipient,
             claimId: claimId || null,

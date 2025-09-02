@@ -28,7 +28,6 @@ export function latestStageFromPCG(s: { responseMessage?: string | null; events?
 
 export async function loader({ request }: LoaderFunctionArgs) {
     const userId = await requireUserId(request)
-
     const user = await prisma.user.findUnique({
         where: { id: userId },
         include: {
@@ -81,11 +80,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
         orderBy: { createdAt: 'desc' },
     })
 
-    const { token, expiresAt } = await getAccessToken()
-    const now = new Date()
-    const secondsRemaining = Math.max(0, Math.floor((expiresAt.getTime() - now.getTime()) / 1000))
-
-    return Response.json({
+    return data({
         user,
         submissions: submissions.map(s => ({
             ...s,
@@ -94,13 +89,8 @@ export async function loader({ request }: LoaderFunctionArgs) {
                 createdAt: e.createdAt.toISOString(),
             })),
         })),
-        token: {
-            value: token,
-            expiresAtIso: expiresAt.toISOString(),
-            secondsRemaining,
-            nowIso: now.toISOString(),
-        },
     })
+
 
 }
 
