@@ -1,3 +1,4 @@
+// app/routes/customer+/submissions.new.tsx
 import { getFormProps, getInputProps, getSelectProps, useForm } from '@conform-to/react'
 import { getZodConstraint, parseWithZod } from '@conform-to/zod'
 import { type SubmissionPurpose as PrismaSubmissionPurpose } from '@prisma/client'
@@ -25,7 +26,12 @@ import {
     SubmissionPurposeEnum,
     AuthorTypeEnum,
     formatEnum,
-    RecipientOptions,
+    type SubmissionPurpose,
+    type RecipientCategory,
+    RecipientCategories,
+    categoriesForPurpose,
+    recipientsFor,
+    recipientHelperLabel,
 } from '#app/domain/submission-enums.ts'
 import { buildCreateSubmissionPayload, pcgCreateSubmission } from '#app/services/pcg-hih.server.ts'
 import { requireUserId } from '#app/utils/auth.server.ts'
@@ -217,9 +223,6 @@ export async function action({ request }: ActionFunctionArgs) {
         }
     }
 
-    const authorTypeDb =
-        authorType === 'institutional' ? 'Institutional' : 'Individual'
-
     const newSubmission = await prisma.submission.create({
         data: {
             title,
@@ -287,11 +290,14 @@ export async function action({ request }: ActionFunctionArgs) {
             },
         })
 
-        return await redirectWithToast(`/customer/submissions/${newSubmission.id}/review?draft=${encodeURIComponent(draftNonce)}`, {
-            type: 'success',
-            title: 'Submission Created',
-            description: 'Metadata saved. Review your data next.',
-        })
+        return await redirectWithToast(
+            `/customer/submissions/${newSubmission.id}/review?draft=${encodeURIComponent(draftNonce)}`,
+            {
+                type: 'success',
+                title: 'Submission Created',
+                description: 'Metadata saved. Review your data next.',
+            },
+        )
     } catch (e: any) {
         await prisma.submission.update({
             where: { id: newSubmission.id },
@@ -331,29 +337,49 @@ export default function NewSubmission() {
 
     const [draftNonce] = React.useState(() => crypto.randomUUID())
 
-    // Recipient combo
-    const [recipientMode, setRecipientMode] = React.useState<'list' | 'custom'>('list')
-    const [selectedRecipient, setSelectedRecipient] = React.useState<string>('')
-    const [customRecipient, setCustomRecipient] = React.useState<string>('')
+    // ----- Purpose → Category → Recipient wiring -----
+    const [purpose, setPurpose] = React.useState<SubmissionPurpose | ''>('')
 
+    // use the helper's return shape (prevents id/value mismatches)
+    type CategoryOpt = ReturnType<typeof categoriesForPurpose>[number]
+    const categoryOptions: CategoryOpt[] = React.useMemo(
+        () => (purpose ? categoriesForPurpose(purpose as SubmissionPurpose) : []),
+        [purpose],
+    )
+
+    // strict guard to accept only enum keys
+    const isRecipientCategory = (v: string): v is RecipientCategory =>
+        (RecipientCategories as readonly string[]).includes(v)
+
+    const [categoryId, setCategoryId] = React.useState<RecipientCategory | ''>('')
+
+    type RecipientOpt = { value: string; label: string }
+    const recipientOptions: RecipientOpt[] = React.useMemo(
+        () => (purpose && categoryId ? recipientsFor(categoryId, purpose as SubmissionPurpose) : []),
+        [categoryId, purpose],
+    )
+
+    const [selectedRecipient, setSelectedRecipient] = React.useState<string>('')
+
+    // Keep hidden input in sync with chosen OID
     React.useEffect(() => {
         const hidId = fields.recipient?.id
         if (!hidId) return
         const hidden = document.getElementById(hidId) as HTMLInputElement | null
-        const val = recipientMode === 'list' ? selectedRecipient : customRecipient
-        if (hidden) hidden.value = val || ''
-    }, [recipientMode, selectedRecipient, customRecipient, fields.recipient?.id])
+        if (hidden) hidden.value = selectedRecipient || ''
+    }, [fields.recipient?.id, selectedRecipient])
 
-    // Avoid showing the OID twice in the help line
-    const recipientHelp = React.useMemo(() => {
-        if (recipientMode === 'list' && selectedRecipient) {
-            const opt = RecipientOptions.find(o => o.value === selectedRecipient)
-            if (!opt) return undefined
-            return opt.label.includes(opt.value) ? opt.label : `${opt.label} — ${opt.value}`
-        }
-        if (recipientMode === 'custom' && customRecipient) return 'Custom OID'
-        return undefined
-    }, [recipientMode, selectedRecipient, customRecipient])
+    // Reset category/recipient when purpose changes
+    React.useEffect(() => {
+        setCategoryId('')
+        setSelectedRecipient('')
+    }, [purpose])
+
+    // Helper line shows "Name (OID)"
+    const recipientHelp = React.useMemo(
+        () => (selectedRecipient ? recipientHelperLabel(selectedRecipient) : undefined),
+        [selectedRecipient],
+    )
 
     // Split kind -> drives autoSplit and document blocks
     const [splitKind, setSplitKind] = React.useState<'' | 'manual' | 'auto'>('')
@@ -426,7 +452,11 @@ export default function NewSubmission() {
             window.alert(err)
             setDropErrors(prev => ({ ...prev, [idx]: err }))
             setDocPicked(prev => ({ ...prev, [idx]: false }))
-            setDocSizes(prev => { const next = { ...prev }; delete next[idx]; return next })
+            setDocSizes(prev => {
+                const next = { ...prev }
+                delete next[idx]
+                return next
+            })
             setDzReset(prev => ({ ...prev, [idx]: (prev[idx] ?? 0) + 1 }))
             return
         }
@@ -547,7 +577,13 @@ export default function NewSubmission() {
                 message="Please don't refresh or close this tab while we create the draft in PCG."
             />
 
-            <Drawer key="drawer-new" isOpen onClose={() => navigate('/customer/submissions')} title="Create New Submission" size="fullscreen">
+            <Drawer
+                key="drawer-new"
+                isOpen
+                onClose={() => navigate('/customer/submissions')}
+                title="Create New Submission"
+                size="fullscreen"
+            >
                 <Form
                     method="POST"
                     {...getFormProps(form)}
@@ -574,10 +610,16 @@ export default function NewSubmission() {
                             </div>
 
                             <div className="md:col-span-6">
-                                <SelectField labelProps={{ children: 'Author Type *' }} selectProps={getSelectProps(fields.authorType)} errors={fields.authorType?.errors}>
+                                <SelectField
+                                    labelProps={{ children: 'Author Type *' }}
+                                    selectProps={getSelectProps(fields.authorType)}
+                                    errors={fields.authorType?.errors}
+                                >
                                     <option value="">Select author type</option>
                                     {AuthorTypeEnum.options.map(a => (
-                                        <option key={a} value={a}>{formatEnum(a)}</option>
+                                        <option key={a} value={a}>
+                                            {formatEnum(a)}
+                                        </option>
                                     ))}
                                 </SelectField>
                             </div>
@@ -585,60 +627,89 @@ export default function NewSubmission() {
                             <div className="md:col-span-6">
                                 <SelectField
                                     labelProps={{ children: 'Purpose of Submission *' }}
-                                    selectProps={getSelectProps(fields.purposeOfSubmission)}
+                                    selectProps={{
+                                        ...getSelectProps(fields.purposeOfSubmission),
+                                        onChange: (e: React.ChangeEvent<HTMLSelectElement>) => {
+                                            const v = e.target.value as SubmissionPurpose | ''
+                                            setPurpose(v)
+                                            // Let Conform handle the field value as well
+                                            const el = e.currentTarget
+                                            const nativeSetter = (Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value') as any)?.set
+                                            nativeSetter?.call(el, v)
+                                            el.dispatchEvent(new Event('input', { bubbles: true }))
+                                            el.dispatchEvent(new Event('change', { bubbles: true }))
+                                        },
+                                    }}
                                     errors={fields.purposeOfSubmission?.errors}
                                 >
                                     <option value="">Select purpose</option>
                                     {SubmissionPurposeValues.map(p => (
-                                        <option key={p} value={p}>{formatEnum(p)}</option>
+                                        <option key={p} value={p}>
+                                            {formatEnum(p)}
+                                        </option>
                                     ))}
                                 </SelectField>
                             </div>
 
-                            {/* Recipient combobox */}
+                            {/* Recipient Category + Recipient */}
                             <div className="md:col-span-6">
                                 <label className="block text-sm font-medium text-gray-700">Recipient *</label>
-                                <div className="mt-1 flex gap-2">
+                                <div className="mt-1 grid grid-cols-1 md:grid-cols-12 gap-2">
+                                    {/* Category */}
                                     <select
-                                        value={recipientMode}
-                                        onChange={e => setRecipientMode(e.target.value as 'list' | 'custom')}
-                                        className="w-36 rounded-md border border-gray-300 bg-white py-2 px-2 text-sm text-gray-900 focus:border-indigo-500 focus:outline-none focus:ring-indigo-500 shadow-sm"
+                                        value={categoryId}
+                                        onChange={e => {
+                                            const raw = e.target.value.trim()
+                                            setCategoryId(isRecipientCategory(raw) ? raw : '')
+                                            setSelectedRecipient('')
+                                        }}
+                                        disabled={!purpose}
+                                        className="md:col-span-5 rounded-md border border-gray-300 bg-white py-2 px-2 text-sm text-gray-900 focus:border-indigo-500 focus:outline-none focus:ring-indigo-500 shadow-sm"
+                                        aria-label="Recipient Category"
                                     >
-                                        <option value="list">Pick</option>
-                                        <option value="custom">Custom</option>
+                                        <option value="" disabled>
+                                            {purpose ? 'Select category' : 'Select purpose first'}
+                                        </option>
+                                        {categoryOptions.map(c => (
+                                            <option key={c.value} value={c.value} disabled={Boolean(c.disabled)}>
+                                                {c.label}
+                                            </option>
+                                        ))}
                                     </select>
 
-                                    {recipientMode === 'list' ? (
-                                        <select
-                                            value={selectedRecipient}
-                                            onChange={e => setSelectedRecipient(e.target.value)}
-                                            className="flex-1 rounded-md border border-gray-300 bg-white py-2 pl-3 pr-10 text-sm text-gray-900 focus:border-indigo-500 focus:outline-none focus:ring-indigo-500 shadow-sm"
-                                        >
-                                            <option value="" disabled>
-                                                Select recipient
+                                    {/* Recipient (name only) */}
+                                    <select
+                                        value={selectedRecipient}
+                                        onChange={e => setSelectedRecipient(e.target.value)}
+                                        disabled={!categoryId || recipientOptions.length === 0}
+                                        className="md:col-span-7 rounded-md border border-gray-300 bg-white py-2 pl-3 pr-10 text-sm text-gray-900 focus:border-indigo-500 focus:outline-none focus:ring-indigo-500 shadow-sm"
+                                        aria-label="Recipient OID"
+                                    >
+                                        <option value="" disabled>
+                                            {categoryId
+                                                ? recipientOptions.length ? 'Select recipient' : 'No recipients for this purpose'
+                                                : 'Select category first'}
+                                        </option>
+                                        {recipientOptions.map(opt => (
+                                            <option key={opt.value} value={opt.value}>
+                                                {opt.label}
                                             </option>
-                                            {RecipientOptions.map(opt => (
-                                                <option key={opt.value} value={opt.value}>
-                                                    {opt.label}
-                                                </option>
-                                            ))}
-                                        </select>
-                                    ) : (
-                                        <input
-                                            type="text"
-                                            value={customRecipient}
-                                            onChange={e => setCustomRecipient(e.target.value)}
-                                            placeholder="Enter OID (e.g., 2.16.840...)"
-                                            className="flex-1 rounded-md border border-gray-300 bg-white py-2 px-3 text-sm text-gray-900 focus:border-indigo-500 focus:outline-none focus:ring-indigo-500 shadow-sm"
-                                        />
-                                    )}
+                                        ))}
+                                    </select>
                                 </div>
                                 {recipientHelp ? <p className="mt-1 text-xs text-gray-500">{recipientHelp}</p> : null}
-                                <ErrorList errors={fields.recipient?.errors} id={`${fields.recipient?.id ?? 'recipient'}-errors`} />
+                                <ErrorList
+                                    errors={fields.recipient?.errors}
+                                    id={`${fields.recipient?.id ?? 'recipient'}-errors`}
+                                />
                             </div>
 
                             <div className="md:col-span-6">
-                                <SelectField labelProps={{ children: 'NPI *' }} selectProps={getSelectProps(fields.providerId)} errors={fields.providerId?.errors}>
+                                <SelectField
+                                    labelProps={{ children: 'NPI *' }}
+                                    selectProps={getSelectProps(fields.providerId)}
+                                    errors={fields.providerId?.errors}
+                                >
                                     <option value="">Select NPI</option>
                                     {availableNpis.map(p => (
                                         <option key={p.id} value={p.id}>
@@ -650,13 +721,21 @@ export default function NewSubmission() {
                             </div>
 
                             <div className="md:col-span-6">
-                                <Field labelProps={{ children: 'Claim ID *' }} inputProps={{ ...getInputProps(fields.claimId, { type: 'text' }) }} errors={fields.claimId?.errors} />
+                                <Field
+                                    labelProps={{ children: 'Claim ID *' }}
+                                    inputProps={{ ...getInputProps(fields.claimId, { type: 'text' }) }}
+                                    errors={fields.claimId?.errors}
+                                />
                             </div>
 
                             <div className="md:col-span-6">
                                 <Field
                                     labelProps={{ children: 'Case ID' }}
-                                    inputProps={{ ...getInputProps(fields.caseId, { type: 'text' }), placeholder: 'Up to 32 chars', maxLength: 32 }}
+                                    inputProps={{
+                                        ...getInputProps(fields.caseId, { type: 'text' }),
+                                        placeholder: 'Up to 32 chars',
+                                        maxLength: 32,
+                                    }}
                                     errors={fields.caseId?.errors}
                                 />
                             </div>
@@ -675,7 +754,11 @@ export default function NewSubmission() {
                             </div>
 
                             <div className="md:col-span-6">
-                                <SelectField labelProps={{ children: 'Send in X12' }} selectProps={getSelectProps(fields.sendInX12)} errors={fields.sendInX12?.errors}>
+                                <SelectField
+                                    labelProps={{ children: 'Send in X12' }}
+                                    selectProps={getSelectProps(fields.sendInX12)}
+                                    errors={fields.sendInX12?.errors}
+                                >
                                     <option value="false">False</option>
                                     <option value="true">True</option>
                                 </SelectField>

@@ -702,24 +702,32 @@ model AuditLog {
   userId    String?
   userEmail String?
   userName  String?
-  rolesCsv  String? // cached roles for quick filtering
+  rolesCsv  String?
 
   // scope
   customerId String?
 
   // what
-  action     String // e.g. LETTERS_SYNC, LETTER_DOWNLOAD, PCG_FETCH, PROVIDER_UPDATE, EMDR_REGISTER, ...
-  entityType String? // e.g. LETTER, PROVIDER
-  entityId   String? // e.g. externalLetterId or providerId/NPI
+  action     String
+  entityType String?
+  entityId   String?
 
   // request context
-  route     String? // e.g. /customer/letters
+  route     String?
   ip        String?
   userAgent String?
+  requestId String? // NEW
+  traceId   String? // NEW
+  spanId    String? // NEW
 
   // result
   success Boolean @default(true)
   message String?
+
+  // integrity / diffs (optional but useful)
+  beforeHash String? // NEW
+  afterHash  String? // NEW
+  prevHash   String? // NEW (for hash-chain)
 
   // raw payloads (kept small)
   meta    Json?
@@ -728,6 +736,71 @@ model AuditLog {
   @@index([createdAt])
   @@index([action, createdAt])
   @@index([entityType, entityId])
+  @@index([userId, createdAt])
+  @@index([customerId, createdAt])
+  @@index([requestId, createdAt]) // NEW
+}
+
+model AppLog {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+  level     String // debug | info | warn | error
+  module    String? // e.g., 'submissions', 'letters', 'auth'
+  event     String? // e.g., 'FILE_UPLOAD', 'BUTTON_CLICK', 'ROUTE_HIT'
+  message   String?
+
+  // correlation
+  requestId String?
+  traceId   String?
+  spanId    String?
+
+  // http/perf
+  method    String?
+  route     String?
+  status    Int?
+  latencyMs Int?
+  clientIp  String?
+  userAgent String?
+
+  // tenant/user
+  customerId String?
+  providerId String?
+  userId     String?
+
+  // custom structured fields
+  data Json?
+
+  @@index([createdAt])
+  @@index([level, createdAt])
+  @@index([module, event, createdAt])
+  @@index([requestId, createdAt])
+  @@index([customerId, createdAt])
+}
+
+model SecurityEvent {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+  kind      String // e.g., LOGIN, LOGOUT, MFA_ENROLL, MFA_VERIFY, ROLE_CHANGE, ACCESS_DENIED, RATE_LIMIT
+  message   String?
+
+  // actor & scope
+  userId     String?
+  userEmail  String?
+  customerId String?
+
+  // context
+  ip        String?
+  userAgent String?
+  requestId String?
+
+  // result & reason
+  success Boolean @default(true)
+  reason  String?
+
+  data Json?
+
+  @@index([createdAt])
+  @@index([kind, createdAt])
   @@index([userId, createdAt])
   @@index([customerId, createdAt])
 }

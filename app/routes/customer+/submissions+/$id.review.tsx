@@ -1,3 +1,4 @@
+// app/routes/customer+/$id.review.tsx
 import { getFormProps, getInputProps, getSelectProps, useForm } from '@conform-to/react'
 import { getZodConstraint, parseWithZod } from '@conform-to/zod'
 import { SubmissionEventKind, type SubmissionPurpose as PrismaSubmissionPurpose } from '@prisma/client'
@@ -27,7 +28,14 @@ import {
     SubmissionPurposeEnum,
     AuthorTypeEnum,
     formatEnum,
-    RecipientOptions,
+    type SubmissionPurpose,
+    type RecipientCategory,
+    RecipientCategories,
+    categoriesForPurpose,
+    recipientsFor,
+    recipientHelperLabel,
+    getRecipientByOid,
+    categoryForOid,
 } from '#app/domain/submission-enums.ts'
 import { buildCreateSubmissionPayload, pcgUpdateSubmission } from '#app/services/pcg-hih.server.ts'
 import { requireUserId } from '#app/utils/auth.server.ts'
@@ -403,31 +411,72 @@ export default function ReviewSubmission() {
         defaultValue: initial,
     })
 
-    // recipient combo based on initial
-    const initialIsKnown = React.useMemo(() => RecipientOptions.some(o => o.value === initial.recipient), [initial.recipient])
-    const [recipientMode, setRecipientMode] = React.useState<'list' | 'custom'>(initialIsKnown ? 'list' : 'custom')
-    const [selectedRecipient, setSelectedRecipient] = React.useState<string>(initialIsKnown ? initial.recipient : '')
-    const [customRecipient, setCustomRecipient] = React.useState<string>(initialIsKnown ? '' : initial.recipient)
+    // ----- Purpose → Category → Recipient (no custom mode) -----
+    const [purpose, setPurpose] = React.useState<SubmissionPurpose | ''>(
+        (initial.purposeOfSubmission as SubmissionPurpose) || ''
+    )
 
+    const initialRecipientKnown = React.useMemo(
+        () => Boolean(getRecipientByOid(initial.recipient)),
+        [initial.recipient]
+    )
+
+    // Category options (exact helper shape)
+    type CategoryOpt = ReturnType<typeof categoriesForPurpose>[number]
+    const categoryOptions: CategoryOpt[] = React.useMemo(
+        () => (purpose ? categoriesForPurpose(purpose as SubmissionPurpose) : []),
+        [purpose]
+    )
+
+    // Guard for category value
+    const isRecipientCategory = (v: string): v is RecipientCategory =>
+        (RecipientCategories as readonly string[]).includes(v)
+
+    const initialCategory = React.useMemo<RecipientCategory | ''>(() => {
+        if (!initialRecipientKnown) return ''
+        const cat = categoryForOid(initial.recipient)
+        return cat ?? ''
+    }, [initial.recipient, initialRecipientKnown])
+
+    const [categoryId, setCategoryId] = React.useState<RecipientCategory | ''>(initialCategory)
+
+    type RecipientOpt = { value: string; label: string }
+    const recipientOptions: RecipientOpt[] = React.useMemo(
+        () => (purpose && categoryId ? recipientsFor(categoryId, purpose as SubmissionPurpose) : []),
+        [categoryId, purpose]
+    )
+
+    const [selectedRecipient, setSelectedRecipient] = React.useState<string>(initialRecipientKnown ? initial.recipient : '')
+
+    // Clear recipient if no longer valid for the current purpose/category
+    React.useEffect(() => {
+        if (!purpose) {
+            setCategoryId('')
+            setSelectedRecipient('')
+            return
+        }
+        if (categoryId) {
+            const options = recipientsFor(categoryId, purpose as SubmissionPurpose)
+            if (!options.some(o => o.value === selectedRecipient)) {
+                setSelectedRecipient('')
+            }
+        }
+    }, [purpose, categoryId, selectedRecipient])
+
+    // Keep hidden input in sync with chosen OID
     React.useEffect(() => {
         const hidId = fields.recipient?.id
         if (!hidId) return
         const hidden = document.getElementById(hidId) as HTMLInputElement | null
-        const val = recipientMode === 'list' ? selectedRecipient : customRecipient
-        if (hidden) hidden.value = val || ''
-    }, [recipientMode, selectedRecipient, customRecipient, fields.recipient?.id])
+        if (hidden) hidden.value = selectedRecipient || ''
+    }, [fields.recipient?.id, selectedRecipient])
 
-    // Avoid showing the OID twice in the help line
-    const recipientHelp = React.useMemo(() => {
-        if (recipientMode === 'list' && selectedRecipient) {
-            const opt = RecipientOptions.find(o => o.value === selectedRecipient)
-            if (!opt) return undefined
-            return opt.label.includes(opt.value) ? opt.label : `${opt.label} — ${opt.value}`
-        }
-        if (recipientMode === 'custom' && customRecipient) return 'Custom OID'
-        return undefined
-    }, [recipientMode, selectedRecipient, customRecipient])
+    const recipientHelp = React.useMemo(
+        () => (selectedRecipient ? recipientHelperLabel(selectedRecipient) : undefined),
+        [selectedRecipient],
+    )
 
+    // Split kind controls
     const [splitKind, setSplitKind] = React.useState<'manual' | 'auto'>(initial.splitKind as 'manual' | 'auto')
     const [docCount, setDocCount] = React.useState<number>(Math.max(1, initialDocs?.length ?? 1))
 
@@ -683,7 +732,23 @@ export default function ReviewSubmission() {
                                 </div>
 
                                 <div className="md:col-span-6">
-                                    <SelectField labelProps={{ children: 'Purpose *' }} selectProps={getSelectProps(fields.purposeOfSubmission)} errors={fields.purposeOfSubmission?.errors}>
+                                    <SelectField
+                                        labelProps={{ children: 'Purpose *' }}
+                                        selectProps={{
+                                            ...getSelectProps(fields.purposeOfSubmission),
+                                            onChange: (e: React.ChangeEvent<HTMLSelectElement>) => {
+                                                const v = e.target.value as SubmissionPurpose | ''
+                                                setPurpose(v)
+                                                // keep Conform in sync
+                                                const el = e.currentTarget
+                                                const nativeSetter = (Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value') as any)?.set
+                                                nativeSetter?.call(el, v)
+                                                el.dispatchEvent(new Event('input', { bubbles: true }))
+                                                el.dispatchEvent(new Event('change', { bubbles: true }))
+                                            },
+                                        }}
+                                        errors={fields.purposeOfSubmission?.errors}
+                                    >
                                         {SubmissionPurposeValues.map((p: string) => (
                                             <option key={p} value={p}>
                                                 {formatEnum(p)}
@@ -692,44 +757,60 @@ export default function ReviewSubmission() {
                                     </SelectField>
                                 </div>
 
-                                {/* Recipient */}
+                                {/* Recipient (Category + Recipient only) */}
                                 <div className="md:col-span-6">
                                     <label className="block text-sm font-medium text-gray-700">Recipient *</label>
-                                    <div className="mt-1 flex gap-2">
+
+                                    {!initialRecipientKnown ? (
+                                        <div className="mt-1 mb-2 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                                            The current recipient OID isn’t in the directory. Please pick a valid recipient below to update this submission.
+                                        </div>
+                                    ) : null}
+
+                                    <div className="grid grid-cols-1 md:grid-cols-12 gap-2">
+                                        {/* Category */}
                                         <select
-                                            value={recipientMode}
-                                            onChange={e => setRecipientMode(e.target.value as 'list' | 'custom')}
-                                            className="w-36 rounded-md border border-gray-300 bg-white py-2 px-2 text-sm"
+                                            value={categoryId}
+                                            onChange={e => {
+                                                const raw = e.target.value.trim()
+                                                setCategoryId(isRecipientCategory(raw) ? raw : '')
+                                                setSelectedRecipient('')
+                                            }}
+                                            disabled={!purpose}
+                                            className="md:col-span-5 rounded-md border border-gray-300 bg-white py-2 px-2 text-sm text-gray-900 focus:border-indigo-500 focus:outline-none focus:ring-indigo-500 shadow-sm"
+                                            aria-label="Recipient Category"
                                         >
-                                            <option value="list">Pick</option>
-                                            <option value="custom">Custom</option>
+                                            <option value="" disabled>
+                                                {purpose ? 'Select category' : 'Select purpose first'}
+                                            </option>
+                                            {categoryOptions.map(c => (
+                                                <option key={c.value} value={c.value} disabled={Boolean(c.disabled)}>
+                                                    {c.label}
+                                                </option>
+                                            ))}
                                         </select>
 
-                                        {recipientMode === 'list' ? (
-                                            <select
-                                                value={selectedRecipient}
-                                                onChange={e => setSelectedRecipient(e.target.value)}
-                                                className="flex-1 rounded-md border border-gray-300 bg-white py-2 pl-3 pr-10 text-sm"
-                                            >
-                                                <option value="" disabled>
-                                                    Select recipient
+                                        {/* Recipient list */}
+                                        <select
+                                            value={selectedRecipient}
+                                            onChange={e => setSelectedRecipient(e.target.value)}
+                                            disabled={!categoryId || recipientOptions.length === 0}
+                                            className="md:col-span-7 rounded-md border border-gray-300 bg-white py-2 pl-3 pr-10 text-sm text-gray-900 focus:border-indigo-500 focus:outline-none focus:ring-indigo-500 shadow-sm"
+                                            aria-label="Recipient OID"
+                                        >
+                                            <option value="" disabled>
+                                                {categoryId
+                                                    ? recipientOptions.length ? 'Select recipient' : 'No recipients for this purpose'
+                                                    : 'Select category first'}
+                                            </option>
+                                            {recipientOptions.map(opt => (
+                                                <option key={opt.value} value={opt.value}>
+                                                    {opt.label}
                                                 </option>
-                                                {RecipientOptions.map(opt => (
-                                                    <option key={opt.value} value={opt.value}>
-                                                        {opt.label}
-                                                    </option>
-                                                ))}
-                                            </select>
-                                        ) : (
-                                            <input
-                                                type="text"
-                                                value={customRecipient}
-                                                onChange={e => setCustomRecipient(e.target.value)}
-                                                placeholder="Enter OID"
-                                                className="flex-1 rounded-md border border-gray-300 bg-white py-2 px-3 text-sm"
-                                            />
-                                        )}
+                                            ))}
+                                        </select>
                                     </div>
+
                                     {recipientHelp ? <p className="mt-1 text-xs text-gray-500">{recipientHelp}</p> : null}
                                     <ErrorList errors={fields.recipient?.errors} id={`${fields.recipient?.id ?? 'recipient'}-errors`} />
                                 </div>
@@ -876,7 +957,7 @@ export default function ReviewSubmission() {
                                             </div>
 
                                             <div className="md:col-span-6">
-                                                <label className="block text sm text-gray-700">Filename (.pdf) *</label>
+                                                <label className="block text-sm text-gray-700">Filename (.pdf) *</label>
                                                 <input
                                                     name={`doc_filename_${i}`}
                                                     type="text"
