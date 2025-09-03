@@ -2,7 +2,7 @@
 
 ## What was implemented
 
-I've successfully added Two-Factor Authentication (2FA) to your InterEx login system with the following features:
+Two-Factor Authentication (2FA) to the InterEx login system with the following features:
 
 ### Database Changes
 - Added `twoFactorSecret` and `twoFactorEnabled` fields to the User model
@@ -65,7 +65,7 @@ I've successfully added Two-Factor Authentication (2FA) to your InterEx login sy
 - 2FA bypass prevention - cannot complete login without valid code
 
 ## Next Steps
-You can now test the 2FA functionality by:
+You can test the 2FA functionality by:
 1. Running your app locally with `npm run dev`
 2. Creating a user account
 3. Setting up 2FA from the user dropdown
