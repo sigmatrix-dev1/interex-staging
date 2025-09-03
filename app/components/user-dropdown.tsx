@@ -41,6 +41,13 @@ export function UserDropdown() {
 							</Icon>
 						</Link>
 					</DropdownMenuItem>
+					<DropdownMenuItem asChild>
+						<Link prefetch="intent" to="/me/2fa">
+							<Icon className="text-body-md" name="lock-closed">
+								Two-Factor Auth
+							</Icon>
+						</Link>
+					</DropdownMenuItem>
 					<Form action="/logout" method="POST" ref={formRef}>
 						<DropdownMenuItem asChild>
 							<button type="submit" className="w-full">

@@ -4,7 +4,7 @@ import { EyeIcon, EyeSlashIcon } from '@heroicons/react/24/outline'
 import { type SEOHandle } from '@nasa-gcn/remix-seo'
 import { startAuthentication } from '@simplewebauthn/browser'
 import { useOptimistic, useState, useTransition } from 'react'
-import { data, Form, Link, useNavigate, useSearchParams } from 'react-router'
+import { data, Form, Link, redirect, useNavigate, useSearchParams } from 'react-router'
 import { HoneypotInputs } from 'remix-utils/honeypot/react'
 import { z } from 'zod'
 import { GeneralErrorBoundary } from '#app/components/error-boundary.tsx'
@@ -13,6 +13,7 @@ import { Spacer } from '#app/components/spacer.tsx'
 import { Icon } from '#app/components/ui/icon.tsx'
 import { StatusButton } from '#app/components/ui/status-button.tsx'
 import { login, requireAnonymous } from '#app/utils/auth.server.ts'
+import { prisma } from '#app/utils/db.server.ts'
 import {
 	ProviderConnectionForm,
 	providerNames,
@@ -20,7 +21,6 @@ import {
 import { checkHoneypot } from '#app/utils/honeypot.server.ts'
 import { getErrorMessage, useIsPending } from '#app/utils/misc.tsx'
 import { PasswordSchema, UsernameSchema } from '#app/utils/user-validation.ts'
-import { type Route } from './+types/login.ts'
 import { handleNewSession } from './login.server.ts'
 
 
@@ -39,12 +39,12 @@ const AuthenticationOptionsSchema = z.object({
 	options: z.object({ challenge: z.string() }),
 }) satisfies z.ZodType<{ options: PublicKeyCredentialRequestOptionsJSON }>
 
-export async function loader({ request }: Route.LoaderArgs) {
+export async function loader({ request }: { request: Request }) {
 	await requireAnonymous(request)
 	return {}
 }
 
-export async function action({ request }: Route.ActionArgs) {
+export async function action({ request }: { request: Request }) {
 	await requireAnonymous(request)
 	const formData = await request.formData()
 	await checkHoneypot(formData)
@@ -60,6 +60,21 @@ export async function action({ request }: Route.ActionArgs) {
 						message: 'Invalid username or password',
 					})
 					return z.NEVER
+				}
+
+				// Check if user has 2FA enabled
+				const user = await prisma.user.findUnique({ 
+					where: { id: session.userId }, 
+					select: { twoFactorEnabled: true } 
+				})
+				
+				if (user?.twoFactorEnabled) {
+					// Redirect to 2FA page instead of creating session
+					const url = new URL(`/auth/2fa`, 'http://localhost')
+					url.searchParams.set('userId', session.userId)
+					url.searchParams.set('remember', data.remember ? 'true' : 'false')
+					if (data.redirectTo) url.searchParams.set('redirectTo', data.redirectTo)
+					throw redirect(url.pathname + url.search)
 				}
 
 				return { ...data, session }
@@ -84,7 +99,7 @@ export async function action({ request }: Route.ActionArgs) {
 	})
 }
 
-export default function LoginPage({ actionData }: Route.ComponentProps) {
+export default function LoginPage({ actionData }: { actionData: any }) {
 	const isPending = useIsPending()
 	const [searchParams] = useSearchParams()
 	const redirectTo = searchParams.get('redirectTo')
@@ -305,7 +320,7 @@ function PasskeyLogin({
 	)
 }
 
-export const meta: Route.MetaFunction = () => {
+export const meta = () => {
 	return [{ title: 'Login to Interex' }]
 }
 

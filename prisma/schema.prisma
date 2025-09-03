@@ -21,6 +21,10 @@ model User {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  // 2FA fields
+  twoFactorSecret  String?
+  twoFactorEnabled Boolean @default(false)
+
   // Existing relationships
   image       UserImage?
   password    Password?
