@@ -52,7 +52,7 @@
     "@oslojs/crypto": "^1.0.1",
     "@oslojs/encoding": "^1.1.0",
     "@paralleldrive/cuid2": "^2.2.2",
-    "@prisma/client": "^6.14.0",
+    "@prisma/client": "^6.15.0",
     "@prisma/instrumentation": "^6.7.0",
     "@radix-ui/react-checkbox": "^1.2.3",
     "@radix-ui/react-dropdown-menu": "^2.1.12",
@@ -150,7 +150,7 @@
     "prettier": "^3.5.3",
     "prettier-plugin-sql": "^0.19.0",
     "prettier-plugin-tailwindcss": "^0.6.11",
-    "prisma": "^6.14.0",
+    "prisma": "^6.15.0",
     "react-router-devtools": "^5.0.5",
     "remix-flat-routes": "^0.8.5",
     "tsx": "^4.19.4",
@@ -164,11 +164,10 @@
     "node": "22"
   },
   "prisma": {
-    "seed": "tsx prisma/seed.ts"
+    "seed": "tsx prisma/seed-sigmatrix.ts"
   },
   "epic-stack": {
     "head": "282f32c3a555459d50e0f69fb8b95551159afe61",
     "date": "2025-05-27T17:34:36Z"
   }
 }
-
