@@ -109,11 +109,13 @@ const UpdateProviderSchema = z.object({
     providerId: z.string().min(1, 'Provider ID is required'),
     name: z.string().min(1, 'Provider name is required').max(200, 'Provider name must be less than 200 characters'),
     providerGroupId: z.string().optional(),
+    // Accepts boolean | string | array of strings (e.g., ["false","true"] when hidden+checkbox are both present)
     active: z
-        .union([z.boolean(), z.string()])
+        .union([z.boolean(), z.string(), z.array(z.string())])
         .transform(value => {
-            if (typeof value === 'boolean') return value
-            if (value === 'on' || value === 'true') return true
+            const last = Array.isArray(value) ? value[value.length - 1] : value
+            if (typeof last === 'boolean') return last
+            if (typeof last === 'string') return last === 'true' || last === 'on'
             return false
         })
         .optional(),
@@ -122,10 +124,15 @@ const UpdateProviderSchema = z.object({
 const ToggleActiveSchema = z.object({
     intent: z.literal('toggle-active'),
     providerId: z.string().min(1, 'Provider ID is required'),
-    active: z.union([z.boolean(), z.string()]).transform(v => {
-        if (typeof v === 'boolean') return v
-        return v === 'true' || v === 'on'
-    }),
+    // Be tolerant here too in case this form ever gets a hidden+checkbox pair in the future
+    active: z
+        .union([z.boolean(), z.string(), z.array(z.string())])
+        .transform(v => {
+            const last = Array.isArray(v) ? v[v.length - 1] : v
+            if (typeof last === 'boolean') return last
+            if (typeof last === 'string') return last === 'true' || last === 'on'
+            return false
+        }),
 })
 
 export async function loader({ request }: LoaderFunctionArgs) {

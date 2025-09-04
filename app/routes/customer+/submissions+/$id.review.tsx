@@ -122,15 +122,23 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     const isProviderGroupAdmin = user.roles.some(r => r.name === 'provider-group-admin') || isCustomerAdmin
 
     const availableNpis: Npi[] = isSystemAdmin
-        ? await prisma.provider.findMany({ select: { id: true, npi: true, name: true } })
+        ? await prisma.provider.findMany({
+            where: { active: true },
+            select: { id: true, npi: true, name: true },
+        })
         : isCustomerAdmin && user.customerId
-            ? await prisma.provider.findMany({ where: { customerId: user.customerId }, select: { id: true, npi: true, name: true } })
+            ? await prisma.provider.findMany({
+                where: { customerId: user.customerId, active: true },
+                select: { id: true, npi: true, name: true },
+            })
             : isProviderGroupAdmin && user.providerGroupId && user.customerId
                 ? await prisma.provider.findMany({
-                    where: { customerId: user.customerId, providerGroupId: user.providerGroupId },
+                    where: { customerId: user.customerId, providerGroupId: user.providerGroupId, active: true },
                     select: { id: true, npi: true, name: true },
                 })
-                : user.userNpis.map(un => ({ id: un.provider.id, npi: un.provider.npi, name: un.provider.name }))
+                : user.userNpis
+                    .filter(un => un.provider?.active)
+                    .map(un => ({ id: un.provider.id, npi: un.provider.npi, name: un.provider.name }))
 
     const metaEvent =
         submission.events.find(e => e.kind === SubmissionEventKind.META_UPDATED) ??
@@ -230,6 +238,9 @@ export async function action({ request }: ActionFunctionArgs) {
     const provider = await prisma.provider.findUnique({ where: { id: v.providerId }, include: { providerGroup: true } })
     if (!provider || (!isSystemAdmin && provider.customerId !== user.customerId)) {
         return data({ result: parsed.reply({ formErrors: ['Invalid provider (NPI) selection'] }) }, { status: 400 })
+    }
+    if (!provider.active) {
+        return data({ result: parsed.reply({ formErrors: ['Selected provider is inactive'] }) }, { status: 400 })
     }
     if (!isSystemAdmin) {
         if (isProviderGroupAdmin && user.providerGroupId) {
@@ -421,6 +432,9 @@ export default function ReviewSubmission() {
         [initial.recipient]
     )
 
+    // Recipient is locked in review step
+    const recipientLocked = true
+
     // Category options (exact helper shape)
     type CategoryOpt = ReturnType<typeof categoriesForPurpose>[number]
     const categoryOptions: CategoryOpt[] = React.useMemo(
@@ -450,6 +464,7 @@ export default function ReviewSubmission() {
 
     // Clear recipient if no longer valid for the current purpose/category
     React.useEffect(() => {
+        if (recipientLocked) return
         if (!purpose) {
             setCategoryId('')
             setSelectedRecipient('')
@@ -461,15 +476,15 @@ export default function ReviewSubmission() {
                 setSelectedRecipient('')
             }
         }
-    }, [purpose, categoryId, selectedRecipient])
+    }, [purpose, categoryId, selectedRecipient, recipientLocked])
 
-    // Keep hidden input in sync with chosen OID
+    // Keep hidden input in sync with chosen OID (or lock to initial)
     React.useEffect(() => {
         const hidId = fields.recipient?.id
         if (!hidId) return
         const hidden = document.getElementById(hidId) as HTMLInputElement | null
-        if (hidden) hidden.value = selectedRecipient || ''
-    }, [fields.recipient?.id, selectedRecipient])
+        if (hidden) hidden.value = recipientLocked ? (initial.recipient || '') : (selectedRecipient || '')
+    }, [fields.recipient?.id, selectedRecipient, recipientLocked, initial.recipient])
 
     const recipientHelp = React.useMemo(
         () => (selectedRecipient ? recipientHelperLabel(selectedRecipient) : undefined),
@@ -760,6 +775,8 @@ export default function ReviewSubmission() {
                                 {/* Recipient (Category + Recipient only) */}
                                 <div className="md:col-span-6">
                                     <label className="block text-sm font-medium text-gray-700">Recipient *</label>
+                                    {/* subtle locked note */}
+                                    <p className="mt-1 text-xs text-gray-500">🔒 This field is locked during review.</p>
 
                                     {!initialRecipientKnown ? (
                                         <div className="mt-1 mb-2 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
@@ -776,8 +793,10 @@ export default function ReviewSubmission() {
                                                 setCategoryId(isRecipientCategory(raw) ? raw : '')
                                                 setSelectedRecipient('')
                                             }}
-                                            disabled={!purpose}
-                                            className="md:col-span-5 rounded-md border border-gray-300 bg-white py-2 px-2 text-sm text-gray-900 focus:border-indigo-500 focus:outline-none focus:ring-indigo-500 shadow-sm"
+                                            disabled={true}
+                                            aria-disabled="true"
+                                            title="Locked during review"
+                                            className="md:col-span-5 rounded-md border border-gray-300 bg-gray-100 text-gray-500 cursor-not-allowed opacity-80 py-2 px-2 text-sm focus:border-gray-300 focus:outline-none focus:ring-0 shadow-sm"
                                             aria-label="Recipient Category"
                                         >
                                             <option value="" disabled>
@@ -794,8 +813,10 @@ export default function ReviewSubmission() {
                                         <select
                                             value={selectedRecipient}
                                             onChange={e => setSelectedRecipient(e.target.value)}
-                                            disabled={!categoryId || recipientOptions.length === 0}
-                                            className="md:col-span-7 rounded-md border border-gray-300 bg-white py-2 pl-3 pr-10 text-sm text-gray-900 focus:border-indigo-500 focus:outline-none focus:ring-indigo-500 shadow-sm"
+                                            disabled={true}
+                                            aria-disabled="true"
+                                            title="Locked during review"
+                                            className="md:col-span-7 rounded-md border border-gray-300 bg-gray-100 text-gray-500 cursor-not-allowed opacity-80 py-2 pl-3 pr-10 text-sm focus:border-gray-300 focus:outline-none focus:ring-0 shadow-sm"
                                             aria-label="Recipient OID"
                                         >
                                             <option value="" disabled>

@@ -48,7 +48,6 @@ export async function loader({ request }: LoaderFunctionArgs) {
         })
 
     const url = new URL(request.url)
-    const type = (url.searchParams.get('type') as TabType) ?? 'PREPAY'
     const search = url.searchParams.get('search')?.trim() || ''
 
     const baseWhere: any = { customerId: user.customerId }
@@ -71,33 +70,36 @@ export async function loader({ request }: LoaderFunctionArgs) {
             },
         },
     } as const
+    const commonOrder = [{ letterDate: 'desc' }, { createdAt: 'desc' }] as const
 
-    let letters: any[] = []
-
-    if (type === 'PREPAY') {
-        letters = await prisma.prepayLetter.findMany({
+    const [prepayLetters, postpayLetters, postpayOtherLetters] = await Promise.all([
+        prisma.prepayLetter.findMany({
             where: baseWhere,
             include: commonInclude,
-            orderBy: [{ letterDate: 'desc' }, { createdAt: 'desc' }],
+            orderBy: commonOrder as any,
             take: 500,
-        })
-    } else if (type === 'POSTPAY') {
-        letters = await prisma.postpayLetter.findMany({
+        }),
+        prisma.postpayLetter.findMany({
             where: baseWhere,
             include: commonInclude,
-            orderBy: [{ letterDate: 'desc' }, { createdAt: 'desc' }],
+            orderBy: commonOrder as any,
             take: 500,
-        })
-    } else {
-        letters = await prisma.postpayOtherLetter.findMany({
+        }),
+        prisma.postpayOtherLetter.findMany({
             where: baseWhere,
             include: commonInclude,
-            orderBy: [{ letterDate: 'desc' }, { createdAt: 'desc' }],
+            orderBy: commonOrder as any,
             take: 500,
-        })
-    }
+        }),
+    ])
 
-    return data({ user, type, letters })
+    return data({
+        user,
+        search,
+        prepayLetters,
+        postpayLetters,
+        postpayOtherLetters,
+    })
 }
 
 export async function action({ request }: ActionFunctionArgs) {
@@ -169,7 +171,7 @@ export async function action({ request }: ActionFunctionArgs) {
         if (!externalLetterId)
             return data({ error: 'Missing externalLetterId' }, { status: 400 })
 
-        // ---- FIX: branch per type so the Prisma call is type-safe
+        // Verify the letter belongs to this customer and type
         let letter: { id: string } | null = null
         if (type === 'PREPAY') {
             letter = await prisma.prepayLetter.findFirst({
@@ -187,7 +189,6 @@ export async function action({ request }: ActionFunctionArgs) {
                 select: { id: true },
             })
         }
-        // ---- end fix
 
         if (!letter) return data({ error: 'Not found or not authorized' }, { status: 404 })
 
@@ -218,74 +219,104 @@ export async function action({ request }: ActionFunctionArgs) {
 }
 
 export default function CustomerLettersPage() {
-    const { user, type, letters } = useLoaderData<typeof loader>()
+    const {
+        user,
+        search,
+        prepayLetters,
+        postpayLetters,
+        postpayOtherLetters,
+    } = useLoaderData<typeof loader>()
     const isPending = useIsPending()
 
     const canSync = user.roles.some(r =>
         [INTEREX_ROLES.CUSTOMER_ADMIN, INTEREX_ROLES.PROVIDER_GROUP_ADMIN, INTEREX_ROLES.BASIC_USER].includes(r.name),
     )
 
-    return (
-        <InterexLayout
-            user={user}
-            title="Letters"
-            subtitle="Letters for your organization"
-            showBackButton
-            backTo="/customer"
-            currentPath="/customer/letters"
-        >
-            <LoadingOverlay show={Boolean(isPending)} />
+    // yyyy-MM-DD defaults: start = 30 days ago, end = today
+    const today = React.useMemo(() => new Date(), [])
+    const endDefault = React.useMemo(() => today.toISOString().slice(0, 10), [today])
+    const startDefault = React.useMemo(() => {
+        const d = new Date(today)
+        d.setDate(d.getDate() - 30)
+        return d.toISOString().slice(0, 10)
+    }, [today])
 
-            <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-4">
-                <div className="bg-white shadow rounded-md p-4 flex flex-wrap items-end gap-4">
-                    <Form method="get" className="flex flex-wrap items-end gap-3">
-                        <div className="flex flex-col">
-                            <label className="text-xs text-gray-500">Type</label>
-                            <select
-                                name="type"
-                                defaultValue={type}
-                                className="border rounded px-2 py-1 text-sm"
-                                onChange={e => e.currentTarget.form?.submit()}
-                            >
-                                <option value="PREPAY">Pre-pay</option>
-                                <option value="POSTPAY">Post-pay</option>
-                                <option value="POSTPAY_OTHER">Post-pay (Other)</option>
-                            </select>
-                        </div>
-                        <div className="flex flex-col">
-                            <label className="text-xs text-gray-500">Search</label>
-                            <input
-                                name="search"
-                                placeholder="NPI / Letter ID / Program…"
-                                className="border rounded px-2 py-1 text-sm"
-                            />
-                        </div>
-                        <button className="bg-gray-800 text-white text-sm rounded px-3 py-1.5">
-                            Apply
-                        </button>
-                    </Form>
+    function SearchBar() {
+        return (
+            <div className="bg-white shadow rounded-md p-4 flex flex-wrap items-end gap-4">
+                <Form method="get" className="flex flex-wrap items-end gap-3">
+                    <div className="flex flex-col">
+                        <label className="text-xs text-gray-500">Search</label>
+                        <input
+                            name="search"
+                            defaultValue={search}
+                            placeholder="NPI / Letter ID / Program…"
+                            className="border rounded px-2 py-1 text-sm"
+                        />
+                    </div>
+                    <button className="bg-gray-800 text-white text-sm rounded px-3 py-1.5">
+                        Apply
+                    </button>
+                </Form>
+            </div>
+        )
+    }
 
-                    {canSync && (
-                        <Form method="post" className="ml-auto flex items-end gap-3">
-                            <input type="hidden" name="intent" value="sync" />
-                            <input type="hidden" name="type" value={type} />
-                            <div>
-                                <label className="block text-xs text-gray-500">Start date</label>
-                                <input type="date" name="startDate" required className="border rounded px-2 py-1 text-sm" />
-                            </div>
-                            <div>
-                                <label className="block text-xs text-gray-500">End date</label>
-                                <input type="date" name="endDate" required className="border rounded px-2 py-1 text-sm" />
-                            </div>
-                            <button className="bg-blue-600 text-white text-sm font-semibold rounded px-3 py-1.5 disabled:opacity-50">
-                                <Icon name="update" className="inline h-4 w-4 mr-1" />
-                                Fetch new letters
-                            </button>
-                        </Form>
-                    )}
+    function SyncBar({ type }: { type: TabType }) {
+        if (!canSync) return null
+        return (
+            <Form method="post" className="ml-auto flex items-end gap-3">
+                <input type="hidden" name="intent" value="sync" />
+                <input type="hidden" name="type" value={type} />
+                <div>
+                    <label className="block text-xs text-gray-500">Start date</label>
+                    <input
+                        type="date"
+                        name="startDate"
+                        required
+                        defaultValue={startDefault}
+                        className="border rounded px-2 py-1 text-sm"
+                    />
                 </div>
+                <div>
+                    <label className="block text-xs text-gray-500">End date</label>
+                    <input
+                        type="date"
+                        name="endDate"
+                        required
+                        defaultValue={endDefault}
+                        className="border rounded px-2 py-1 text-sm"
+                    />
+                </div>
+                <button className="bg-blue-600 text-white text-sm font-semibold rounded px-3 py-1.5 disabled:opacity-50">
+                    <Icon name="update" className="inline h-4 w-4 mr-1" />
+                    Fetch new letters
+                </button>
+            </Form>
+        )
+    }
 
-                <div className="bg-white shadow rounded-md overflow-x-auto">
+    function LettersTable({
+                              rows,
+                              type,
+                              title,
+                              subtitle,
+                          }: {
+        rows: any[]
+        type: TabType
+        title: string
+        subtitle?: string
+    }) {
+        return (
+            <div className="bg-white shadow rounded-md overflow-hidden">
+                <div className="px-4 sm:px-6 py-3 border-b border-gray-200 flex items-center gap-3">
+                    <div className="flex-1">
+                        <h2 className="text-base font-semibold text-gray-900">{title}</h2>
+                        {subtitle ? <p className="text-xs text-gray-500">{subtitle}</p> : null}
+                    </div>
+                    <SyncBar type={type} />
+                </div>
+                <div className="overflow-x-auto">
                     <table className="min-w-full divide-y divide-gray-200">
                         <thead className="bg-gray-50">
                         <tr>
@@ -305,14 +336,14 @@ export default function CustomerLettersPage() {
                         </tr>
                         </thead>
                         <tbody className="bg-white divide-y divide-gray-200">
-                        {letters.length === 0 ? (
+                        {rows.length === 0 ? (
                             <tr>
                                 <td colSpan={13} className="px-4 py-6 text-sm text-gray-500 text-center">
                                     No letters found.
                                 </td>
                             </tr>
                         ) : (
-                            letters.map((row: any) => (
+                            rows.map((row: any) => (
                                 <tr key={row.externalLetterId} className="hover:bg-gray-50">
                                     <td className="px-4 py-2 text-sm font-mono">{row.externalLetterId}</td>
                                     <td className="px-4 py-2 text-sm">{row.providerNpi}</td>
@@ -323,10 +354,10 @@ export default function CustomerLettersPage() {
                                         {row?.provider?.userNpis?.map((x: any) => x.user.username).filter(Boolean).join(', ') || '—'}
                                     </td>
                                     <td className="px-4 py-2 text-sm">
-                                        {row.letterDate ? new Date(row.letterDate).toLocaleDateString() : '—'}
+                                        {row.letterDate ? new Date(row.letterDate).toISOString().slice(0, 10) : '—'}
                                     </td>
                                     <td className="px-4 py-2 text-sm">
-                                        {row.respondBy ? new Date(row.respondBy).toLocaleDateString() : '—'}
+                                        {row.respondBy ? new Date(row.respondBy).toISOString().slice(0, 10) : '—'}
                                     </td>
                                     <td className="px-4 py-2 text-sm">{row.jurisdiction ?? '—'}</td>
                                     <td className="px-4 py-2 text-sm">{row.programName ?? '—'}</td>
@@ -348,6 +379,46 @@ export default function CustomerLettersPage() {
                         </tbody>
                     </table>
                 </div>
+            </div>
+        )
+    }
+
+    return (
+        <InterexLayout
+            user={user}
+            title="Letters"
+            subtitle="Letters for your organization by type, with per-section sync"
+            showBackButton
+            backTo="/customer"
+            currentPath="/customer/letters"
+        >
+            <LoadingOverlay show={Boolean(isPending)} />
+
+            <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-6">
+                {/* Global search (applies to all sections) */}
+                <SearchBar />
+
+                {/* PREPAY */}
+                <LettersTable
+                    rows={prepayLetters as any[]}
+                    type="PREPAY"
+                    title="Pre-pay Letters"
+                />
+
+                {/* POSTPAY */}
+                <LettersTable
+                    rows={postpayLetters as any[]}
+                    type="POSTPAY"
+                    title="Post-pay Letters"
+                />
+
+                {/* POSTPAY OTHER */}
+                <LettersTable
+                    rows={postpayOtherLetters as any[]}
+                    type="POSTPAY_OTHER"
+                    title="Post-pay Letters (Other)"
+                    subtitle="These are the 'Other' category from the Post-pay feed."
+                />
             </div>
         </InterexLayout>
     )

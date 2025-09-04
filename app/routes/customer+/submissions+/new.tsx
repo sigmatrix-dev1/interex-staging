@@ -64,10 +64,16 @@ const CreateSubmissionSchema = z.object({
 
     // carries the per-tab nonce so we can move cached files once we have a submissionId
     draftNonce: z.string().min(1, 'Missing draft nonce'),
+
+    // present only in retry mode
+    retrySubmissionId: z.string().optional(),
 })
 
 export async function loader({ request }: LoaderFunctionArgs) {
     const userId = await requireUserId(request)
+    const url = new URL(request.url)
+    const retryId = url.searchParams.get('retry') || undefined
+
     const user = await prisma.user.findUnique({
         where: { id: userId },
         include: {
@@ -88,20 +94,77 @@ export async function loader({ request }: LoaderFunctionArgs) {
     }
 
     const availableNpis: Npi[] = isSystemAdmin
-        ? await prisma.provider.findMany({ select: { id: true, npi: true, name: true } })
+        ? await prisma.provider.findMany({
+            where: { active: true },
+            select: { id: true, npi: true, name: true },
+        })
         : isCustomerAdmin && user.customerId
             ? await prisma.provider.findMany({
-                where: { customerId: user.customerId },
+                where: { customerId: user.customerId, active: true },
                 select: { id: true, npi: true, name: true },
             })
             : isProviderGroupAdmin && user.providerGroupId && user.customerId
                 ? await prisma.provider.findMany({
-                    where: { customerId: user.customerId, providerGroupId: user.providerGroupId },
+                    where: { customerId: user.customerId, providerGroupId: user.providerGroupId, active: true },
                     select: { id: true, npi: true, name: true },
                 })
-                : user.userNpis.map(un => ({ id: un.provider.id, npi: un.provider.npi, name: un.provider.name }))
+                : user.userNpis
+                    .filter(un => un.provider?.active)
+                    .map(un => ({ id: un.provider.id, npi: un.provider.npi, name: un.provider.name }))
 
-    return data({ user, availableNpis })
+    // ---- Retry prefill support ----
+    let retryInitial:
+        | (Partial<Record<string, any>> & { retrySubmissionId: string; docCount?: number })
+        | null = null
+    let retryInitialDocs: Array<{ name: string; filename: string; attachmentControlNum: string }> = []
+
+    if (retryId) {
+        const submission = await prisma.submission.findFirst({
+            where: { id: retryId },
+            include: {
+                provider: { select: { id: true, npi: true, name: true, customerId: true } },
+                events: {
+                    select: { id: true, kind: true, payload: true, createdAt: true },
+                    orderBy: { createdAt: 'desc' },
+                    take: 50,
+                },
+            },
+        })
+        if (submission) {
+            // pull the payload we wrote at step 1
+            const metaEvent =
+                submission.events.find(e => e.kind === 'DRAFT_CREATED') ??
+                submission.events.find(e => e.kind === 'META_UPDATED')
+            const latestMeta = (metaEvent?.payload as any) ?? {}
+            const docSet = Array.isArray(latestMeta?.document_set) ? latestMeta.document_set : []
+
+            retryInitial = {
+                retrySubmissionId: submission.id,
+                title: latestMeta?.name ?? submission.title ?? '',
+                authorType:
+                    latestMeta?.author_type ?? (submission.authorType?.toLowerCase() === 'institutional' ? 'institutional' : 'individual'),
+                purposeOfSubmission: latestMeta?.purposeOfSubmission ?? submission.purposeOfSubmission ?? '',
+                recipient: latestMeta?.intended_recepient ?? submission.recipient ?? '',
+                providerId: submission.provider?.id ?? '',
+                claimId: latestMeta?.esMD_claim_id ?? submission.claimId ?? '',
+                caseId: latestMeta?.esmd_case_id ?? submission.caseId ?? '',
+                comments: latestMeta?.comments ?? submission.comments ?? '',
+                splitKind: (latestMeta?.auto_split ?? submission.autoSplit) ? 'auto' : 'manual',
+                autoSplit: String(Boolean(latestMeta?.auto_split ?? submission.autoSplit ?? false)),
+                sendInX12: String(Boolean(latestMeta?.bSendinX12 ?? submission.sendInX12 ?? false)),
+                threshold: Number(latestMeta?.threshold ?? submission.threshold ?? 100),
+                docCount: docSet.length || undefined,
+            }
+
+            retryInitialDocs = docSet.map((d: any) => ({
+                name: d.name || '',
+                filename: d.filename || '',
+                attachmentControlNum: d.attachmentControlNum || '',
+            }))
+        }
+    }
+
+    return data({ user, availableNpis, retryInitial, retryInitialDocs })
 }
 
 // Helper to pull N document blocks from formData
@@ -183,6 +246,7 @@ export async function action({ request }: ActionFunctionArgs) {
         sendInX12,
         threshold,
         draftNonce,
+        retrySubmissionId,
     } = parsed.value as any
 
     if (splitKind === 'manual' && ![1, 3, 4, 5].includes(Number(docCount))) {
@@ -204,6 +268,9 @@ export async function action({ request }: ActionFunctionArgs) {
     if (!provider || (provider.customerId !== user.customerId && !isSystemAdmin)) {
         return data({ result: parsed.reply({ formErrors: ['Invalid provider selection'] }) }, { status: 400 })
     }
+    if (!provider.active) {
+        return data({ result: parsed.reply({ formErrors: ['Selected provider is inactive'] }) }, { status: 400 })
+    }
     if (!isSystemAdmin) {
         if (isProviderGroupAdmin && user.providerGroupId) {
             if (provider.providerGroupId !== user.providerGroupId) {
@@ -223,6 +290,110 @@ export async function action({ request }: ActionFunctionArgs) {
         }
     }
 
+    const pcgPayload = buildCreateSubmissionPayload({
+        purposeOfSubmission,
+        author_npi: provider.npi,
+        author_type: authorType,
+        name: title,
+        esMD_claim_id: claimId ?? '',
+        esmd_case_id: caseId ?? '',
+        comments: comments ?? '',
+        intended_recepient: recipient,
+        auto_split: autoSplit,
+        bSendinX12: sendInX12,
+        threshold,
+        document_set: documents.map((d: any) => ({
+            name: d.name,
+            split_no: d.split_no,
+            filename: d.filename,
+            document_type: d.document_type,
+            attachmentControlNum: d.attachmentControlNum,
+        })),
+    })
+
+    // ----- Normal create vs Retry create (update existing row) -----
+    if (retrySubmissionId) {
+        // Update the existing submission row before trying PCG again
+        const existing = await prisma.submission.findUnique({ where: { id: retrySubmissionId } })
+        if (!existing) {
+            return data({ result: parsed.reply({ formErrors: ['Retry submission not found'] }) }, { status: 404 })
+        }
+
+        await prisma.submission.update({
+            where: { id: retrySubmissionId },
+            data: {
+                title,
+                authorType,
+                purposeOfSubmission: purposeOfSubmission as PrismaSubmissionPurpose,
+                recipient,
+                claimId: claimId || null,
+                caseId: caseId || null,
+                comments: comments || null,
+                autoSplit,
+                sendInX12,
+                threshold,
+                providerId,
+                status: 'ERROR', // keep as error until PCG accepts
+            },
+        })
+
+        await prisma.submissionEvent.create({
+            data: {
+                submissionId: retrySubmissionId,
+                kind: 'DRAFT_CREATED',
+                message: 'Local draft updated for retry (payload audit)',
+                payload: pcgPayload,
+            },
+        })
+
+        try {
+            const pcgResp = await pcgCreateSubmission(pcgPayload)
+            if (!pcgResp?.submission_id) throw new Error('PCG did not return a submission_id')
+
+            await prisma.submission.update({
+                where: { id: retrySubmissionId },
+                data: { pcgSubmissionId: pcgResp.submission_id, responseMessage: 'Draft', status: 'DRAFT' },
+            })
+
+            await prisma.submissionEvent.create({
+                data: {
+                    submissionId: retrySubmissionId,
+                    kind: 'PCG_CREATE_SUCCESS',
+                    message: `PCG submission created (id ${pcgResp.submission_id})`,
+                    payload: pcgResp,
+                },
+            })
+
+            return await redirectWithToast(
+                `/customer/submissions/${retrySubmissionId}/review?draft=${encodeURIComponent(draftNonce)}`,
+                {
+                    type: 'success',
+                    title: 'Submission Created',
+                    description: 'Metadata saved. Review your data next.',
+                },
+            )
+        } catch (e: any) {
+            await prisma.submission.update({
+                where: { id: retrySubmissionId },
+                data: { status: 'ERROR', errorDescription: e?.message?.toString?.() ?? 'Create failed' },
+            })
+            await prisma.submissionEvent.create({
+                data: {
+                    submissionId: retrySubmissionId,
+                    kind: 'PCG_CREATE_ERROR',
+                    message: e?.message?.toString?.() ?? 'Create failed',
+                },
+            })
+
+            return await redirectWithToast(`/customer/submissions`, {
+                type: 'error',
+                title: 'Create Failed',
+                description: e?.message?.toString?.() ?? 'Unable to create submission',
+            })
+        }
+    }
+
+    // ----- Normal (non-retry) flow -----
     const newSubmission = await prisma.submission.create({
         data: {
             title,
@@ -240,27 +411,6 @@ export async function action({ request }: ActionFunctionArgs) {
             customerId: isSystemAdmin ? provider.customerId : user.customerId!,
             status: 'DRAFT',
         },
-    })
-
-    const pcgPayload = buildCreateSubmissionPayload({
-        purposeOfSubmission,
-        author_npi: provider.npi,
-        author_type: authorType,
-        name: title,
-        esMD_claim_id: claimId ?? '',
-        esmd_case_id: caseId ?? '',
-        comments: comments ?? '',
-        intended_recepient: recipient,
-        auto_split: autoSplit,
-        bSendinX12: sendInX12,
-        threshold,
-        document_set: documents.map(d => ({
-            name: d.name,
-            split_no: d.split_no,
-            filename: d.filename,
-            document_type: d.document_type,
-            attachmentControlNum: d.attachmentControlNum,
-        })),
     })
 
     await prisma.submissionEvent.create({
@@ -320,7 +470,12 @@ export async function action({ request }: ActionFunctionArgs) {
 }
 
 export default function NewSubmission() {
-    const { user, availableNpis } = useLoaderData<typeof loader>()
+    const { user, availableNpis, retryInitial, retryInitialDocs } = useLoaderData<typeof loader>() as {
+        user: any
+        availableNpis: Npi[]
+        retryInitial: (Record<string, any> & { retrySubmissionId: string; docCount?: number }) | null
+        retryInitialDocs: Array<{ name: string; filename: string; attachmentControlNum: string }>
+    }
     const actionData = useActionData<typeof action>()
     const nav = useNavigation()
     const navigate = useNavigate()
@@ -333,12 +488,15 @@ export default function NewSubmission() {
             return parseWithZod(formData, { schema: CreateSubmissionSchema })
         },
         shouldRevalidate: 'onBlur',
+        defaultValue: retryInitial ?? undefined, // prefill when retrying
     })
 
     const [draftNonce] = React.useState(() => crypto.randomUUID())
 
     // ----- Purpose → Category → Recipient wiring -----
-    const [purpose, setPurpose] = React.useState<SubmissionPurpose | ''>('')
+    const [purpose, setPurpose] = React.useState<SubmissionPurpose | ''>(
+        (retryInitial?.purposeOfSubmission as SubmissionPurpose) || ''
+    )
 
     // use the helper's return shape (prevents id/value mismatches)
     type CategoryOpt = ReturnType<typeof categoriesForPurpose>[number]
@@ -359,7 +517,7 @@ export default function NewSubmission() {
         [categoryId, purpose],
     )
 
-    const [selectedRecipient, setSelectedRecipient] = React.useState<string>('')
+    const [selectedRecipient, setSelectedRecipient] = React.useState<string>(retryInitial?.recipient || '')
 
     // Keep hidden input in sync with chosen OID
     React.useEffect(() => {
@@ -372,8 +530,8 @@ export default function NewSubmission() {
     // Reset category/recipient when purpose changes
     React.useEffect(() => {
         setCategoryId('')
-        setSelectedRecipient('')
-    }, [purpose])
+        if (!retryInitial) setSelectedRecipient('')
+    }, [purpose]) // eslint-disable-line react-hooks/exhaustive-deps
 
     // Helper line shows "Name (OID)"
     const recipientHelp = React.useMemo(
@@ -382,8 +540,12 @@ export default function NewSubmission() {
     )
 
     // Split kind -> drives autoSplit and document blocks
-    const [splitKind, setSplitKind] = React.useState<'' | 'manual' | 'auto'>('')
-    const [docCount, setDocCount] = React.useState<number | ''>('')
+    const [splitKind, setSplitKind] = React.useState<'' | 'manual' | 'auto'>(
+        (retryInitial?.splitKind as 'manual' | 'auto') || ''
+    )
+    const [docCount, setDocCount] = React.useState<number | ''>(
+        (retryInitial?.docCount as number | undefined) ?? ''
+    )
 
     React.useEffect(() => {
         const hidId = fields.autoSplit?.id
@@ -405,7 +567,20 @@ export default function NewSubmission() {
 
     // Document metadata state
     type DocMeta = { name: string; filename: string; attachmentControlNum: string }
-    const [docMeta, setDocMeta] = React.useState<Record<number, DocMeta>>({})
+    const [docMeta, setDocMeta] = React.useState<Record<number, DocMeta>>(() => {
+        if (!retryInitial || !retryInitialDocs?.length) return {}
+        const seed: Record<number, DocMeta> = {}
+        const count = Math.max(1, retryInitialDocs.length)
+        for (let i = 1; i <= count; i++) {
+            const preset = retryInitialDocs[i - 1]
+            seed[i] = {
+                name: preset?.name || '',
+                filename: preset?.filename || '',
+                attachmentControlNum: preset?.attachmentControlNum || '',
+            }
+        }
+        return seed
+    })
 
     const totalSizeMB = React.useMemo(
         () => Object.values(docSizes).reduce((a, b) => a + b, 0) / (1024 * 1024),
@@ -476,7 +651,7 @@ export default function NewSubmission() {
             true,
         )
 
-        // Best-effort cache write AFTER UI updates
+        // Best-effort cache write AFTER UI updates (still uses draft nonce on step 1)
         try {
             await setCachedFile(draftKey(draftNonce, idx), file)
         } catch (e) {
@@ -537,10 +712,21 @@ export default function NewSubmission() {
             for (let i = 1; i <= (count || 0); i++) {
                 init[i] = { name: '', filename: '', attachmentControlNum: '' }
             }
+            // seed from retryInitialDocs if present
+            if (retryInitial && retryInitialDocs?.length) {
+                for (let i = 1; i <= Math.min(retryInitialDocs.length, count || 0); i++) {
+                    init[i] = {
+                        name: retryInitialDocs[i - 1]?.name || '',
+                        filename: retryInitialDocs[i - 1]?.filename || '',
+                        attachmentControlNum: retryInitialDocs[i - 1]?.attachmentControlNum || '',
+                    }
+                }
+            }
             setDocMeta(init)
         } else {
             setDocMeta({})
         }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [splitKind, docCount])
 
     // -------- Client-side validation before submit (alerts) --------
@@ -594,8 +780,11 @@ export default function NewSubmission() {
                 >
                     <input type="hidden" name="intent" value="create" />
                     <input type="hidden" name="draftNonce" value={draftNonce} />
-                    <input {...getInputProps(fields.recipient, { type: 'hidden' })} />
-                    <input {...getInputProps(fields.autoSplit, { type: 'hidden' })} />
+                    {retryInitial?.retrySubmissionId ? (
+                        <input type="hidden" name="retrySubmissionId" value={retryInitial.retrySubmissionId} />
+                    ) : null}
+                    <input {...getInputProps(fields.recipient!, { type: 'hidden' })} />
+                    <input {...getInputProps(fields.autoSplit!, { type: 'hidden' })} />
 
                     {/* ===== Submission Details ===== */}
                     <div className="rounded-lg border border-gray-200 bg-white p-4">
@@ -604,7 +793,7 @@ export default function NewSubmission() {
                             <div className="md:col-span-6">
                                 <Field
                                     labelProps={{ children: 'Title *' }}
-                                    inputProps={{ ...getInputProps(fields.title, { type: 'text' }), placeholder: 'Enter submission title' }}
+                                    inputProps={{ ...getInputProps(fields.title!, { type: 'text' }), placeholder: 'Enter submission title' }}
                                     errors={fields.title?.errors}
                                 />
                             </div>
@@ -612,7 +801,7 @@ export default function NewSubmission() {
                             <div className="md:col-span-6">
                                 <SelectField
                                     labelProps={{ children: 'Author Type *' }}
-                                    selectProps={getSelectProps(fields.authorType)}
+                                    selectProps={getSelectProps(fields.authorType!)}
                                     errors={fields.authorType?.errors}
                                 >
                                     <option value="">Select author type</option>
@@ -628,7 +817,7 @@ export default function NewSubmission() {
                                 <SelectField
                                     labelProps={{ children: 'Purpose of Submission *' }}
                                     selectProps={{
-                                        ...getSelectProps(fields.purposeOfSubmission),
+                                        ...getSelectProps(fields.purposeOfSubmission!),
                                         onChange: (e: React.ChangeEvent<HTMLSelectElement>) => {
                                             const v = e.target.value as SubmissionPurpose | ''
                                             setPurpose(v)
@@ -654,6 +843,7 @@ export default function NewSubmission() {
                             {/* Recipient Category + Recipient */}
                             <div className="md:col-span-6">
                                 <label className="block text-sm font-medium text-gray-700">Recipient *</label>
+
                                 <div className="mt-1 grid grid-cols-1 md:grid-cols-12 gap-2">
                                     {/* Category */}
                                     <select
@@ -682,7 +872,7 @@ export default function NewSubmission() {
                                         value={selectedRecipient}
                                         onChange={e => setSelectedRecipient(e.target.value)}
                                         disabled={!categoryId || recipientOptions.length === 0}
-                                        className="md:col-span-7 rounded-md border border-gray-300 bg-white py-2 pl-3 pr-10 text-sm text-gray-900 focus:border-indigo-500 focus:outline-none focus:ring-indigo-500 shadow-sm"
+                                        className="md:col-span-7 rounded-md border border-gray-300 bg-white py-2 pl-3 pr-10 text-sm text-gray-900 focus:outline-none focus:ring-indigo-500 shadow-sm"
                                         aria-label="Recipient OID"
                                     >
                                         <option value="" disabled>
@@ -696,7 +886,13 @@ export default function NewSubmission() {
                                             </option>
                                         ))}
                                     </select>
+
+                                    {/* Moved alert BELOW the controls to keep row height aligned */}
+                                    <div className="md:col-span-12 mt-2 rounded border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                                        <strong>Heads up:</strong> choose the appropriate recipient as we cannot change the recipient after creating a submission.
+                                    </div>
                                 </div>
+
                                 {recipientHelp ? <p className="mt-1 text-xs text-gray-500">{recipientHelp}</p> : null}
                                 <ErrorList
                                     errors={fields.recipient?.errors}
@@ -707,7 +903,7 @@ export default function NewSubmission() {
                             <div className="md:col-span-6">
                                 <SelectField
                                     labelProps={{ children: 'NPI *' }}
-                                    selectProps={getSelectProps(fields.providerId)}
+                                    selectProps={getSelectProps(fields.providerId!)}
                                     errors={fields.providerId?.errors}
                                 >
                                     <option value="">Select NPI</option>
@@ -723,7 +919,7 @@ export default function NewSubmission() {
                             <div className="md:col-span-6">
                                 <Field
                                     labelProps={{ children: 'Claim ID *' }}
-                                    inputProps={{ ...getInputProps(fields.claimId, { type: 'text' }) }}
+                                    inputProps={{ ...getInputProps(fields.claimId!, { type: 'text' }) }}
                                     errors={fields.claimId?.errors}
                                 />
                             </div>
@@ -732,7 +928,7 @@ export default function NewSubmission() {
                                 <Field
                                     labelProps={{ children: 'Case ID' }}
                                     inputProps={{
-                                        ...getInputProps(fields.caseId, { type: 'text' }),
+                                        ...getInputProps(fields.caseId!, { type: 'text' }),
                                         placeholder: 'Up to 32 chars',
                                         maxLength: 32,
                                     }}
@@ -744,7 +940,7 @@ export default function NewSubmission() {
                                 <TextareaField
                                     labelProps={{ children: 'Comments' }}
                                     textareaProps={{
-                                        ...getInputProps(fields.comments, { type: 'text' }),
+                                        ...getInputProps(fields.comments!, { type: 'text' }),
                                         rows: 3,
                                         placeholder: 'Notes (optional)',
                                         className: 'text-gray-900 placeholder-gray-400',
@@ -756,7 +952,7 @@ export default function NewSubmission() {
                             <div className="md:col-span-6">
                                 <SelectField
                                     labelProps={{ children: 'Send in X12' }}
-                                    selectProps={getSelectProps(fields.sendInX12)}
+                                    selectProps={getSelectProps(fields.sendInX12!)}
                                     errors={fields.sendInX12?.errors}
                                 >
                                     <option value="false">False</option>
@@ -767,7 +963,7 @@ export default function NewSubmission() {
                             <div className="md:col-span-6">
                                 <Field
                                     labelProps={{ children: 'Threshold' }}
-                                    inputProps={{ ...getInputProps(fields.threshold, { type: 'number' }), min: 1, placeholder: '100' }}
+                                    inputProps={{ ...getInputProps(fields.threshold!, { type: 'number' }), min: 1, placeholder: '100' }}
                                     errors={fields.threshold?.errors}
                                 />
                             </div>

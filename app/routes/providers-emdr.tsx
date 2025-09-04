@@ -34,7 +34,6 @@ type Row = PcgProviderListItem & {
     customerName: string | null
     provider_name: string | null
     providerGroupName: string | null
-    // NEW: derived from Provider.userNpis -> User
     assignedToUsernames?: string[]
     assignedToEmails?: string[]
 }
@@ -169,7 +168,6 @@ function mapPersistedToRow(p: {
     providerZip: string | null
     customerName: string | null
     providerGroupName: string | null
-    // NEW
     usernames?: (string | null)[]
     emails?: (string | null)[]
     listDetail: {
@@ -239,11 +237,9 @@ function mapPersistedToRow(p: {
         esMDTransactionID: ld?.esMDTransactionID ?? null,
         status: rs?.status ?? ld?.status ?? null,
 
-        // Extras for UI
         customerName: p.customerName,
         providerGroupName: p.providerGroupName,
 
-        // NEW: assigned users
         assignedToUsernames: (p.usernames ?? []).filter(Boolean) as string[],
         assignedToEmails: (p.emails ?? []).filter(Boolean) as string[],
     }
@@ -266,31 +262,24 @@ async function buildScopeWhere(userId: string) {
     if (!user) throw new Response('Unauthorized', { status: 401 })
     const roleNames = user.roles.map(r => r.name)
 
-    // System Admin sees everything on this page as well (nice fallback)
     if (roleNames.includes(INTEREX_ROLES.SYSTEM_ADMIN)) {
         return { where: {}, roleNames }
     }
 
-    // Customer Admin: providers in their customer
     if (roleNames.includes(INTEREX_ROLES.CUSTOMER_ADMIN)) {
         return { where: { customerId: user.customerId ?? undefined }, roleNames }
     }
 
-    // Provider Group Admin: providers in any of their provider groups
     if (roleNames.includes(INTEREX_ROLES.PROVIDER_GROUP_ADMIN)) {
         let groupIds: string[] = []
         if (user.providerGroupId) groupIds.push(user.providerGroupId)
-
-        // Optional: also honor memberships if you have a join table
         try {
             const memberships = await (prisma as any).providerGroupMember.findMany({
                 where: { userId: user.id },
                 select: { providerGroupId: true },
             })
             groupIds.push(...(memberships || []).map((m: any) => m.providerGroupId))
-        } catch {
-            /* ignore if the table doesn't exist in this project */
-        }
+        } catch {}
         groupIds = Array.from(new Set(groupIds)).filter(Boolean) as string[]
         return { where: groupIds.length ? { providerGroupId: { in: groupIds } } : { id: { in: [] as string[] } }, roleNames }
     }
@@ -336,15 +325,11 @@ async function composeRows(where: any) {
                     errorList: true,
                 },
             },
-            // NEW: derive assigned usernames & emails directly
-            userNpis: {
-                select: { user: { select: { username: true, email: true } } },
-            },
+            userNpis: { select: { user: { select: { username: true, email: true } } } },
         },
         orderBy: [{ npi: 'asc' }],
     })
 
-    // Lookup Customer / ProviderGroup names separately
     const customerIds = Array.from(new Set(providers.map(p => p.customerId).filter(Boolean))) as string[]
     const groupIds = Array.from(new Set(providers.map(p => p.providerGroupId).filter(Boolean))) as string[]
 
@@ -364,7 +349,6 @@ async function composeRows(where: any) {
         const snapshot = (p.pcgListSnapshot as any) as PcgProviderListItem | null
         const listDetail = snapshot ? mapListItemToDetail(snapshot) : null
 
-        // NEW: collect usernames and emails from userNpis relation
         const usernames = (p.userNpis ?? [])
             .map(u => (u as any).user?.username ?? null)
             .filter(Boolean) as string[]
@@ -424,7 +408,6 @@ export async function action({ request }: ActionFunctionArgs) {
     const userId = await requireUserId(request)
     const { where, roleNames } = await buildScopeWhere(userId)
 
-    // Everyone may use this page. No role gate here.
     const form = await request.formData()
     const intent = String(form.get('intent') || '')
 
@@ -445,9 +428,8 @@ export async function action({ request }: ActionFunctionArgs) {
             const creates = remote.filter(r => !existingSet.has(r.providerNPI))
 
             const chunk = <T,>(arr: T[], size: number) =>
-                Array.from({ length: Math.ceil(arr.length / size) }, (_, i) => arr.slice(i * size, (i + 1) * size))
+                Array.from({ length: Math.ceil(arr.length / size) }, (_, i) => arr.slice(i * size, (i + 1) * i + size))
 
-            // Update existing Provider rows (legacy columns + legacy snapshot)
             for (const group of chunk(updates, 100)) {
                 await prisma.$transaction(
                     group.map(r =>
@@ -459,7 +441,6 @@ export async function action({ request }: ActionFunctionArgs) {
                 )
             }
 
-            // Create missing Provider rows
             for (const group of chunk(creates, 50)) {
                 await prisma.$transaction(
                     group.map(r =>
@@ -481,13 +462,15 @@ export async function action({ request }: ActionFunctionArgs) {
                     ),
                 )
             }
-            // Registration status persistence handled elsewhere below.
         } catch (err: any) {
             pcgError = err?.message || 'Failed to fetch providers from PCG.'
         }
         await audit({
             request,
-            user: await prisma.user.findUnique({ where: { id: userId }, select: { id: true, email: true, name: true, roles: { select: { name: true } }, customerId: true } }),
+            user: await prisma.user.findUnique({
+                where: { id: userId },
+                select: { id: true, email: true, name: true, roles: { select: { name: true } }, customerId: true },
+            }),
             action: 'PCG_FETCH',
             entityType: 'PROVIDER',
             success: !pcgError,
@@ -553,7 +536,6 @@ export async function action({ request }: ActionFunctionArgs) {
                 })
             }
 
-            // Best-effort refresh of the snapshot for this one NPI
             try {
                 const remote = await getAllProvidersFromPCG()
                 const match = remote.find(r => r.providerNPI === payload.provider_npi)
@@ -563,15 +545,16 @@ export async function action({ request }: ActionFunctionArgs) {
                         data: { pcgListSnapshot: match as any, pcgListAt: new Date() },
                     })
                 }
-            } catch {
-                /* ignore */
-            }
+            } catch {}
         } catch (err: any) {
             pcgError = err?.message || 'Failed to update provider.'
         }
         await audit({
             request,
-            user: await prisma.user.findUnique({ where: { id: userId }, select: { id: true, email: true, name: true, roles: { select: { name: true } }, customerId: true } }),
+            user: await prisma.user.findUnique({
+                where: { id: userId },
+                select: { id: true, email: true, name: true, roles: { select: { name: true } }, customerId: true },
+            }),
             action: 'PROVIDER_UPDATE',
             entityType: 'PROVIDER',
             entityId: payload.provider_npi,
@@ -594,12 +577,10 @@ export async function action({ request }: ActionFunctionArgs) {
         })
     }
 
-    // --- Bulk fetch per-provider registration details --------------------------
     if (intent === 'fetch-registrations') {
         const now = new Date()
         const nowIso = now.toISOString()
 
-        // Only providers within the user's scope, with provider_id and name/address present
         const candidates = await prisma.provider.findMany({
             where: {
                 ...where,
@@ -634,7 +615,6 @@ export async function action({ request }: ActionFunctionArgs) {
                 try {
                     const data = await pcgGetProviderRegistration(c.pcgProviderId!)
                     regById[c.pcgProviderId!] = data
-                    // persist latest so reload reflects it
                     await upsertRegistrationStatus({ providerId: c.id, reg: data })
                 } catch (err: any) {
                     const fallback = {
@@ -667,7 +647,10 @@ export async function action({ request }: ActionFunctionArgs) {
         const { rows, storedUpdates } = await composeRows(where)
         await audit({
             request,
-            user: await prisma.user.findUnique({ where: { id: userId }, select: { id: true, email: true, name: true, roles: { select: { name: true } }, customerId: true } }),
+            user: await prisma.user.findUnique({
+                where: { id: userId },
+                select: { id: true, email: true, name: true, roles: { select: { name: true } }, customerId: true },
+            }),
             action: 'REG_FETCH',
             entityType: 'PROVIDER',
             success: true,
@@ -688,7 +671,6 @@ export async function action({ request }: ActionFunctionArgs) {
         })
     }
 
-    // --- eMDR Register / DeRegister / Electronic Only --------------------------
     if (intent === 'emdr-register' || intent === 'emdr-deregister' || intent === 'emdr-electronic-only') {
         const providerId = String(form.get('provider_id') || '').trim()
         const providerNpi = String(form.get('provider_npi') || '').trim()
@@ -699,7 +681,6 @@ export async function action({ request }: ActionFunctionArgs) {
         let pcgError: string | null = null
         let updateResponse: any = null
 
-        // We'll collect a fresh registration payload for this single provider
         const regById: Record<string, RegResp> = Object.create(null)
         const now = new Date()
         const nowIso = now.toISOString()
@@ -709,7 +690,6 @@ export async function action({ request }: ActionFunctionArgs) {
             else if (intent === 'emdr-deregister') updateResponse = await pcgSetEmdrRegistration(providerId, false)
             else updateResponse = await pcgSetElectronicOnly(providerId)
 
-            // Persist update response to Provider (legacy audit)
             const existing = await prisma.provider.findUnique({
                 where: { npi: providerNpi },
                 select: { id: true, pcgProviderId: true, npi: true },
@@ -725,21 +705,17 @@ export async function action({ request }: ActionFunctionArgs) {
                 })
             }
 
-            // Immediately fetch registration status for this provider (ephemeral + persist)
             try {
                 const reg = await pcgGetProviderRegistration(providerId)
                 regById[providerId] = reg
                 if (existing) {
                     await upsertRegistrationStatus({ providerId: existing.id, reg })
                 }
-            } catch {
-                // ignore if fetch fails
-            }
+            } catch {}
         } catch (err: any) {
             pcgError = err?.message || 'Failed to submit eMDR registration/deregistration.'
         }
 
-        // Best-effort refresh of the list snapshot for this single provider
         try {
             const remote = await getAllProvidersFromPCG()
             const match = remote.find(r => r.providerNPI === providerNpi)
@@ -749,9 +725,7 @@ export async function action({ request }: ActionFunctionArgs) {
                     data: { pcgListSnapshot: match as any, pcgListAt: now },
                 })
             }
-        } catch {
-            // ignore
-        }
+        } catch {}
 
         const { rows, storedUpdates } = await composeRows(where)
 
@@ -776,8 +750,16 @@ export async function action({ request }: ActionFunctionArgs) {
         })
         await audit({
             request,
-            user: await prisma.user.findUnique({ where: { id: userId }, select: { id: true, email: true, name: true, roles: { select: { name: true } }, customerId: true } }),
-            action: intent === 'emdr-register' ? 'EMDR_REGISTER' : intent === 'emdr-deregister' ? 'EMDR_DEREGISTER' : 'EMDR_ELECTRONIC_ONLY',
+            user: await prisma.user.findUnique({
+                where: { id: userId },
+                select: { id: true, email: true, name: true, roles: { select: { name: true } }, customerId: true },
+            }),
+            action:
+                intent === 'emdr-register'
+                    ? 'EMDR_REGISTER'
+                    : intent === 'emdr-deregister'
+                        ? 'EMDR_DEREGISTER'
+                        : 'EMDR_ELECTRONIC_ONLY',
             entityType: 'PROVIDER',
             entityId: providerNpi,
             success: !pcgError,
@@ -800,7 +782,6 @@ type LastActionSignal = {
     at: string
 }
 
-/** Shape of individual status change entries returned by PCG. */
 type StatusChange = {
     split_number?: string
     time?: string
@@ -830,11 +811,21 @@ type ActionFailure = { error: string }
 type ActionData = ActionSuccess | ActionFailure
 
 function Badge({ yes }: { yes: boolean }) {
-    const cls = yes ? 'bg-green-100 text-green-800 ring-1 ring-green-300' : 'bg-gray-100 text-gray-800 ring-1 ring-gray-300'
-    return <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${cls}`}>{yes ? 'Yes' : 'No'}</span>
+    const cls = yes
+        ? 'bg-green-100 text-green-800 ring-1 ring-green-300'
+        : 'bg-gray-100 text-gray-800 ring-1 ring-gray-300'
+    return (
+        <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${cls}`}>
+      {yes ? 'Yes' : 'No'}
+    </span>
+    )
 }
 function Pill({ text }: { text: string }) {
-    return <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-50 text-blue-700 ring-1 ring-blue-200">{text}</span>
+    return (
+        <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-50 text-blue-700 ring-1 ring-blue-200">
+      {text}
+    </span>
+    )
 }
 
 /** Confirm-with-checkbox wrapper for eMDR actions */
@@ -867,14 +858,17 @@ function ConfirmActionButton({
         }
     }, [resetOn])
 
-    const colorClass =
+    // unified, accessible color styles (fixed colors)
+    const colorBase =
         color === 'green'
-            ? 'bg-green-600 hover:bg-green-700'
+            ? 'bg-emerald-600 hover:bg-emerald-700 focus-visible:ring-emerald-500'
             : color === 'rose'
-                ? 'bg-rose-600 hover:bg-rose-700'
+                ? 'bg-rose-600 hover:bg-rose-700 focus-visible:ring-rose-500'
                 : color === 'purple'
-                    ? 'bg-purple-600 hover:bg-purple-700'
-                    : 'bg-blue-600 hover:bg-blue-700'
+                    ? 'bg-violet-600 hover:bg-violet-700 focus-visible:ring-violet-500'
+                    : 'bg-blue-600 hover:bg-blue-700 focus-visible:ring-blue-500'
+
+    const colorClass = `${colorBase} focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2`
 
     if (!open) {
         return (
@@ -963,7 +957,6 @@ function StickyJsonPopover({
         const preferredHeight = panelRef.current?.offsetHeight || 320
         const gap = 8
 
-        // Horizontal placement: try right of anchor, else left
         let side: 'left' | 'right' = 'right'
         let left = rect.right + gap
         if (left + preferredWidth > window.innerWidth - gap) {
@@ -971,7 +964,6 @@ function StickyJsonPopover({
             left = Math.max(gap, rect.left - preferredWidth - gap)
         }
 
-        // Vertical alignment: try aligning top to anchor; if overflow, align bottom to anchor
         let align: 'top' | 'bottom' = 'top'
         let top = rect.top
         if (top + preferredHeight > window.innerHeight - gap) {
@@ -979,11 +971,9 @@ function StickyJsonPopover({
             top = Math.max(gap, rect.bottom - preferredHeight)
         }
 
-        // Constrain within viewport just in case
         top = Math.min(Math.max(gap, top), Math.max(gap, window.innerHeight - preferredHeight - gap))
         left = Math.min(Math.max(gap, left), Math.max(gap, window.innerWidth - preferredWidth - gap))
 
-        // Arrow position (relative to panel top)
         const anchorCenterY = rect.top + rect.height / 2
         const arrowTop = Math.min(preferredHeight - 16, Math.max(16, anchorCenterY - top))
 
@@ -991,18 +981,15 @@ function StickyJsonPopover({
         setPlacement({ side, align, arrowTop })
     }, [anchorEl])
 
-    // Track scrollable ancestors so the popover truly "sticks" to the clicked button
     const scrollParentsRef = React.useRef<HTMLElement[]>([])
 
     React.useEffect(() => {
         if (!open) return
         recompute()
-        // Recompute again on the next frame to account for measured panel size
         const raf = requestAnimationFrame(() => recompute())
 
         const handler = () => recompute()
 
-        // Find all scrollable ancestors of the anchor element
         const scrollParents: HTMLElement[] = []
         if (anchorEl && typeof window !== 'undefined') {
             let node: HTMLElement | null = anchorEl
@@ -1017,14 +1004,12 @@ function StickyJsonPopover({
             }
         }
 
-        // Listen to scroll on all those ancestors + window to keep position in sync
         scrollParents.forEach(p => p.addEventListener('scroll', handler, { passive: true }))
         if (typeof window !== 'undefined') {
             window.addEventListener('scroll', handler, { passive: true })
             window.addEventListener('resize', handler)
         }
 
-        // Also react to size changes of the anchor or the popover itself
         let ro: ResizeObserver | null = null
         if (typeof window !== 'undefined' && 'ResizeObserver' in window) {
             ro = new ResizeObserver(() => handler())
@@ -1065,7 +1050,6 @@ function StickyJsonPopover({
         }
     }, [open, onClose, anchorEl])
 
-    // Lightly highlight the anchor button while popover is open
     React.useEffect(() => {
         if (!open || !anchorEl) return
         anchorEl.classList.add('ring-2', 'ring-offset-2', 'ring-red-300', 'rounded')
@@ -1077,7 +1061,7 @@ function StickyJsonPopover({
     const copy = async () => {
         try {
             await navigator.clipboard.writeText(jsonText)
-        } catch { /* ignore */ }
+        } catch {}
     }
 
     if (!open || typeof document === 'undefined') return null
@@ -1089,7 +1073,6 @@ function StickyJsonPopover({
                 style={{ top: `${pos.top}px`, left: `${pos.left}px` }}
                 className="pointer-events-auto fixed w-[480px] max-w-[90vw] max-h-[80vh] rounded-lg border border-gray-200 bg-white shadow-xl"
             >
-                {/* Arrow that points back to the clicked button */}
                 <div
                     aria-hidden
                     style={{
@@ -1126,12 +1109,11 @@ function StickyJsonPopover({
                         </button>
                     </div>
                 </div>
-                {/* Raw JSON right away */}
                 <div className="p-3">
                     <div className="rounded-md border border-gray-200 bg-gray-50">
-						<pre className="m-0 p-3 text-xs leading-5 text-gray-900 whitespace-pre overflow-auto max-h-[60vh]">
+            <pre className="m-0 p-3 text-xs leading-5 text-gray-900 whitespace-pre overflow-auto max-h-[60vh]">
 {jsonText}
-						</pre>
+            </pre>
                     </div>
                 </div>
             </div>
@@ -1156,7 +1138,6 @@ export default function ProvidersEmdrScopedPage() {
     const pcgError = hasRows ? (actionData as ActionSuccess).pcgError : null
     const uiRoleLabel = hasRows ? (actionData as ActionSuccess).roleLabel : roleLabel
 
-    // Action response sources (last vs. persisted)
     const lastUpdatedNpi = hasRows ? (actionData as ActionSuccess).updatedNpi : undefined
     const lastUpdateResponse = hasRows ? (actionData as ActionSuccess).updateResponse : undefined
     const persistedMap = React.useMemo(() => {
@@ -1167,14 +1148,11 @@ export default function ProvidersEmdrScopedPage() {
         return m
     }, [hasRows, actionData, updateResponses])
 
-    // Signal to close confirm popovers after action completes
     const lastAction = hasRows ? (actionData as ActionSuccess).lastAction : undefined
 
-    // Registration details (ephemeral fetch payload — optional)
     const regById = (hasRows ? (actionData as ActionSuccess).regById : undefined) || {}
     const regFetchedAt = hasRows ? (actionData as ActionSuccess).regFetchedAt : undefined
 
-    // Drawer state
     const [drawer, setDrawer] = React.useState<{ open: boolean; forNpi?: string; seed?: Partial<PcgUpdateProviderPayload> }>({ open: false })
     function openDrawer(r: Row) {
         setDrawer({
@@ -1221,7 +1199,6 @@ export default function ProvidersEmdrScopedPage() {
         return <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${cls}`}>{val ?? '—'}</span>
     }
 
-    // ----- Error Popover (new) -----
     const [errorPopover, setErrorPopover] = React.useState<{ open: boolean; title?: string; data?: any; anchorEl?: HTMLElement | null }>({ open: false })
 
     function buildErrorPayload(r: Row, reg?: RegResp) {
@@ -1243,11 +1220,15 @@ export default function ProvidersEmdrScopedPage() {
         return { has, payload }
     }
 
-    // Show in eMDR tables only if name + address present (street2 optional)
     const hasEmdrPrereqs = (r: Row) =>
-        Boolean((r.provider_name ?? '').trim() && (r.provider_street ?? '').trim() && (r.provider_city ?? '').trim() && (r.provider_state ?? '').trim() && (r.provider_zip ?? '').trim())
+        Boolean(
+            (r.provider_name ?? '').trim() &&
+            (r.provider_street ?? '').trim() &&
+            (r.provider_city ?? '').trim() &&
+            (r.provider_state ?? '').trim() &&
+            (r.provider_zip ?? '').trim(),
+        )
 
-    // Partition lists; all within scoped rows
     const notRegisteredRows = rows.filter(r => !r.registered_for_emdr && hasEmdrPrereqs(r))
     const registeredRows = rows.filter(r => r.registered_for_emdr && hasEmdrPrereqs(r))
     const electronicOnlyRows = rows.filter(r => r.registered_for_emdr_electronic_only && hasEmdrPrereqs(r))
@@ -1264,7 +1245,7 @@ export default function ProvidersEmdrScopedPage() {
             <LoadingOverlay show={Boolean(isPending)} title="Loading…" message="Please don't refresh or close this tab." />
 
             <div className="max-w-11/12 mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8">
-                {/* Refresh section (no customer filter in this page) */}
+                {/* Refresh section */}
                 <div className="bg-white shadow rounded-lg p-6">
                     <div className="flex items-end gap-4">
                         <Form method="post">
@@ -1283,7 +1264,6 @@ export default function ProvidersEmdrScopedPage() {
                     </div>
                 </div>
 
-                {/* Error alert if PCG failed */}
                 {pcgError ? (
                     <div className="rounded-md bg-amber-50 p-4 border border-amber-200">
                         <div className="flex">
@@ -1293,9 +1273,7 @@ export default function ProvidersEmdrScopedPage() {
                     </div>
                 ) : null}
 
-                {/* ======================================== */}
-                {/* Provider details & update table */}
-                {/* ======================================== */}
+                {/* Provider details table (unchanged) */}
                 <div className="bg-white shadow rounded-lg overflow-hidden">
                     <div className="px-6 py-4 border-b border-gray-200">
                         <h2 className="text-lg font-medium text-gray-900">Provider Details Updating</h2>
@@ -1312,7 +1290,6 @@ export default function ProvidersEmdrScopedPage() {
                                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Electronic Only?</th>
                                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Customer Name</th>
                                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Provider Group</th>
-                                {/* NEW: Assigned columns */}
                                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Assigned To</th>
                                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Email IDs</th>
                                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Provider Name</th>
@@ -1361,13 +1338,8 @@ export default function ProvidersEmdrScopedPage() {
                                             </td>
                                             <td className="px-6 py-4 text-sm text-gray-700">{r.customerName ?? '—'}</td>
                                             <td className="px-6 py-4 text-sm text-gray-700">{r.providerGroupName ?? '—'}</td>
-                                            {/* NEW cells */}
-                                            <td className="px-6 py-4 text-sm text-gray-700">
-                                                {r.assignedToUsernames?.length ? r.assignedToUsernames.join(', ') : '—'}
-                                            </td>
-                                            <td className="px-6 py-4 text-sm text-gray-700">
-                                                {r.assignedToEmails?.length ? r.assignedToEmails.join(', ') : '—'}
-                                            </td>
+                                            <td className="px-6 py-4 text-sm text-gray-700">{r.assignedToUsernames?.length ? r.assignedToUsernames.join(', ') : '—'}</td>
+                                            <td className="px-6 py-4 text-sm text-gray-700">{r.assignedToEmails?.length ? r.assignedToEmails.join(', ') : '—'}</td>
                                             <td className="px-6 py-4 text-sm text-gray-700">{r.provider_name ?? '—'}</td>
                                             <td className="px-6 py-4 text-sm text-gray-700 break-words">{r.provider_street ?? '—'}</td>
                                             <td className="px-6 py-4 text-sm text-gray-700 break-words">{r.provider_street2 ?? '—'}</td>
@@ -1403,17 +1375,14 @@ export default function ProvidersEmdrScopedPage() {
                     </div>
                 </div>
 
-                {/* ====================================================== */}
-                {/* eMDR Register/deRegister section                      */}
-                {/* ====================================================== */}
+                {/* eMDR Register/deRegister section */}
                 <div className="bg-white shadow rounded-lg overflow-hidden">
                     <div className="px-6 py-4 border-b border-gray-200 flex items-center gap-3">
                         <div className="flex-1">
-                            <h2 className="text-lg font-semibold text-gray-900">eMDR Register/deRegister</h2>
+                            <h2 className="text-xl font-bold text-gray-900">eMDR Register/deRegister</h2>
                             <p className="text-sm text-gray-500">Only NPIs with provider name and address are shown below. Update provider details first if needed.</p>
                         </div>
 
-                        {/* Bulk fetch registration details */}
                         <Form method="post">
                             <input type="hidden" name="intent" value="fetch-registrations" />
                             <button
@@ -1422,7 +1391,7 @@ export default function ProvidersEmdrScopedPage() {
                                 disabled={!rows.length || isPending}
                                 title="Fetch PCG registration status/details for all providers with a Provider ID"
                             >
-                                <Icon name="update" className="h-4 w-4 mr-1.5" />
+                                <Icon name="update" className="h-6 w-4 mr-1.5" />
                                 Fetch Registration Details
                             </button>
                         </Form>
@@ -1435,25 +1404,33 @@ export default function ProvidersEmdrScopedPage() {
 
                     {/* --- Table 1: Not registered for eMDR --- */}
                     <div className="px-6 py-5 space-y-3">
-                        <h3 className="text-sm font-semibold text-gray-800 mb-3">Not registered for eMDR</h3>
+                        <h3 className="text-xl font-bold text-gray-800 mb-3">Not registered for eMDR</h3>
                         <div className="overflow-x-auto rounded-md border border-gray-200 p-4 bg-gray-50">
-                            <table className="w-full table-fixed divide-y divide-gray-200">
-                                <thead className="bg-gray-50">
+                            <table className="w-full divide-y divide-gray-200 [table-layout:auto]">
+                                <colgroup>
+                                    <col className="w-[110px]" />              {/* NPI (fixed-ish) */}
+                                    <col className="min-w-[220px]" />          {/* Name */}
+                                    <col className="min-w-[160px]" />          {/* Reg Status */}
+                                    <col className="min-w-[220px]" />          {/* Stage */}
+                                    <col className="min-w-[140px]" />          {/* Errors */}
+                                    <col className="w-[120px]" />              {/* Provider ID */}
+                                    <col className="min-w-[240px]" />          {/* Actions (room for confirm box) */}
+                                </colgroup>
+                                <thead className="bg-blue-950">
                                 <tr>
-                                    <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">NPI</th>
-                                    <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Name</th>
-                                    <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Reg Status</th>
-                                    <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Stage</th>
-                                    <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Errors</th>
-                                    <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Provider ID</th>
-                                    <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Actions</th>
-                                    <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Action Response</th>
+                                    <th className="px-6 py-3 text-left text-sm font-bold text-white uppercase">NPI</th>
+                                    <th className="px-6 py-3 text-left text-sm font-bold text-white uppercase">Name</th>
+                                    <th className="px-6 py-3 text-left text-sm font-bold text-white uppercase">Reg Status</th>
+                                    <th className="px-6 py-3 text-left text-sm font-bold text-white uppercase">Stage</th>
+                                    <th className="px-6 py-3 text-left text-sm font-bold text-white uppercase">Errors</th>
+                                    <th className="px-6 py-3 text-left text-sm font-bold text-white uppercase">Provider ID</th>
+                                    <th className="px-6 py-3 text-left text-sm font-bold text-white uppercase">Actions</th>
                                 </tr>
                                 </thead>
                                 <tbody className="bg-white divide-y divide-gray-200">
                                 {notRegisteredRows.length === 0 ? (
                                     <tr>
-                                        <td colSpan={8} className="px-6 py-6 text-sm text-gray-500 text-center">
+                                        <td colSpan={7} className="px-6 py-6 text-sm text-gray-500 text-center">
                                             None
                                         </td>
                                     </tr>
@@ -1504,9 +1481,6 @@ export default function ProvidersEmdrScopedPage() {
                                                     />
                                                     {!r.provider_id ? <p className="mt-2 text-xs text-amber-600">Provider ID missing — update provider details first.</p> : null}
                                                 </td>
-                                                <td className="px-6 py-3 text-sm text-gray-700 align-top w-[36rem]">
-                                                    <ActionResponseCell r={r} />
-                                                </td>
                                             </tr>
                                         )
                                     })
@@ -1520,28 +1494,38 @@ export default function ProvidersEmdrScopedPage() {
 
                     {/* --- Table 2: Registered for eMDR --- */}
                     <div className="px-6 py-5 space-y-3">
-                        <h3 className="text-sm font-semibold text-gray-800">Registered for eMDR</h3>
+                        <h3 className="text-xl font-bold text-gray-800">Registered for eMDR</h3>
                         <div className="overflow-x-auto rounded-md border border-gray-200 p-4 bg-gray-50">
-                            <table className="w-full table-fixed divide-y divide-gray-200">
-                                <thead className="bg-gray-50">
+                            <table className="w-full divide-y divide-gray-200 [table-layout:auto]">
+                                <colgroup>
+                                    <col className="w-[110px]" />              {/* NPI */}
+                                    <col className="min-w-[110px]" />          {/* Name */}
+                                    <col className="w-[100px]" />              {/* Electronic Only? */}
+                                    <col className="min-w-[160px]" />          {/* Reg Status */}
+                                    <col className="min-w-[180px]" />          {/* Stage */}
+                                    <col className="min-w-[110px]" />          {/* TXN IDs */}
+                                    <col className="min-w-[140px]" />          {/* Errors */}
+                                    <col className="w-[120px]" />              {/* Provider ID */}
+                                    <col className="min-w-[260px]" />          {/* Actions */}
+                                </colgroup>
+
+                                <thead className="bg-blue-950">
                                 <tr>
-                                    <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">NPI</th>
-                                    <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Name</th>
-                                    <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Electronic Only?</th>
-                                    <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Reg Status</th>
-                                    <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Stage</th>
-                                    <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Last Change</th>
-                                    <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">TXN IDs</th>
-                                    <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Errors</th>
-                                    <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Provider ID</th>
-                                    <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Actions</th>
-                                    <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Action Response</th>
+                                    <th className="px-6 py-3 text-left text-sm font-bold text-white uppercase">NPI</th>
+                                    <th className="px-6 py-3 text-left text-sm font-bold text-white uppercase">Name</th>
+                                    <th className="px-6 py-3 text-left text-sm font-bold text-white uppercase">Electronic Only?</th>
+                                    <th className="px-6 py-3 text-left text-sm font-bold text-white uppercase">Reg Status</th>
+                                    <th className="px-6 py-3 text-left text-sm font-bold text-white uppercase">Stage</th>
+                                    <th className="px-6 py-3 text-left text-sm font-bold text-white uppercase">TXN IDs</th>
+                                    <th className="px-6 py-3 text-left text-sm font-bold text-white uppercase">Errors</th>
+                                    <th className="px-6 py-3 text-left text-sm font-bold text-white uppercase">Provider ID</th>
+                                    <th className="px-6 py-3 text-left text-sm font-bold text-white uppercase">Actions</th>
                                 </tr>
                                 </thead>
                                 <tbody className="bg-white divide-y divide-gray-200">
                                 {registeredRows.length === 0 ? (
                                     <tr>
-                                        <td colSpan={11} className="px-6 py-6 text-sm text-gray-500 text-center">
+                                        <td colSpan={9} className="px-6 py-6 text-sm text-gray-500 text-center">
                                             None
                                         </td>
                                     </tr>
@@ -1567,23 +1551,6 @@ export default function ProvidersEmdrScopedPage() {
                                                     <RegStatusPill r={r} reg={reg} />
                                                 </td>
                                                 <td className="px-6 py-3 text-sm text-gray-700">{reg?.stage ?? r.stage ?? '—'}</td>
-                                                <td className="px-6 py-3 text-xs text-gray-700">
-                                                    {lastChange ? (
-                                                        <div className="space-y-0.5">
-                                                            <div>
-                                                                <span className="font-medium">Time:</span> {lastChange.time}
-                                                            </div>
-                                                            <div>
-                                                                <span className="font-medium">Title:</span> {lastChange.title}
-                                                            </div>
-                                                            <div>
-                                                                <span className="font-medium">Status:</span> {lastChange.status}
-                                                            </div>
-                                                        </div>
-                                                    ) : (
-                                                        <span className="text-gray-400">—</span>
-                                                    )}
-                                                </td>
                                                 <td className="px-6 py-3 text-sm text-gray-700">{txnDisplay ? <Pill text={txnDisplay} /> : <span className="text-gray-400">—</span>}</td>
                                                 <td className="px-6 py-3 text-xs">
                                                     {has ? (
@@ -1633,9 +1600,6 @@ export default function ProvidersEmdrScopedPage() {
                                                         ) : null}
                                                     </div>
                                                 </td>
-                                                <td className="px-6 py-3 text-sm text-gray-700 align-top w-[36rem]">
-                                                    <ActionResponseCell r={r} />
-                                                </td>
                                             </tr>
                                         )
                                     })
@@ -1652,23 +1616,32 @@ export default function ProvidersEmdrScopedPage() {
                         <h3 className="text-sm font-semibold text-gray-800">Registered for Electronic-Only ADR</h3>
                         <p className="text-xs text-gray-500">To revert to standard delivery (mail + electronic), deregister and then register again.</p>
                         <div className="overflow-x-auto rounded-md border border-gray-200 p-4 bg-gray-50">
-                            <table className="w-full table-fixed divide-y divide-gray-200">
-                                <thead className="bg-gray-50">
+                            <table className="w-full divide-y divide-gray-200 [table-layout:auto]">
+                                <colgroup>
+                                    <col className="w-[110px]" />              {/* NPI */}
+                                    <col className="min-w-[220px]" />          {/* Name */}
+                                    <col className="min-w-[160px]" />          {/* Reg Status */}
+                                    <col className="min-w-[200px]" />          {/* Stage */}
+                                    <col className="min-w-[140px]" />          {/* Errors */}
+                                    <col className="w-[120px]" />              {/* Provider ID */}
+                                    <col className="min-w-[220px]" />          {/* Actions */}
+                                </colgroup>
+
+                                <thead className="bg-blue-950">
                                 <tr>
-                                    <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">NPI</th>
-                                    <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Name</th>
-                                    <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Reg Status</th>
-                                    <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Stage</th>
-                                    <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Errors</th>
-                                    <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Provider ID</th>
-                                    <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Actions</th>
-                                    <th className="px-6 py-3 text-left text-xs font-bold text-black uppercase">Action Response</th>
+                                    <th className="px-6 py-3 text-left text-sm font-bold text-white uppercase">NPI</th>
+                                    <th className="px-6 py-3 text-left text-sm font-bold text-white uppercase">Name</th>
+                                    <th className="px-6 py-3 text-left text-sm font-bold text-white uppercase">Reg Status</th>
+                                    <th className="px-6 py-3 text-left text-sm font-bold text-white uppercase">Stage</th>
+                                    <th className="px-6 py-3 text-left text-sm font-bold text-white uppercase">Errors</th>
+                                    <th className="px-6 py-3 text-left text-sm font-bold text-white uppercase">Provider ID</th>
+                                    <th className="px-6 py-3 text-left text-sm font-bold text-white uppercase">Actions</th>
                                 </tr>
                                 </thead>
                                 <tbody className="bg-white divide-y divide-gray-200">
                                 {electronicOnlyRows.length === 0 ? (
                                     <tr>
-                                        <td colSpan={8} className="px-6 py-6 text-sm text-gray-500 text-center">
+                                        <td colSpan={7} className="px-6 py-6 text-sm text-gray-500 text-center">
                                             None
                                         </td>
                                     </tr>
@@ -1718,9 +1691,6 @@ export default function ProvidersEmdrScopedPage() {
                                                         resetOn={lastAction && lastAction.ok && lastAction.npi === r.providerNPI ? lastAction.at : undefined}
                                                     />
                                                 </td>
-                                                <td className="px-6 py-3 text-sm text-gray-700 align-top w-[36rem]">
-                                                    <ActionResponseCell r={r} />
-                                                </td>
                                             </tr>
                                         )
                                     })
@@ -1732,7 +1702,6 @@ export default function ProvidersEmdrScopedPage() {
                 </div>
             </div>
 
-            {/* Sticky Error Popover (anchored to "View errors") */}
             <StickyJsonPopover
                 open={errorPopover.open}
                 anchorEl={errorPopover.anchorEl || null}
@@ -1741,7 +1710,6 @@ export default function ProvidersEmdrScopedPage() {
                 onClose={() => setErrorPopover({ open: false })}
             />
 
-            {/* Drawer */}
             <Drawer isOpen={drawer.open} onClose={closeDrawer} title={`Update Provider • NPI ${drawer.seed?.provider_npi ?? drawer.forNpi ?? ''}`} size="md">
                 {drawer.open ? (
                     <Form method="post" className="space-y-5">

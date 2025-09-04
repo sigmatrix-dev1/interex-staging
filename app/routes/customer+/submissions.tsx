@@ -206,11 +206,11 @@ export async function action({ request }: ActionFunctionArgs) {
         // Default: if we have a remote id, Step 2; else Step 1
         let targetUrl = submission.pcgSubmissionId
             ? `/customer/submissions/${submission.id}/review`
-            : `/customer/submissions/new`
+            : `/customer/submissions/new?retry=${encodeURIComponent(submission.id)}`
         let stepLabel = submission.pcgSubmissionId ? 'Step 2' : 'Step 1'
 
         if (!submission.pcgSubmissionId || lastError?.kind === 'PCG_CREATE_ERROR') {
-            targetUrl = '/customer/submissions/new'                                 // Step 1
+            targetUrl = `/customer/submissions/new?retry=${encodeURIComponent(submission.id)}` // Step 1 with retry prefill
             stepLabel = 'Step 1'
         } else if (lastError?.kind === 'PCG_UPDATE_ERROR') {
             targetUrl = `/customer/submissions/${submission.id}/review`             // Step 2
@@ -686,7 +686,7 @@ export default function Submissions() {
                                                                 <th className="px-3 py-2 text-left text-xs font-medium bold text-gray-900 tracking-wider">Title</th>
                                                                 <th className="px-3 py-2 text-left text-xs font-medium bold text-gray-900 tracking-wider">Status</th>
                                                                 <th className="px-3 py-2 text-left text-xs font-medium bold text-gray-900 tracking-wider">esMD Txn ID</th>
-                                                                <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Split</th>
+                                                                <th className="px-3 py-2 text-left text-xs font-medium text-gray-900 tracking-wider">Split</th>
                                                             </tr>
                                                             </thead>
                                                             <tbody className="bg-white divide-y divide-gray-200">
