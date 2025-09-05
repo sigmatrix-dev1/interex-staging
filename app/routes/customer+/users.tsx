@@ -53,68 +53,69 @@ const ActionSchema = z.discriminatedUnion('intent', [
 ])
 
 export async function loader({ request }: LoaderFunctionArgs) {
-  const userId = await requireUserId(request)
-  const user = await prisma.user.findUnique({
-    where: { id: userId },
-    select: {
-      id: true,
-      name: true,
-      email: true,
-      username: true,
-      customerId: true,
-      providerGroupId: true,
-      roles: { select: { name: true } },
-    },
-  })
+  try {
+    const userId = await requireUserId(request)
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        username: true,
+        customerId: true,
+        providerGroupId: true,
+        roles: { select: { name: true } },
+      },
+    })
 
-  if (!user) {
-    throw new Response('Unauthorized', { status: 401 })
-  }
+    if (!user) {
+      throw new Response('Unauthorized', { status: 401 })
+    }
 
-  // Allow both customer admin and provider group admin roles
-  requireRoles(user, [INTEREX_ROLES.CUSTOMER_ADMIN, INTEREX_ROLES.PROVIDER_GROUP_ADMIN])
+    // Allow both customer admin and provider group admin roles
+    requireRoles(user, [INTEREX_ROLES.CUSTOMER_ADMIN, INTEREX_ROLES.PROVIDER_GROUP_ADMIN])
 
-  if (!user.customerId) {
-    throw new Response('User must be associated with a customer', { status: 400 })
-  }
+    if (!user.customerId) {
+      throw new Response('User must be associated with a customer', { status: 400 })
+    }
 
-  const userRoles = user.roles.map(r => r.name)
-  const isCustomerAdmin = userRoles.includes(INTEREX_ROLES.CUSTOMER_ADMIN)
-  const isProviderGroupAdmin = userRoles.includes(INTEREX_ROLES.PROVIDER_GROUP_ADMIN)
+    const userRoles = user.roles.map(r => r.name)
+    const isCustomerAdmin = userRoles.includes(INTEREX_ROLES.CUSTOMER_ADMIN)
+    const isProviderGroupAdmin = userRoles.includes(INTEREX_ROLES.PROVIDER_GROUP_ADMIN)
 
-  // Provider group admins must have a provider group assigned
-  if (isProviderGroupAdmin && !isCustomerAdmin && !user.providerGroupId) {
-    throw new Response('Provider group admin must be assigned to a provider group', { status: 400 })
-  }
+    // Provider group admins must have a provider group assigned
+    if (isProviderGroupAdmin && !isCustomerAdmin && !user.providerGroupId) {
+      throw new Response('Provider group admin must be assigned to a provider group', { status: 400 })
+    }
 
-  // Parse search parameters
-  const url = new URL(request.url)
-  const searchTerm = url.searchParams.get('search') || ''
+    // Parse search parameters safely
+    const url = new URL(request.url)
+    const searchTerm = url.searchParams.get('search') || ''
 
-  // Build search conditions for users based on role scope
-  const userWhereConditions: any = {
-    customerId: user.customerId,
-    roles: {
-      some: {
-        name: {
-          in: ['provider-group-admin', 'basic-user']
+    // Build search conditions for users based on role scope
+    const userWhereConditions: any = {
+      customerId: user.customerId,
+      roles: {
+        some: {
+          name: {
+            in: ['provider-group-admin', 'basic-user']
+          }
         }
       }
     }
-  }
 
-  // Provider group admins can only see users in their provider group
-  if (isProviderGroupAdmin && !isCustomerAdmin) {
-    userWhereConditions.providerGroupId = user.providerGroupId
-  }
+    // Provider group admins can only see users in their provider group
+    if (isProviderGroupAdmin && !isCustomerAdmin) {
+      userWhereConditions.providerGroupId = user.providerGroupId
+    }
 
-  if (searchTerm) {
-    userWhereConditions.OR = [
-      { name: { contains: searchTerm } },
-      { email: { contains: searchTerm } },
-      { username: { contains: searchTerm } },
-    ]
-  }
+    if (searchTerm) {
+      userWhereConditions.OR = [
+        { name: { contains: searchTerm } },
+        { email: { contains: searchTerm } },
+        { username: { contains: searchTerm } },
+      ]
+    }
 
   // Get customer data with provider groups and filtered users
   const customer = await prisma.customer.findUnique({
@@ -169,6 +170,16 @@ export async function loader({ request }: LoaderFunctionArgs) {
   const { toast, headers } = await getToast(request)
 
   return data({ user, customer, toast, searchTerm }, { headers: headers ?? undefined })
+  } catch (error) {
+    // Handle authentication redirects specifically
+    if (error instanceof Response && error.status === 302) {
+      console.log('Customer users loader: Authentication redirect - user not logged in')
+      throw error // Re-throw to allow the redirect to work
+    }
+    
+    console.error('Error in customer users loader:', error)
+    throw new Response('Internal Server Error', { status: 500 })
+  }
 }
 
 export async function action({ request }: ActionFunctionArgs) {
