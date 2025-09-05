@@ -192,18 +192,10 @@ export default function CustomerProvidersManagementPage() {
                       </div>
                       
                       <div className="flex space-x-2">
-                        <Link
-                          to={`/admin/providers/${provider.id}`}
-                          className="inline-flex items-center px-3 py-1 border border-transparent text-xs font-medium rounded text-white bg-purple-600 hover:bg-purple-700"
-                        >
-                          View
-                        </Link>
-                        <Link
-                          to={`/admin/providers/${provider.id}/edit`}
-                          className="inline-flex items-center px-3 py-1 border border-gray-300 text-xs font-medium rounded text-gray-700 bg-white hover:bg-gray-50"
-                        >
-                          Edit
-                        </Link>
+                        {/* Action buttons removed - functionality not implemented */}
+                        <span className="text-xs text-gray-500 italic">
+                          View/Edit functionality coming soon
+                        </span>
                       </div>
                     </div>
                   </div>
