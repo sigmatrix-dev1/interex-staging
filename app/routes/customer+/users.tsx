@@ -16,6 +16,7 @@ import { requireRoles } from '#app/utils/role-redirect.server.ts'
 import { generateTemporaryPassword, hashPassword } from '#app/utils/password.server.ts'
 import { useIsPending } from '#app/utils/misc.tsx'
 import { redirectWithToast, getToast } from '#app/utils/toast.server.ts'
+import { sendUserRegistrationEmail } from '#app/utils/emails/send-user-registration.server.ts'
 
 const CreateUserSchema = z.object({
   intent: z.literal('create'),
@@ -301,8 +302,43 @@ export async function action({ request }: ActionFunctionArgs) {
             hash: hashPassword(temporaryPassword)
           }
         }
+      },
+      include: {
+        providerGroup: {
+          select: { name: true }
+        }
       }
     })
+
+    // Get customer information for email
+    const customer = await prisma.customer.findUnique({
+      where: { id: user.customerId! },
+      select: { name: true }
+    })
+
+    if (!customer) {
+      throw new Response('Customer not found', { status: 404 })
+    }
+
+    // Send welcome email to the new user
+    const loginUrl = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/login`
+    
+    try {
+      await sendUserRegistrationEmail({
+        to: email,
+        userName: name,
+        userRole: role,
+        customerName: customer.name,
+        tempPassword: temporaryPassword,
+        loginUrl,
+        username,
+        providerGroupName: newUser.providerGroup?.name,
+      })
+      console.log(`✅ Registration email sent to ${email}`)
+    } catch (error) {
+      console.error(`❌ Failed to send registration email to ${email}:`, error)
+      // Don't fail the user creation if email fails
+    }
 
     // TODO: In production, send an email with the temporary password
     console.log(`New user created: ${email} with temporary password: ${temporaryPassword}`)
@@ -310,7 +346,7 @@ export async function action({ request }: ActionFunctionArgs) {
     return redirectWithToast('/customer/users', {
       type: 'success',
       title: 'User created',
-      description: `${name} has been created successfully. Temporary password: ${temporaryPassword}`,
+      description: `${name} has been created successfully and a welcome email has been sent.`,
     })
   }
 
