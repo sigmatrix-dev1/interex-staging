@@ -886,11 +886,6 @@ export default function NewSubmission() {
                                             </option>
                                         ))}
                                     </select>
-
-                                    {/* Moved alert BELOW the controls to keep row height aligned */}
-                                    <div className="md:col-span-12 mt-2 rounded border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900">
-                                        <strong>Heads up:</strong> Choose the correct recipient here as we cannot change the recipient after creating a submission.
-                                    </div>
                                 </div>
 
                                 {recipientHelp ? <p className="mt-1 text-xs text-gray-500">{recipientHelp}</p> : null}
@@ -899,6 +894,13 @@ export default function NewSubmission() {
                                     id={`${fields.recipient?.id ?? 'recipient'}-errors`}
                                 />
                             </div>
+
+                            {/* Shared heads-up for Purpose & Recipient (tighter spacing) */}
+                            <div className="md:col-span-12 -mt-2 -mb-2 rounded border border-amber-300 bg-amber-50 px-3 py-1 text-xs text-amber-900">
+                                <strong>Heads up:</strong> Choose the correct <span className="font-semibold">purpose of submission</span> and <span className="font-semibold">recipient</span> because we cannot change these after creating a submission.
+                            </div>
+
+                            <div className="md:col-span-12"></div>
 
                             <div className="md:col-span-6">
                                 <SelectField

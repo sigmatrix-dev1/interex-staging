@@ -726,6 +726,8 @@ export default function ReviewSubmission() {
                         <input type="hidden" name="_initial_json" value={initialJson} />
                         <input {...getInputProps(fields.recipient, { type: 'hidden' })} />
                         <input {...getInputProps(fields.autoSplit, { type: 'hidden' })} />
+                        {/* hidden input to submit locked Purpose value */}
+                        <input {...getInputProps(fields.purposeOfSubmission, { type: 'hidden' })} />
 
                         {/* ===== Submission Details ===== */}
                         <div className="rounded-lg border border-gray-200 bg-white p-4">
@@ -747,29 +749,22 @@ export default function ReviewSubmission() {
                                 </div>
 
                                 <div className="md:col-span-6">
-                                    <SelectField
-                                        labelProps={{ children: 'Purpose *' }}
-                                        selectProps={{
-                                            ...getSelectProps(fields.purposeOfSubmission),
-                                            onChange: (e: React.ChangeEvent<HTMLSelectElement>) => {
-                                                const v = e.target.value as SubmissionPurpose | ''
-                                                setPurpose(v)
-                                                // keep Conform in sync
-                                                const el = e.currentTarget
-                                                const nativeSetter = (Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value') as any)?.set
-                                                nativeSetter?.call(el, v)
-                                                el.dispatchEvent(new Event('input', { bubbles: true }))
-                                                el.dispatchEvent(new Event('change', { bubbles: true }))
-                                            },
-                                        }}
-                                        errors={fields.purposeOfSubmission?.errors}
+                                    <label className="block text-sm font-medium text-gray-700">Purpose *</label>
+                                    <p className="mt-1 text-xs text-gray-500">🔒 This field is locked during review.</p>
+                                    <select
+                                        value={purpose}
+                                        onChange={() => {}}
+                                        disabled={true}
+                                        aria-disabled="true"
+                                        title="Locked during review"
+                                        className="mt-1 block w-full rounded-md border border-gray-300 bg-gray-100 text-gray-500 cursor-not-allowed opacity-80 py-2 pl-3 pr-10 text-sm focus:border-gray-300 focus:outline-none focus:ring-0"
                                     >
                                         {SubmissionPurposeValues.map((p: string) => (
                                             <option key={p} value={p}>
                                                 {formatEnum(p)}
                                             </option>
                                         ))}
-                                    </SelectField>
+                                    </select>
                                 </div>
 
                                 {/* Recipient (Category + Recipient only) */}
