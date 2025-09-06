@@ -897,7 +897,7 @@ export default function NewSubmission() {
 
                             {/* Shared heads-up for Purpose & Recipient (tighter spacing) */}
                             <div className="md:col-span-12 -mt-2 -mb-2 rounded border border-amber-300 bg-amber-50 px-3 py-1 text-xs text-amber-900">
-                                <strong>Heads up:</strong> Choose the correct <span className="font-semibold">purpose of submission</span> and <span className="font-semibold">recipient</span> because we cannot change these after creating a submission.
+                                <strong>Heads up:</strong> Choose the appropriate <span className="font-semibold">purpose of submission</span> and <span className="font-semibold">recipient</span> because we cannot change these after creating a submission.
                             </div>
 
                             <div className="md:col-span-12"></div>
