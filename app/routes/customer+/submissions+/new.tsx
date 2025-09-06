@@ -889,7 +889,7 @@ export default function NewSubmission() {
 
                                     {/* Moved alert BELOW the controls to keep row height aligned */}
                                     <div className="md:col-span-12 mt-2 rounded border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900">
-                                        <strong>Heads up:</strong> choose the appropriate recipient as we cannot change the recipient after creating a submission.
+                                        <strong>Heads up:</strong> Choose the correct recipient here as we cannot change the recipient after creating a submission.
                                     </div>
                                 </div>
 
