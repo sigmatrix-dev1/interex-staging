@@ -105,9 +105,14 @@ function BackGuard({
 
             if (!sent) {
                 // Fallback if Beacon unavailable/blocked
-                fetch(logoutUrl, { method: 'POST', body: fd, credentials: 'include' }).finally(
-                    () => window.location.assign(redirectTo),
-                )
+                // Mark the promise as intentionally not awaited to satisfy no-floating-promises
+                void fetch(logoutUrl, {
+                    method: 'POST',
+                    body: fd,
+                    credentials: 'include',
+                }).finally(() => {
+                    window.location.assign(redirectTo)
+                })
             } else {
                 // Beacon sent—navigate immediately
                 window.location.assign(redirectTo)
@@ -115,7 +120,6 @@ function BackGuard({
         }
 
         window.addEventListener('popstate', onPopState)
-
         return () => {
             window.removeEventListener('popstate', onPopState)
         }
