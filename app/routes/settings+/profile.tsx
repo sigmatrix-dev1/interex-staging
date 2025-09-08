@@ -65,6 +65,10 @@ export default function EditUserProfile() {
             showBackButton={true}
             backTo="/dashboard"
             currentPath="/settings/profile"
+            backGuardEnabled={true}
+            backGuardLogoutUrl="/logout"      // optional overrides
+            backGuardRedirectTo="/login"      // e.g., send to login after logout
+            backGuardMessage="Going back will log you out. Continue?"
         >
             <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
                 <div className="bg-white shadow rounded-lg">

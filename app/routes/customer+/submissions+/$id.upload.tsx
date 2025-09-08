@@ -390,7 +390,14 @@ export default function UploadSubmission() {
         pickedTotalMB <= 300
 
     return (
-        <InterexLayout user={user} title="Upload & Submit" subtitle="Step 3 of 3" currentPath={`/customer/submissions/${submission.id}/upload`}>
+        <InterexLayout user={user}
+                       title="Upload & Submit"
+                       subtitle="Step 3 of 3"
+                       currentPath={`/customer/submissions/${submission.id}/upload`}
+                       backGuardLogoutUrl="/logout"
+                       backGuardRedirectTo="/login"
+                       backGuardMessage="Going back will log you out and discard your work. Continue?"
+        >
             <LoadingOverlay
                 show={Boolean(isUploading)}
                 title="Uploading your files…"

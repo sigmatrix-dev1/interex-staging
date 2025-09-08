@@ -312,6 +312,8 @@ export default function Submissions() {
                 title="Submissions"
                 subtitle="Manage and track your HIH submissions"
                 currentPath="/customer/submissions"
+                backGuardEnabled={true}
+                backGuardRedirectTo="/dashboard"
             >
                 <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 py-8">
                     <div className="space-y-8">

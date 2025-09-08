@@ -756,7 +756,16 @@ export default function NewSubmission() {
     }
 
     return (
-        <InterexLayout user={user} title="Create Submission" subtitle="Step 1 of 3" currentPath="/customer/submissions/new">
+        <InterexLayout user={user}
+                       title="Create Submission"
+                       subtitle="Step 1 of 3"
+                       currentPath="/customer/submissions/new"
+                       backGuardEnabled={true}
+                       backGuardLogoutUrl="/logout"
+                       backGuardRedirectTo="/login"
+                       backGuardMessage="Going back will log you out and discard your work. Continue?"
+
+        >
             <LoadingOverlay
                 show={Boolean(isSubmitting)}
                 title="Creating submission…"

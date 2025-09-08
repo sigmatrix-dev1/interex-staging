@@ -250,11 +250,6 @@ export async function action({ request }: ActionFunctionArgs) {
       // Continue with success even if email fails - show password in toast
     }
 
-    // TODO: Remove temporary password from success message once email is working
-    console.log(`New customer "${name}" created with admin: ${adminEmail}`)
-    console.log(`Admin temporary password: ${temporaryPassword}`)
-    console.log(`Login URL: ${loginUrl}`)
-
     return redirectWithToast('/admin/customers', {
       type: 'success',
       title: 'Customer created',
@@ -340,10 +335,6 @@ export async function action({ request }: ActionFunctionArgs) {
       // Continue with success even if email fails - show password in toast
     }
 
-    // TODO: Remove temporary password from success message once email is working
-    console.log(`New admin for "${customer.name}": ${adminEmail}`)
-    console.log(`Admin temporary password: ${temporaryPassword}`)
-    console.log(`Login URL: ${loginUrl}`)
 
     return redirectWithToast('/admin/customers', {
       type: 'success',
@@ -432,6 +423,10 @@ export default function AdminCustomersPage() {
           showBackButton={true}
           backTo="/admin/dashboard"
           currentPath="/admin/customers"
+          backGuardEnabled={true}
+          backGuardLogoutUrl="/logout"
+          backGuardRedirectTo="/login"
+          backGuardMessage="Going back will log you out. Continue?"
         >
           <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
             <div className="space-y-8">

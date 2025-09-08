@@ -704,7 +704,14 @@ export default function ReviewSubmission() {
     }
 
     return (
-        <InterexLayout user={user} title="Review & Update" subtitle="Step 2 of 3" currentPath={`/customer/submissions/${submission.id}/review`}>
+        <InterexLayout user={user}
+                       title="Review & Update"
+                       subtitle="Step 2 of 3"
+                       currentPath={`/customer/submissions/${submission.id}/review`}
+                       backGuardLogoutUrl="/logout"
+                       backGuardRedirectTo="/login"
+                       backGuardMessage="Going back will log you out and discard your work. Continue?"
+        >
             <LoadingOverlay show={Boolean(isUpdating)} title="Updating submission…" message="Hold tight while we push your changes to PCG." />
 
             <Drawer key={`drawer-review-${submission.id}`} isOpen onClose={() => navigate('/customer/submissions')} title={`Review Submission: ${submission.title}`} size="fullscreen">
