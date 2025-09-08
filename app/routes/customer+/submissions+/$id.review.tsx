@@ -37,7 +37,7 @@ import {
     getRecipientByOid,
     categoryForOid,
 } from '#app/domain/submission-enums.ts'
-import { buildCreateSubmissionPayload, pcgUpdateSubmission } from '#app/services/pcg-hih.server.ts'
+import { buildCreateSubmissionPayload, pcgUpdateSubmission, pcgGetStatus } from '#app/services/pcg-hih.server.ts'
 import { requireUserId } from '#app/utils/auth.server.ts'
 import { prisma } from '#app/utils/db.server.ts'
 import { draftKey, moveCachedFile, subKey, getCachedFile, setCachedFile } from '#app/utils/file-cache.ts'
@@ -45,7 +45,8 @@ import { redirectWithToast } from '#app/utils/toast.server.ts'
 
 type PcgEvent = { kind?: string; payload?: any }
 type PcgStageSource = { responseMessage?: string | null; events?: PcgEvent[] | any[] }
-function isDraftFromPCG(s: PcgStageSource) {
+function isDraftFromPCG(s: PcgStageSource | null | undefined) {
+    if (!s) return false
     const stageFromResponse = (s.responseMessage ?? '').toLowerCase()
     const stageFromEvent = ((s.events ?? []).find((e: any) => e?.kind === 'PCG_STATUS')?.payload?.stage ?? '').toLowerCase()
     const latestStage = stageFromEvent || stageFromResponse || 'Draft'
@@ -76,6 +77,71 @@ const UpdateSubmissionMetaSchema = z.object({
     _initial_json: z.string().optional(),
 })
 
+/** ===== Helpers to apply PCG Status → local DB ===== */
+function normalizeOid(oid?: string | null) {
+    if (!oid) return undefined
+    const s = String(oid)
+    return s.startsWith('urn:oid:') ? s.slice('urn:oid:'.length) : s
+}
+function mapPcgPurposeCodeToLocalEnum(code?: string | null): PrismaSubmissionPurpose | undefined {
+    const c = (code ?? '').trim()
+    if (!c) return undefined
+    switch (c) {
+        case '1': return 'ADR' as PrismaSubmissionPurpose
+        case '7': return 'PWK_CLAIM_DOCUMENTATION' as PrismaSubmissionPurpose
+        case '9': return 'FIRST_APPEAL' as PrismaSubmissionPurpose
+        case '9.1': return 'SECOND_APPEAL' as PrismaSubmissionPurpose
+        default: return undefined
+    }
+}
+async function applyStatusToDb(submissionId: string, pcgSubmissionId: string) {
+    try {
+        const statusResp = await pcgGetStatus(pcgSubmissionId)
+
+        await prisma.submissionEvent.create({
+            data: {
+                submissionId,
+                kind: 'PCG_STATUS',
+                message: statusResp.stage ?? 'Status retrieved',
+                payload: statusResp,
+            },
+        })
+
+        const rawTxnList = (statusResp as any)?.transactionIdList || (statusResp as any)?.uniqueIdList || ''
+        const normalizedTxnList = typeof rawTxnList === 'string' ? rawTxnList.trim() : ''
+        const txn = statusResp.esmdTransactionId ?? (normalizedTxnList || null)
+
+        const updateData: any = {
+            responseMessage: statusResp.stage ?? undefined,
+            transactionId: txn ?? undefined,
+            title: statusResp.title ?? undefined,
+            claimId: statusResp.esmdClaimId ?? undefined,
+            caseId: statusResp.esmdCaseId ?? undefined,
+            authorType: statusResp.authorType ?? undefined,
+            autoSplit: typeof statusResp.autoSplit === 'boolean' ? statusResp.autoSplit : undefined,
+            comments: statusResp.comments ?? undefined,
+            recipient: normalizeOid(statusResp.intendedRecipient?.oid) ?? undefined,
+            updatedAt: new Date(),
+        }
+        const mappedPurpose = mapPcgPurposeCodeToLocalEnum(statusResp.purposeOfSubmission?.contentType)
+        if (mappedPurpose) updateData.purposeOfSubmission = mappedPurpose
+
+        const allErrors = [
+            ...(statusResp.errorList ?? []),
+            ...(statusResp.errors ?? []),
+        ]
+        if (allErrors.length) {
+            updateData.errorDescription = allErrors
+                .map((e: any) => (typeof e === 'string' ? e : e?.message ?? JSON.stringify(e)))
+                .join('; ')
+        }
+
+        await prisma.submission.update({ where: { id: submissionId }, data: updateData })
+    } catch (e) {
+        // swallow; we don't want to block UX if status refresh fails
+    }
+}
+
 export async function loader({ request, params }: LoaderFunctionArgs) {
     const userId = await requireUserId(request)
     const user = await prisma.user.findUnique({
@@ -90,7 +156,7 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     if (!user) throw new Response('Unauthorized', { status: 401 })
 
     const id = params.id as string
-    const submission = await prisma.submission.findFirst({
+    let submission = await prisma.submission.findFirst({
         where: { id },
         include: {
             provider: { select: { id: true, npi: true, name: true } },
@@ -102,6 +168,25 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
         },
     })
     if (!submission) throw new Response('Not found', { status: 404 })
+
+    // ===== REFRESH STATUS when resuming Step-2 (Continue/Retry) =====
+    if (submission.pcgSubmissionId) {
+        await applyStatusToDb(submission.id, submission.pcgSubmissionId)
+        // re-read for latest values & new PCG_STATUS event
+        submission = await prisma.submission.findFirst({
+            where: { id },
+            include: {
+                provider: { select: { id: true, npi: true, name: true } },
+                events: {
+                    select: { id: true, kind: true, message: true, payload: true, createdAt: true },
+                    orderBy: { createdAt: 'desc' },
+                    take: 100,
+                },
+            },
+        })
+        if (!submission) throw new Response('Not found', { status: 404 })
+    }
+
     if (!isDraftFromPCG(submission)) {
         throw await redirectWithToast(`/customer/submissions`, {
             type: 'error',
@@ -318,6 +403,10 @@ export async function action({ request }: ActionFunctionArgs) {
             },
         })
 
+        // NOTE: Do NOT refresh PCG status here.
+        // We redirect back to the review route where the loader
+        // calls applyStatusToDb() once. This avoids duplicate PCG_STATUS events.
+
         // Audit log (success) with changed fields diff
         try {
             const prev: Record<string, unknown> | null = (() => {
@@ -428,7 +517,7 @@ export default function ReviewSubmission() {
     )
 
     const initialRecipientKnown = React.useMemo(
-        () => Boolean(getRecipientByOid(initial.recipient)),
+        () => Boolean(getRecipientByOid(initial.recipient ?? '')),
         [initial.recipient]
     )
 
@@ -448,7 +537,7 @@ export default function ReviewSubmission() {
 
     const initialCategory = React.useMemo<RecipientCategory | ''>(() => {
         if (!initialRecipientKnown) return ''
-        const cat = categoryForOid(initial.recipient)
+        const cat = categoryForOid(initial.recipient ?? '')
         return cat ?? ''
     }, [initial.recipient, initialRecipientKnown])
 
@@ -460,7 +549,7 @@ export default function ReviewSubmission() {
         [categoryId, purpose]
     )
 
-    const [selectedRecipient, setSelectedRecipient] = React.useState<string>(initialRecipientKnown ? initial.recipient : '')
+    const [selectedRecipient, setSelectedRecipient] = React.useState<string>(initialRecipientKnown ? (initial.recipient ?? '') : '')
 
     // Clear recipient if no longer valid for the current purpose/category
     React.useEffect(() => {
@@ -980,7 +1069,7 @@ export default function ReviewSubmission() {
                                             </div>
 
                                             <div className="md:col-span-6">
-                                                <label className="block text-sm text-gray-700">Filename (.pdf) *</label>
+                                                <label className="block textsm text-gray-700">Filename (.pdf) *</label>
                                                 <input
                                                     name={`doc_filename_${i}`}
                                                     type="text"

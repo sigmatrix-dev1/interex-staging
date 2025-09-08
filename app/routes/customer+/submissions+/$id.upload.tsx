@@ -485,13 +485,7 @@ export default function UploadSubmission() {
                                 ) : null}
                                 {pickedTotalMB > 300 ? <div>Total size {pickedTotalMB.toFixed(1)} MB exceeds 300 MB.</div> : null}
                                 <div className="mt-3">
-                                    <button
-                                        type="button"
-                                        onClick={() => { void rebuildFromCache() }}
-                                        className="rounded-md bg-white px-3 py-1.5 text-sm font-medium text-gray-900 ring-1 ring-gray-300 hover:bg-gray-50"
-                                    >
-                                        Refresh from cache
-                                    </button>
+
                                 </div>
                             </div>
                         ) : (

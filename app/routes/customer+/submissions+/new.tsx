@@ -33,7 +33,7 @@ import {
     recipientsFor,
     recipientHelperLabel,
 } from '#app/domain/submission-enums.ts'
-import { buildCreateSubmissionPayload, pcgCreateSubmission } from '#app/services/pcg-hih.server.ts'
+import { buildCreateSubmissionPayload, pcgCreateSubmission, pcgGetStatus } from '#app/services/pcg-hih.server.ts'
 import { requireUserId } from '#app/utils/auth.server.ts'
 import { prisma } from '#app/utils/db.server.ts'
 import { draftKey, getCachedFile, setCachedFile } from '#app/utils/file-cache.ts'
@@ -207,6 +207,102 @@ function collectDocumentsFromForm(formData: FormData, kind: 'manual' | 'auto', d
     return { documents, errors }
 }
 
+/* =======================
+   NEW: PCG snapshot wiring
+   ======================= */
+
+/** Normalize OID from PCG (may come as 'urn:oid:<oid>' or plain). */
+function normalizeOid(oid?: string | null) {
+    if (!oid) return undefined
+    const s = String(oid)
+    return s.startsWith('urn:oid:') ? s.slice('urn:oid:'.length) : s
+}
+
+/** Map PCG purpose code to our Prisma enum (fallback to previous local value if unknown). */
+function mapPcgPurposeCodeToLocalEnum(code?: string | null): PrismaSubmissionPurpose | undefined {
+    const c = (code ?? '').trim()
+    if (!c) return undefined
+    switch (c) {
+        case '1':
+            return 'ADR' as PrismaSubmissionPurpose
+        case '7':
+            return 'PWK_CLAIM_DOCUMENTATION' as PrismaSubmissionPurpose
+        case '9':
+            return 'FIRST_APPEAL' as PrismaSubmissionPurpose
+        case '9.1':
+            return 'SECOND_APPEAL' as PrismaSubmissionPurpose
+        default:
+            return undefined
+    }
+}
+
+/**
+ * After creating (or re-creating on retry) we immediately fetch PCG status
+ * and overwrite local DB with authoritative details (title, stage, ids, etc).
+ * This preserves audit by writing a PCG_STATUS event with the full payload.
+ */
+async function persistRemoteSnapshot(submissionId: string, pcgId: string) {
+    const statusResp = await pcgGetStatus(pcgId)
+
+    // Always audit the raw payload
+    await prisma.submissionEvent.create({
+        data: {
+            submissionId,
+            kind: 'PCG_STATUS',
+            message: statusResp.stage ?? 'Status retrieved',
+            payload: statusResp,
+        },
+    })
+
+    // Extract a transaction identifier if present
+    const rawTxnList = (statusResp as any)?.transactionIdList || (statusResp as any)?.uniqueIdList || ''
+    const normalizedTxnList = typeof rawTxnList === 'string' ? rawTxnList.trim() : ''
+    const txn = statusResp.esmdTransactionId ?? (normalizedTxnList || null)
+
+    // Build update data from the snapshot
+    const updateData: any = {
+        // stage from PCG
+        responseMessage: statusResp.stage ?? undefined,
+
+        // ids
+        transactionId: txn ?? undefined,
+        pcgSubmissionId: pcgId, // ensure stored
+
+        // top-level echoes
+        title: statusResp.title ?? undefined,
+        claimId: statusResp.esmdClaimId ?? undefined,
+        caseId: statusResp.esmdCaseId ?? undefined,
+        authorType: statusResp.authorType ?? undefined,
+        autoSplit: typeof statusResp.autoSplit === 'boolean' ? statusResp.autoSplit : undefined,
+        comments: statusResp.comments ?? undefined,
+
+        // recipient
+        recipient: normalizeOid(statusResp.intendedRecipient?.oid) ?? undefined,
+    }
+
+    // Map purpose by contentType code if present
+    const mappedPurpose = mapPcgPurposeCodeToLocalEnum(statusResp.purposeOfSubmission?.contentType)
+    if (mappedPurpose) {
+        updateData.purposeOfSubmission = mappedPurpose
+    }
+
+    // Best-effort error surface consolidation
+    const allErrors = [
+        ...(statusResp.errorList ?? []),
+        ...(statusResp.errors ?? []),
+    ]
+    if (allErrors.length) {
+        updateData.errorDescription = allErrors
+            .map((e: any) => (typeof e === 'string' ? e : e?.message ?? JSON.stringify(e)))
+            .join('; ')
+    }
+
+    await prisma.submission.update({
+        where: { id: submissionId },
+        data: updateData,
+    })
+}
+
 export async function action({ request }: ActionFunctionArgs) {
     const userId = await requireUserId(request)
     const user = await prisma.user.findUnique({
@@ -364,6 +460,15 @@ export async function action({ request }: ActionFunctionArgs) {
                 },
             })
 
+            // =======================
+            // NEW: fetch & overwrite from PCG immediately
+            // =======================
+            try {
+                await persistRemoteSnapshot(retrySubmissionId, pcgResp.submission_id)
+            } catch (e) {
+                // Best-effort only; keep UX flow even if this fails
+            }
+
             return await redirectWithToast(
                 `/customer/submissions/${retrySubmissionId}/review?draft=${encodeURIComponent(draftNonce)}`,
                 {
@@ -439,6 +544,15 @@ export async function action({ request }: ActionFunctionArgs) {
                 payload: pcgResp,
             },
         })
+
+        // =======================
+        // NEW: fetch & overwrite from PCG immediately
+        // =======================
+        try {
+            await persistRemoteSnapshot(newSubmission.id, pcgResp.submission_id)
+        } catch (e) {
+            // Best-effort only; keep UX flow even if this fails
+        }
 
         return await redirectWithToast(
             `/customer/submissions/${newSubmission.id}/review?draft=${encodeURIComponent(draftNonce)}`,
@@ -756,15 +870,15 @@ export default function NewSubmission() {
     }
 
     return (
-        <InterexLayout user={user}
-                       title="Create Submission"
-                       subtitle="Step 1 of 3"
-                       currentPath="/customer/submissions/new"
-                       backGuardEnabled={true}
-                       backGuardLogoutUrl="/logout"
-                       backGuardRedirectTo="/login"
-                       backGuardMessage="Going back will log you out and discard your work. Continue?"
-
+        <InterexLayout
+            user={user}
+            title="Create Submission"
+            subtitle="Step 1 of 3"
+            currentPath="/customer/submissions/new"
+            backGuardEnabled={true}
+            backGuardLogoutUrl="/logout"
+            backGuardRedirectTo="/login"
+            backGuardMessage="Going back will log you out and discard your work. Continue?"
         >
             <LoadingOverlay
                 show={Boolean(isSubmitting)}
@@ -782,7 +896,7 @@ export default function NewSubmission() {
                 <Form
                     method="POST"
                     {...getFormProps(form)}
-                    className="space-y-8"
+                    className="space-y-6"
                     onSubmit={e => {
                         if (!validateBeforeSubmit()) e.preventDefault()
                     }}
@@ -798,8 +912,12 @@ export default function NewSubmission() {
                     {/* ===== Submission Details ===== */}
                     <div className="rounded-lg border border-gray-200 bg-white p-4">
                         <h3 className="text-base font-semibold text-gray-900 mb-4">Submission Details</h3>
+
+                        {/* Compact 12-col grid */}
                         <div className="grid grid-cols-1 md:grid-cols-12 gap-4">
-                            <div className="md:col-span-6">
+
+                            {/* Title (8) */}
+                            <div className="md:col-span-8">
                                 <Field
                                     labelProps={{ children: 'Title *' }}
                                     inputProps={{ ...getInputProps(fields.title!, { type: 'text' }), placeholder: 'Enter submission title' }}
@@ -807,7 +925,8 @@ export default function NewSubmission() {
                                 />
                             </div>
 
-                            <div className="md:col-span-6">
+                            {/* Author Type (4) */}
+                            <div className="md:col-span-4">
                                 <SelectField
                                     labelProps={{ children: 'Author Type *' }}
                                     selectProps={getSelectProps(fields.authorType!)}
@@ -822,7 +941,8 @@ export default function NewSubmission() {
                                 </SelectField>
                             </div>
 
-                            <div className="md:col-span-6">
+                            {/* Purpose (4) */}
+                            <div className="md:col-span-4">
                                 <SelectField
                                     labelProps={{ children: 'Purpose of Submission *' }}
                                     selectProps={{
@@ -849,12 +969,11 @@ export default function NewSubmission() {
                                 </SelectField>
                             </div>
 
-                            {/* Recipient Category + Recipient */}
-                            <div className="md:col-span-6">
+                            {/* Recipient (8) */}
+                            <div className="md:col-span-8">
                                 <label className="block text-sm font-medium text-gray-700">Recipient *</label>
-
-                                <div className="mt-1 grid grid-cols-1 md:grid-cols-12 gap-2">
-                                    {/* Category */}
+                                <div className="mt-1 grid grid-cols-12 gap-2">
+                                    {/* Category (5) */}
                                     <select
                                         value={categoryId}
                                         onChange={e => {
@@ -863,7 +982,7 @@ export default function NewSubmission() {
                                             setSelectedRecipient('')
                                         }}
                                         disabled={!purpose}
-                                        className="md:col-span-5 rounded-md border border-gray-300 bg-white py-2 px-2 text-sm text-gray-900 focus:border-indigo-500 focus:outline-none focus:ring-indigo-500 shadow-sm"
+                                        className="col-span-5 rounded-md border border-gray-300 bg-white py-2 px-2 text-sm text-gray-900 focus:border-indigo-500 focus:outline-none focus:ring-indigo-500 shadow-sm"
                                         aria-label="Recipient Category"
                                     >
                                         <option value="" disabled>
@@ -876,12 +995,12 @@ export default function NewSubmission() {
                                         ))}
                                     </select>
 
-                                    {/* Recipient (name only) */}
+                                    {/* Recipient (7) */}
                                     <select
                                         value={selectedRecipient}
                                         onChange={e => setSelectedRecipient(e.target.value)}
                                         disabled={!categoryId || recipientOptions.length === 0}
-                                        className="md:col-span-7 rounded-md border border-gray-300 bg-white py-2 pl-3 pr-10 text-sm text-gray-900 focus:outline-none focus:ring-indigo-500 shadow-sm"
+                                        className="col-span-7 rounded-md border border-gray-300 bg-white py-2 pl-3 pr-10 text-sm text-gray-900 focus:outline-none focus:ring-indigo-500 shadow-sm"
                                         aria-label="Recipient OID"
                                     >
                                         <option value="" disabled>
@@ -896,7 +1015,6 @@ export default function NewSubmission() {
                                         ))}
                                     </select>
                                 </div>
-
                                 {recipientHelp ? <p className="mt-1 text-xs text-gray-500">{recipientHelp}</p> : null}
                                 <ErrorList
                                     errors={fields.recipient?.errors}
@@ -904,15 +1022,13 @@ export default function NewSubmission() {
                                 />
                             </div>
 
-                            {/* Shared heads-up for Purpose & Recipient (tighter spacing) */}
-                            <div className="md:col-span-12 -mt-2 -mb-2 rounded border border-amber-300 bg-amber-50 px-3 py-1 text-xs text-amber-900">
+                            {/* Heads-up (12) */}
+                            <div className="md:col-span-12 -mt-1 rounded border border-amber-300 bg-amber-50 px-3 py-1.5 text-xs text-amber-900">
                                 <strong>Heads up:</strong> Choose the appropriate <span className="font-semibold">purpose of submission</span> and <span className="font-semibold">recipient</span> because we cannot change these after creating a submission.
                             </div>
 
-                            <div className="md:col-span-12"></div>
-
-                            <div className="md:col-span-6">
-                            <div className="md:col-span-6">
+                            {/* NPI (4) */}
+                            <div className="md:col-span-4">
                                 <SelectField
                                     labelProps={{ children: 'NPI *' }}
                                     selectProps={getSelectProps(fields.providerId!)}
@@ -928,7 +1044,8 @@ export default function NewSubmission() {
                                 </SelectField>
                             </div>
 
-                            <div className="md:col-span-6">
+                            {/* Claim ID (4) */}
+                            <div className="md:col-span-4">
                                 <Field
                                     labelProps={{ children: 'Claim ID *' }}
                                     inputProps={{ ...getInputProps(fields.claimId!, { type: 'text' }) }}
@@ -936,7 +1053,8 @@ export default function NewSubmission() {
                                 />
                             </div>
 
-                            <div className="md:col-span-6">
+                            {/* Case ID (4) */}
+                            <div className="md:col-span-4">
                                 <Field
                                     labelProps={{ children: 'Case ID' }}
                                     inputProps={{
@@ -948,7 +1066,8 @@ export default function NewSubmission() {
                                 />
                             </div>
 
-                            <div className="md:col-span-6">
+                            {/* Comments (12) */}
+                            <div className="md:col-span-12">
                                 <TextareaField
                                     labelProps={{ children: 'Comments' }}
                                     textareaProps={{
@@ -961,6 +1080,7 @@ export default function NewSubmission() {
                                 />
                             </div>
 
+                            {/* Send in X12 (6) */}
                             <div className="md:col-span-6">
                                 <SelectField
                                     labelProps={{ children: 'Send in X12' }}
@@ -972,6 +1092,7 @@ export default function NewSubmission() {
                                 </SelectField>
                             </div>
 
+                            {/* Threshold (6) */}
                             <div className="md:col-span-6">
                                 <Field
                                     labelProps={{ children: 'Threshold' }}
@@ -1058,9 +1179,9 @@ export default function NewSubmission() {
                         <div className="flex items-center justify-between mb-2">
                             <h3 className="text-base font-semibold text-gray-900">Document Metadata</h3>
                             <div className="flex items-center gap-2 text-xs">
-                <span className="inline-block rounded px-2 py-0.5 ring-1 ring-emerald-300 bg-emerald-50 text-emerald-700">
-                  Total: {totalSizeMB.toFixed(1)} / 300 MB
-                </span>
+                                <span className="inline-block rounded px-2 py-0.5 ring-1 ring-emerald-300 bg-emerald-50 text-emerald-700">
+                                  Total: {totalSizeMB.toFixed(1)} / 300 MB
+                                </span>
                             </div>
                         </div>
 
@@ -1177,7 +1298,6 @@ export default function NewSubmission() {
                         >
                             Next
                         </StatusButton>
-                    </div>
                     </div>
 
                     <ErrorList
