@@ -903,6 +903,7 @@ export default function NewSubmission() {
                             <div className="md:col-span-12"></div>
 
                             <div className="md:col-span-6">
+                            <div className="md:col-span-6">
                                 <SelectField
                                     labelProps={{ children: 'NPI *' }}
                                     selectProps={getSelectProps(fields.providerId!)}
@@ -1167,6 +1168,7 @@ export default function NewSubmission() {
                         >
                             Next
                         </StatusButton>
+                    </div>
                     </div>
 
                     <ErrorList
