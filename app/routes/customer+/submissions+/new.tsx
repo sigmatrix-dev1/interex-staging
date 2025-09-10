@@ -647,28 +647,28 @@ export default function NewSubmission() {
         defaultValue: retryInitial ?? undefined,
     })
 
+    // 🔧 Consistent control sizing across inputs & selects
+    const CONTROL_BASE = 'mt-1 block w-full rounded-md text-sm'
+    const INPUT_CLS = `${CONTROL_BASE} border border-gray-300 bg-white px-3 h-10 text-gray-900 focus:border-indigo-500 focus:ring-indigo-500`
+    const SELECT_CLS = `${CONTROL_BASE} border border-gray-300 bg-white pl-3 pr-10 h-10 text-gray-900 focus:border-indigo-500 focus:ring-indigo-500`
+    const READONLY_CLS = `${CONTROL_BASE} border border-gray-200 bg-gray-50 px-3 h-10 text-gray-700`
+
     // One-off nonce for draft cache keys (per tab)
     const [draftNonce] = React.useState(() => crypto.randomUUID())
 
     /* --------------------------------------------
        Purpose → Category → Recipient (dependent UI)
-       --------------------------------------------
-       - Purpose drives available categories
-       - Category drives available recipients
-       - Selected recipient OID is synced to hidden input
-    */
+       -------------------------------------------- */
     const [purpose, setPurpose] = React.useState<SubmissionPurpose | ''>(
         (retryInitial?.purposeOfSubmission as SubmissionPurpose) || ''
     )
 
-    // Helper option types (from enum helpers)
     type CategoryOpt = ReturnType<typeof categoriesForPurpose>[number]
     const categoryOptions: CategoryOpt[] = React.useMemo(
         () => (purpose ? categoriesForPurpose(purpose as SubmissionPurpose) : []),
         [purpose],
     )
 
-    // Narrow category discriminator
     const isRecipientCategory = (v: string): v is RecipientCategory =>
         (RecipientCategories as readonly string[]).includes(v)
 
@@ -682,7 +682,6 @@ export default function NewSubmission() {
 
     const [selectedRecipient, setSelectedRecipient] = React.useState<string>(retryInitial?.recipient || '')
 
-    // Keep hidden input in sync with chosen OID
     React.useEffect(() => {
         const hidId = fields.recipient?.id
         if (!hidId) return
@@ -690,7 +689,6 @@ export default function NewSubmission() {
         if (hidden) hidden.value = selectedRecipient || ''
     }, [fields.recipient?.id, selectedRecipient])
 
-    // Reset category/recipient when purpose changes (unless retry prefill)
     React.useEffect(() => {
         setCategoryId('')
         if (!retryInitial) setSelectedRecipient('')
@@ -703,10 +701,7 @@ export default function NewSubmission() {
 
     /* ------------------------
        Split kind → Doc blocks
-       ------------------------
-       - splitKind toggles autoSplit hidden flag
-       - docCount renders 1/3/4/5 blocks in manual mode
-    */
+       ------------------------ */
     const [splitKind, setSplitKind] = React.useState<'' | 'manual' | 'auto'>(
         (retryInitial?.splitKind as 'manual' | 'auto') || 'manual'
     )
@@ -714,7 +709,6 @@ export default function NewSubmission() {
         (retryInitial?.docCount as number | undefined) ?? 1
     )
 
-    // Keep hidden autoSplit in sync with splitKind
     React.useEffect(() => {
         const hidId = fields.autoSplit?.id
         if (!hidId) return
@@ -727,11 +721,7 @@ export default function NewSubmission() {
 
     /* --------------------------
        Document UX + draft cache
-       --------------------------
-       - We pre-validate size and extension
-       - We write picked files to a per-tab draft cache (draftNonce)
-       - Step 2 will move them → submission cache
-    */
+       -------------------------- */
     const [dropErrors, setDropErrors] = React.useState<Record<number, string>>({})
     const [docPicked, setDocPicked] = React.useState<Record<number, boolean>>({})
     const [docFilled, setDocFilled] = React.useState<Record<number, boolean>>({})
@@ -782,7 +772,6 @@ export default function NewSubmission() {
         return base.replace(/\w\S*/g, (w: string) => w.charAt(0).toUpperCase() + w.slice(1))
     }
 
-    // Handle file selection for a document block (size/ext checks + draft cache write)
     async function handlePick(idx: number, file: File) {
         const BYTES_PER_MB = 1024 * 1024
         const mb = file.size / BYTES_PER_MB
@@ -811,16 +800,13 @@ export default function NewSubmission() {
             return
         }
 
-        // Update UI state
         setDropErrors(prev => ({ ...prev, [idx]: '' }))
         setDocPicked(prev => ({ ...prev, [idx]: true }))
         setDocSizes(prev => ({ ...prev, [idx]: file.size }))
 
-        // Seed name/filename if empty
         const current = docMeta[idx] ?? { name: '', filename: '', attachmentControlNum: '' }
         updateDocMeta(idx, { filename: file.name, name: current.name ? current.name : titleCaseFrom(file.name) }, true)
 
-        // Best-effort cache write AFTER UI updates
         try {
             await setCachedFile(draftKey(draftNonce, idx), file)
         } catch (e) {
@@ -828,7 +814,6 @@ export default function NewSubmission() {
         }
     }
 
-    // Try pre-fill from draft cache on mount / when split changes (user may navigate back)
     React.useEffect(() => {
         void (async () => {
             const count = splitKind === 'manual' ? Number(docCount || 0) : splitKind === 'auto' ? 1 : 0
@@ -871,7 +856,6 @@ export default function NewSubmission() {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [splitKind, docCount, draftNonce])
 
-    // Reset block state if split kind / count changes
     React.useEffect(() => {
         setDocPicked({})
         setDocFilled({})
@@ -885,7 +869,6 @@ export default function NewSubmission() {
             const init: Record<number, DocMeta> = {}
             for (let i = 1; i <= (count || 0); i++) init[i] = { name: '', filename: '', attachmentControlNum: '' }
 
-            // Seed from retry initial docs if present
             if (retryInitial && retryInitialDocs?.length) {
                 for (let i = 1; i <= Math.min(retryInitialDocs.length, count || 0); i++) {
                     init[i] = {
@@ -902,11 +885,6 @@ export default function NewSubmission() {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [splitKind, docCount])
 
-    /* ------------------------------
-       Client-side validation (alerts)
-       ------------------------------
-       Guards obvious issues before POST; server still validates.
-    */
     function validateBeforeSubmit(): boolean {
         const errs: string[] = []
 
@@ -930,7 +908,6 @@ export default function NewSubmission() {
         return true
     }
 
-    // Lock background scroll while fullscreen Drawer is mounted (better modal UX)
     React.useEffect(() => {
         const prev = document.body.style.overflow
         document.body.style.overflow = 'hidden'
@@ -963,7 +940,7 @@ export default function NewSubmission() {
                         if (!validateBeforeSubmit()) e.preventDefault()
                     }}
                 >
-                    {/* Hidden fields (intent, nonce, retry, derived/locked values) */}
+                    {/* Hidden fields */}
                     <input type="hidden" name="intent" value="create" />
                     <input type="hidden" name="draftNonce" value={draftNonce} />
                     {retryInitial?.retrySubmissionId ? (
@@ -976,13 +953,16 @@ export default function NewSubmission() {
                     <div className="rounded-lg border border-gray-200 bg-white p-4">
                         <h3 className="text-base font-semibold text-gray-900 mb-4">Submission Details</h3>
 
-                        {/* Compact 12-col grid */}
                         <div className="grid grid-cols-1 md:grid-cols-12 gap-4">
                             {/* Title (8) */}
                             <div className="md:col-span-8">
                                 <Field
                                     labelProps={{ children: 'Title *' }}
-                                    inputProps={{ ...getInputProps(fields.title!, { type: 'text' }), placeholder: 'Enter submission title' }}
+                                    inputProps={{
+                                        ...getInputProps(fields.title!, { type: 'text' }),
+                                        placeholder: 'Enter submission title',
+                                        className: INPUT_CLS,
+                                    }}
                                     errors={fields.title?.errors}
                                 />
                             </div>
@@ -991,7 +971,7 @@ export default function NewSubmission() {
                             <div className="md:col-span-4">
                                 <SelectField
                                     labelProps={{ children: 'Author Type *' }}
-                                    selectProps={getSelectProps(fields.authorType!)}
+                                    selectProps={{ ...getSelectProps(fields.authorType!), className: SELECT_CLS }}
                                     errors={fields.authorType?.errors}
                                 >
                                     <option value="">Select author type</option>
@@ -1003,17 +983,16 @@ export default function NewSubmission() {
                                 </SelectField>
                             </div>
 
-                            {/* Purpose (4) — changes available recipients */}
+                            {/* Purpose (4) */}
                             <div className="md:col-span-4">
                                 <SelectField
                                     labelProps={{ children: 'Purpose of Submission *' }}
                                     selectProps={{
                                         ...getSelectProps(fields.purposeOfSubmission!),
+                                        className: SELECT_CLS,
                                         onChange: (e: React.ChangeEvent<HTMLSelectElement>) => {
                                             const v = e.target.value as SubmissionPurpose | ''
                                             setPurpose(v)
-
-                                            // Also update the Conform field value manually so it tracks the selection
                                             const el = e.currentTarget
                                             const nativeSetter = (Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value') as any)?.set
                                             nativeSetter?.call(el, v)
@@ -1046,7 +1025,7 @@ export default function NewSubmission() {
                                             setSelectedRecipient('')
                                         }}
                                         disabled={!purpose}
-                                        className="col-span-5 rounded-md border border-gray-300 bg-white py-2 px-2 text-sm text-gray-900 focus:border-indigo-500 focus:outline-none focus:ring-indigo-500 shadow-sm"
+                                        className={`col-span-5 ${SELECT_CLS}`}
                                         aria-label="Recipient Category"
                                     >
                                         <option value="" disabled>
@@ -1064,7 +1043,7 @@ export default function NewSubmission() {
                                         value={selectedRecipient}
                                         onChange={e => setSelectedRecipient(e.target.value)}
                                         disabled={!categoryId || recipientOptions.length === 0}
-                                        className="col-span-7 rounded-md border border-gray-300 bg-white py-2 pl-3 pr-10 text-sm text-gray-900 focus:outline-none focus:ring-indigo-500 shadow-sm"
+                                        className={`col-span-7 ${SELECT_CLS}`}
                                         aria-label="Recipient OID"
                                     >
                                         <option value="" disabled>
@@ -1080,7 +1059,6 @@ export default function NewSubmission() {
                                     </select>
                                 </div>
 
-                                {/* Helpful "Name (OID)" line below the picker */}
                                 {recipientHelp ? <p className="mt-1 text-xs text-gray-500">{recipientHelp}</p> : null}
 
                                 <ErrorList
@@ -1089,7 +1067,7 @@ export default function NewSubmission() {
                                 />
                             </div>
 
-                            {/* Heads-up (12) — immutable fields after create */}
+                            {/* Heads-up */}
                             <div className="md:col-span-12 -mt-1 rounded border border-amber-300 bg-amber-50 px-3 py-1.5 text-xs text-amber-900">
                                 <strong>Heads up:</strong> Choose the appropriate <span className="font-semibold">purpose of submission</span> and <span className="font-semibold">recipient</span> because we cannot change these after creating a submission.
                             </div>
@@ -1098,7 +1076,7 @@ export default function NewSubmission() {
                             <div className="md:col-span-4">
                                 <SelectField
                                     labelProps={{ children: 'NPI *' }}
-                                    selectProps={getSelectProps(fields.providerId!)}
+                                    selectProps={{ ...getSelectProps(fields.providerId!), className: SELECT_CLS }}
                                     errors={fields.providerId?.errors}
                                 >
                                     <option value="">Select NPI</option>
@@ -1115,7 +1093,7 @@ export default function NewSubmission() {
                             <div className="md:col-span-4">
                                 <Field
                                     labelProps={{ children: 'Claim ID *' }}
-                                    inputProps={{ ...getInputProps(fields.claimId!, { type: 'text' }) }}
+                                    inputProps={{ ...getInputProps(fields.claimId!, { type: 'text' }), className: INPUT_CLS }}
                                     errors={fields.claimId?.errors}
                                 />
                             </div>
@@ -1128,12 +1106,13 @@ export default function NewSubmission() {
                                         ...getInputProps(fields.caseId!, { type: 'text' }),
                                         placeholder: 'Up to 32 chars',
                                         maxLength: 32,
+                                        className: INPUT_CLS,
                                     }}
                                     errors={fields.caseId?.errors}
                                 />
                             </div>
 
-                            {/* Comments (12) */}
+                            {/* Comments (12) — textarea intentionally taller */}
                             <div className="md:col-span-12">
                                 <TextareaField
                                     labelProps={{ children: 'Comments' }}
@@ -1151,7 +1130,7 @@ export default function NewSubmission() {
                             <div className="md:col-span-6">
                                 <SelectField
                                     labelProps={{ children: 'Send in X12' }}
-                                    selectProps={getSelectProps(fields.sendInX12!)}
+                                    selectProps={{ ...getSelectProps(fields.sendInX12!), className: SELECT_CLS }}
                                     errors={fields.sendInX12?.errors}
                                 >
                                     <option value="false">False</option>
@@ -1163,7 +1142,7 @@ export default function NewSubmission() {
                             <div className="md:col-span-6">
                                 <Field
                                     labelProps={{ children: 'Threshold' }}
-                                    inputProps={{ ...getInputProps(fields.threshold!, { type: 'number' }), min: 1, placeholder: '100' }}
+                                    inputProps={{ ...getInputProps(fields.threshold!, { type: 'number' }), min: 1, placeholder: '100', className: INPUT_CLS }}
                                     errors={fields.threshold?.errors}
                                 />
                             </div>
@@ -1183,14 +1162,13 @@ export default function NewSubmission() {
                                         const v = e.target.value as 'manual' | 'auto' | ''
                                         setSplitKind(v)
                                         if (v === 'auto') setDocCount('') // docCount only applies to manual mode
-                                        // Reset document UI state
                                         setDocPicked({})
                                         setDocFilled({})
                                         setDropErrors({})
                                         setDocSizes({})
                                         setDzReset({})
                                     }}
-                                    className="mt-1 block w-full rounded-md border border-gray-300 bg-white py-2 pl-3 pr-10 text-sm"
+                                    className={SELECT_CLS}
                                     required
                                 >
                                     <option value="">Select</option>
@@ -1209,7 +1187,7 @@ export default function NewSubmission() {
                                     readOnly
                                     value={splitKind === '' ? '' : splitKind === 'auto' ? 'true' : 'false'}
                                     placeholder="—"
-                                    className="mt-1 block w-full rounded-md border border-gray-200 bg-white py-2 px-3 text-sm"
+                                    className={READONLY_CLS}
                                 />
                             </div>
 
@@ -1221,14 +1199,13 @@ export default function NewSubmission() {
                                         value={docCount}
                                         onChange={e => {
                                             setDocCount(e.target.value ? Number(e.target.value) : '')
-                                            // Reset document UI state
                                             setDocPicked({})
                                             setDocFilled({})
                                             setDropErrors({})
                                             setDocSizes({})
                                             setDzReset({})
                                         }}
-                                        className="mt-1 block w-full rounded-md border border-gray-300 bg-white py-2 pl-3 pr-10 text-sm"
+                                        className={SELECT_CLS}
                                         required
                                     >
                                         <option value="">Select</option>
@@ -1287,7 +1264,7 @@ export default function NewSubmission() {
                                                         type="text"
                                                         readOnly
                                                         value={i}
-                                                        className="mt-1 block w-full rounded-md border border-gray-200 bg-gray-50 py-2 px-3 text-sm"
+                                                        className={READONLY_CLS}
                                                     />
                                                 </div>
 
@@ -1300,7 +1277,7 @@ export default function NewSubmission() {
                                                         type="text"
                                                         value={meta.name}
                                                         onChange={e => updateDocMeta(i, { name: e.currentTarget.value })}
-                                                        className="mt-1 block w-full rounded-md border border-gray-300 bg-white py-2 px-3 text-sm"
+                                                        className={INPUT_CLS}
                                                         placeholder="e.g., Progress Notes"
                                                     />
                                                 </div>
@@ -1312,7 +1289,7 @@ export default function NewSubmission() {
                                                         type="text"
                                                         value={meta.filename}
                                                         onChange={e => updateDocMeta(i, { filename: e.currentTarget.value })}
-                                                        className="mt-1 block w-full rounded-md border border-gray-300 bg-white py-2 px-3 text-sm"
+                                                        className={INPUT_CLS}
                                                         placeholder="MyDocument.pdf"
                                                     />
                                                 </div>
@@ -1324,7 +1301,7 @@ export default function NewSubmission() {
                                                         type="text"
                                                         value={meta.attachmentControlNum}
                                                         onChange={e => updateDocMeta(i, { attachmentControlNum: e.currentTarget.value })}
-                                                        className="mt-1 block w-full rounded-md border border-gray-300 bg-white py-2 px-3 text-sm"
+                                                        className={INPUT_CLS}
                                                         placeholder={DEFAULT_ACN_HINT}
                                                     />
                                                 </div>
@@ -1335,7 +1312,7 @@ export default function NewSubmission() {
                                                         type="text"
                                                         readOnly
                                                         value="pdf"
-                                                        className="mt-1 block w-full rounded-md border border-gray-200 bg-gray-50 py-2 px-3 text-sm"
+                                                        className={READONLY_CLS}
                                                     />
                                                 </div>
                                             </div>

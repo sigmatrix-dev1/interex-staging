@@ -1,3 +1,5 @@
+// app/routes/admin+/customers.$customerId.manage.tsx
+
 import { type LoaderFunctionArgs, data, useLoaderData, Link  } from 'react-router'
 import { InterexLayout } from '#app/components/interex-layout.tsx'
 import { Icon } from '#app/components/ui/icon.tsx'
