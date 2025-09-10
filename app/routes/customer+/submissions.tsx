@@ -6,6 +6,7 @@ import { InterexLayout } from '#app/components/interex-layout.tsx'
 import { SubmissionActivityLog } from '#app/components/submission-activity-log.tsx'
 import { Drawer } from '#app/components/ui/drawer.tsx'
 import { Icon } from '#app/components/ui/icon.tsx'
+import { LoadingOverlay } from '#app/components/ui/loading-overlay.tsx' // <-- ADDED
 import { StatusButton } from '#app/components/ui/status-button.tsx'
 import {
     SubmissionPurposeValues,
@@ -305,8 +306,34 @@ export default function Submissions() {
     const safe = (v: any, fallback = '—') =>
         v === null || v === undefined || v === '' ? fallback : v
 
+    // --- ADDED: derive whether we're doing the update-status submit
+    const isUpdatingStatus =
+        nav.state !== 'idle' && nav.formData?.get('intent') === 'update-status'
+
+    // --- ADDED: lock background scroll when Drawer open or overlay showing
+    useEffect(() => {
+        const shouldLock = drawerState.isOpen || isUpdatingStatus
+        const prev = document.body.style.overflow
+        if (shouldLock) {
+            document.body.style.overflow = 'hidden'
+        } else {
+            document.body.style.overflow = prev || ''
+            document.body.style.overflow = ''
+        }
+        return () => {
+            document.body.style.overflow = ''
+        }
+    }, [drawerState.isOpen, isUpdatingStatus])
+
     return (
         <>
+            {/* ADDED: Global loading overlay for update status */}
+            <LoadingOverlay
+                show={isUpdatingStatus}
+                title="Updating status…"
+                message="Contacting PCG and refreshing submission state. Please wait."
+            />
+
             <InterexLayout
                 user={user}
                 title="Submissions"
@@ -489,12 +516,12 @@ export default function Submissions() {
                                                     </td>
                                                     <td className="px-4 py-4 text-sm text-gray-500">
                                                         <div className="flex flex-col">
-                                <span className="whitespace-nowrap">
-                                  {new Date(s.createdAt).toLocaleDateString()}
-                                </span>
+                                                                <span className="whitespace-nowrap">
+                                                                  {new Date(s.createdAt).toLocaleDateString()}
+                                                                </span>
                                                             <span className="text-xs text-gray-400 whitespace-nowrap">
-                                  {new Date(s.createdAt).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'})}
-                                </span>
+                                                                  {new Date(s.createdAt).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'})}
+                                                                </span>
                                                         </div>
                                                     </td>
                                                     <td className="px-4 py-4 text-right w-20">
@@ -687,7 +714,7 @@ export default function Submissions() {
                                                                 <th className="px-3 py-2 text-left text-xs font-medium bold text-gray-900 tracking-wider">Time</th>
                                                                 <th className="px-3 py-2 text-left text-xs font-medium bold text-gray-900 tracking-wider">Title</th>
                                                                 <th className="px-3 py-2 text-left text-xs font-medium bold text-gray-900 tracking-wider">Status</th>
-                                                                <th className="px-3 py-2 text-left text-xs font-medium bold text-gray-900 tracking-wider">esMD Txn ID</th>
+                                                                <th className="px-3 py-2 text-left text-xs font-medium text-gray-900 tracking-wider">esMD Txn ID</th>
                                                                 <th className="px-3 py-2 text-left text-xs font-medium text-gray-900 tracking-wider">Split</th>
                                                             </tr>
                                                             </thead>

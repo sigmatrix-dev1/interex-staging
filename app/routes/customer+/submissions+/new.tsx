@@ -1,4 +1,20 @@
 // app/routes/customer+/submissions.new.tsx
+
+/**
+ * Step 1 of 3 — Create Submission
+ * --------------------------------
+ * This route lets a user compose submission metadata and plan documents.
+ * - Validates inputs with Zod + Conform
+ * - Enforces RBAC (system/customer/provider-group/assigned NPI)
+ * - Creates/updates a local Submission
+ * - Calls PCG to create its remote submission counterpart
+ * - Immediately snapshots PCG status back into our DB for accuracy
+ * - Caches picked files (by draft nonce) so user can continue later
+ *
+ * On success we redirect to Step 2 (review) with the draft nonce in the URL
+ * so cached files can be moved from draft cache → submission cache.
+ */
+
 import { getFormProps, getInputProps, getSelectProps, useForm } from '@conform-to/react'
 import { getZodConstraint, parseWithZod } from '@conform-to/zod'
 import { type SubmissionPurpose as PrismaSubmissionPurpose } from '@prisma/client'
@@ -15,9 +31,12 @@ import {
     type ActionFunctionArgs,
 } from 'react-router'
 import { z } from 'zod'
+
+/* =========================
+   UI Components & Utilities
+   ========================= */
 import { FileDropzone } from '#app/components/file-dropzone.tsx'
 import { Field, SelectField, TextareaField, ErrorList } from '#app/components/forms.tsx'
-import { InterexLayout } from '#app/components/interex-layout.tsx'
 import { Drawer } from '#app/components/ui/drawer.tsx'
 import { LoadingOverlay } from '#app/components/ui/loading-overlay.tsx'
 import { StatusButton } from '#app/components/ui/status-button.tsx'
@@ -39,11 +58,15 @@ import { prisma } from '#app/utils/db.server.ts'
 import { draftKey, getCachedFile, setCachedFile } from '#app/utils/file-cache.ts'
 import { redirectWithToast } from '#app/utils/toast.server.ts'
 
+/* ===============
+   Types & Config
+   =============== */
 type Npi = { id: string; npi: string; name: string | null }
-
 const DEFAULT_ACN_HINT = 'Please specify attachment control number'
 
-// ---------- Schema (base form fields) ----------
+/* ==========================
+   Schema (base form fields)
+   ========================== */
 const CreateSubmissionSchema = z.object({
     intent: z.literal('create'),
     title: z.string().min(1, 'Title is required'),
@@ -55,20 +78,29 @@ const CreateSubmissionSchema = z.object({
     caseId: z.string().max(32).optional(),
     comments: z.string().optional(),
 
+    // Split settings (drive UI and the derived autoSplit value)
     splitKind: z.enum(['manual', 'auto'], { required_error: 'Split kind is required' }),
     docCount: z.preprocess(v => (v === '' ? undefined : v), z.coerce.number().int()).optional(),
 
+    // Derived flags (submitted as strings from hidden inputs / selects)
     autoSplit: z.enum(['true', 'false']).transform(v => v === 'true'),
     sendInX12: z.enum(['true', 'false']).transform(v => v === 'true'),
     threshold: z.coerce.number().int().min(1).default(100),
 
-    // carries the per-tab nonce so we can move cached files once we have a submissionId
+    // Per-tab nonce for caching files before a submissionId exists
     draftNonce: z.string().min(1, 'Missing draft nonce'),
 
-    // present only in retry mode
+    // Only present when retrying a previously failed submission
     retrySubmissionId: z.string().optional(),
 })
 
+/* ==========================
+   Loader — Prefill & Access
+   ==========================
+   - Authenticates user
+   - Computes available NPIs by role
+   - If retry, pulls last meta/documents to prefill the form
+*/
 export async function loader({ request }: LoaderFunctionArgs) {
     const userId = await requireUserId(request)
     const url = new URL(request.url)
@@ -93,6 +125,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
         throw new Response('User must be associated with a customer', { status: 400 })
     }
 
+    // Role-aware NPI choices (System → all, Customer/Group → scoped, Member → assigned)
     const availableNpis: Npi[] = isSystemAdmin
         ? await prisma.provider.findMany({
             where: { active: true },
@@ -112,7 +145,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
                     .filter(un => un.provider?.active)
                     .map(un => ({ id: un.provider.id, npi: un.provider.npi, name: un.provider.name }))
 
-    // ---- Retry prefill support ----
+    // ---------- Retry prefill support ----------
     let retryInitial:
         | (Partial<Record<string, any>> & { retrySubmissionId: string; docCount?: number })
         | null = null
@@ -130,8 +163,9 @@ export async function loader({ request }: LoaderFunctionArgs) {
                 },
             },
         })
+
         if (submission) {
-            // pull the payload we wrote at step 1
+            // Get initial meta snapshot from the last DRAFT_CREATED or META_UPDATED
             const metaEvent =
                 submission.events.find(e => e.kind === 'DRAFT_CREATED') ??
                 submission.events.find(e => e.kind === 'META_UPDATED')
@@ -142,7 +176,8 @@ export async function loader({ request }: LoaderFunctionArgs) {
                 retrySubmissionId: submission.id,
                 title: latestMeta?.name ?? submission.title ?? '',
                 authorType:
-                    latestMeta?.author_type ?? (submission.authorType?.toLowerCase() === 'institutional' ? 'institutional' : 'individual'),
+                    latestMeta?.author_type ??
+                    (submission.authorType?.toLowerCase() === 'institutional' ? 'institutional' : 'individual'),
                 purposeOfSubmission: latestMeta?.purposeOfSubmission ?? submission.purposeOfSubmission ?? '',
                 recipient: latestMeta?.intended_recepient ?? submission.recipient ?? '',
                 providerId: submission.provider?.id ?? '',
@@ -167,10 +202,15 @@ export async function loader({ request }: LoaderFunctionArgs) {
     return data({ user, availableNpis, retryInitial, retryInitialDocs })
 }
 
-// Helper to pull N document blocks from formData
+/* ==========================================
+   Helper — Pull N document blocks from form
+   ==========================================
+   Validates document sub-fields and shapes them for PCG payload.
+*/
 function collectDocumentsFromForm(formData: FormData, kind: 'manual' | 'auto', docCount?: number) {
     const errors: string[] = []
     const count = kind === 'manual' ? Number(docCount) : 1
+
     if (kind === 'manual') {
         if (![1, 3, 4, 5].includes(count)) {
             errors.push('Number of documents must be 1, 3, 4, or 5.')
@@ -208,8 +248,11 @@ function collectDocumentsFromForm(formData: FormData, kind: 'manual' | 'auto', d
 }
 
 /* =======================
-   NEW: PCG snapshot wiring
-   ======================= */
+   PCG snapshot helpers
+   =======================
+   After creating on PCG we immediately fetch status and update our DB.
+   This keeps local rows in-sync with authoritative PCG state.
+*/
 
 /** Normalize OID from PCG (may come as 'urn:oid:<oid>' or plain). */
 function normalizeOid(oid?: string | null) {
@@ -237,14 +280,13 @@ function mapPcgPurposeCodeToLocalEnum(code?: string | null): PrismaSubmissionPur
 }
 
 /**
- * After creating (or re-creating on retry) we immediately fetch PCG status
- * and overwrite local DB with authoritative details (title, stage, ids, etc).
- * This preserves audit by writing a PCG_STATUS event with the full payload.
+ * Fetch PCG status and write a PCG_STATUS event + overwrite local DB fields.
+ * Best-effort: failure here should not block user flow.
  */
 async function persistRemoteSnapshot(submissionId: string, pcgId: string) {
     const statusResp = await pcgGetStatus(pcgId)
 
-    // Always audit the raw payload
+    // Always audit the raw payload we got from PCG
     await prisma.submissionEvent.create({
         data: {
             submissionId,
@@ -254,57 +296,48 @@ async function persistRemoteSnapshot(submissionId: string, pcgId: string) {
         },
     })
 
-    // Extract a transaction identifier if present
+    // PCG may return one of multiple identifiers; normalize to a single transactionId
     const rawTxnList = (statusResp as any)?.transactionIdList || (statusResp as any)?.uniqueIdList || ''
     const normalizedTxnList = typeof rawTxnList === 'string' ? rawTxnList.trim() : ''
     const txn = statusResp.esmdTransactionId ?? (normalizedTxnList || null)
 
-    // Build update data from the snapshot
+    // Update local submission with the authoritative snapshot
     const updateData: any = {
-        // stage from PCG
         responseMessage: statusResp.stage ?? undefined,
-
-        // ids
         transactionId: txn ?? undefined,
-        pcgSubmissionId: pcgId, // ensure stored
-
-        // top-level echoes
+        pcgSubmissionId: pcgId,
         title: statusResp.title ?? undefined,
         claimId: statusResp.esmdClaimId ?? undefined,
         caseId: statusResp.esmdCaseId ?? undefined,
         authorType: statusResp.authorType ?? undefined,
         autoSplit: typeof statusResp.autoSplit === 'boolean' ? statusResp.autoSplit : undefined,
         comments: statusResp.comments ?? undefined,
-
-        // recipient
         recipient: normalizeOid(statusResp.intendedRecipient?.oid) ?? undefined,
     }
 
-    // Map purpose by contentType code if present
     const mappedPurpose = mapPcgPurposeCodeToLocalEnum(statusResp.purposeOfSubmission?.contentType)
-    if (mappedPurpose) {
-        updateData.purposeOfSubmission = mappedPurpose
-    }
+    if (mappedPurpose) updateData.purposeOfSubmission = mappedPurpose
 
-    // Best-effort error surface consolidation
-    const allErrors = [
-        ...(statusResp.errorList ?? []),
-        ...(statusResp.errors ?? []),
-    ]
+    // Optional combined error surface (convenience for operators)
+    const allErrors = [...(statusResp.errorList ?? []), ...(statusResp.errors ?? [])]
     if (allErrors.length) {
         updateData.errorDescription = allErrors
             .map((e: any) => (typeof e === 'string' ? e : e?.message ?? JSON.stringify(e)))
             .join('; ')
     }
 
-    await prisma.submission.update({
-        where: { id: submissionId },
-        data: updateData,
-    })
+    await prisma.submission.update({ where: { id: submissionId }, data: updateData })
 }
 
+/* ==========================
+   Action — Create submission
+   ==========================
+   Validates, enforces RBAC, creates/updates local row,
+   calls PCG, snapshots PCG status, then redirects to Step 2.
+*/
 export async function action({ request }: ActionFunctionArgs) {
     const userId = await requireUserId(request)
+
     const user = await prisma.user.findUnique({
         where: { id: userId },
         include: {
@@ -345,6 +378,7 @@ export async function action({ request }: ActionFunctionArgs) {
         retrySubmissionId,
     } = parsed.value as any
 
+    // Split validation
     if (splitKind === 'manual' && ![1, 3, 4, 5].includes(Number(docCount))) {
         return data(
             { result: parsed.reply({ formErrors: ['Please choose the number of documents (1, 3, 4, or 5).'] }) },
@@ -352,11 +386,13 @@ export async function action({ request }: ActionFunctionArgs) {
         )
     }
 
+    // Document blocks
     const { documents, errors } = collectDocumentsFromForm(formData, splitKind, docCount)
     if (errors.length) {
         return data({ result: parsed.reply({ formErrors: errors }) }, { status: 400 })
     }
 
+    // RBAC: provider must be valid + in allowed scope
     const provider = await prisma.provider.findUnique({
         where: { id: providerId },
         include: { providerGroup: true },
@@ -386,6 +422,7 @@ export async function action({ request }: ActionFunctionArgs) {
         }
     }
 
+    // Build PCG payload from normalized values
     const pcgPayload = buildCreateSubmissionPayload({
         purposeOfSubmission,
         author_npi: provider.npi,
@@ -407,14 +444,16 @@ export async function action({ request }: ActionFunctionArgs) {
         })),
     })
 
-    // ----- Normal create vs Retry create (update existing row) -----
+    // ======================================
+    // Retry Flow — Update row then re-create
+    // ======================================
     if (retrySubmissionId) {
-        // Update the existing submission row before trying PCG again
         const existing = await prisma.submission.findUnique({ where: { id: retrySubmissionId } })
         if (!existing) {
             return data({ result: parsed.reply({ formErrors: ['Retry submission not found'] }) }, { status: 404 })
         }
 
+        // Keep status as ERROR until PCG accepts the re-create
         await prisma.submission.update({
             where: { id: retrySubmissionId },
             data: {
@@ -429,10 +468,11 @@ export async function action({ request }: ActionFunctionArgs) {
                 sendInX12,
                 threshold,
                 providerId,
-                status: 'ERROR', // keep as error until PCG accepts
+                status: 'ERROR',
             },
         })
 
+        // Audit the payload we’re about to send
         await prisma.submissionEvent.create({
             data: {
                 submissionId: retrySubmissionId,
@@ -460,14 +500,10 @@ export async function action({ request }: ActionFunctionArgs) {
                 },
             })
 
-            // =======================
-            // NEW: fetch & overwrite from PCG immediately
-            // =======================
+            // Best-effort: immediately overwrite local with PCG snapshot
             try {
                 await persistRemoteSnapshot(retrySubmissionId, pcgResp.submission_id)
-            } catch (e) {
-                // Best-effort only; keep UX flow even if this fails
-            }
+            } catch {}
 
             return await redirectWithToast(
                 `/customer/submissions/${retrySubmissionId}/review?draft=${encodeURIComponent(draftNonce)}`,
@@ -498,7 +534,9 @@ export async function action({ request }: ActionFunctionArgs) {
         }
     }
 
-    // ----- Normal (non-retry) flow -----
+    // ==========================
+    // Normal Flow — First create
+    // ==========================
     const newSubmission = await prisma.submission.create({
         data: {
             title,
@@ -518,6 +556,7 @@ export async function action({ request }: ActionFunctionArgs) {
         },
     })
 
+    // Audit local draft creation (payload we’re about to send to PCG)
     await prisma.submissionEvent.create({
         data: {
             submissionId: newSubmission.id,
@@ -545,14 +584,10 @@ export async function action({ request }: ActionFunctionArgs) {
             },
         })
 
-        // =======================
-        // NEW: fetch & overwrite from PCG immediately
-        // =======================
+        // Best-effort: immediately overwrite local with PCG snapshot
         try {
             await persistRemoteSnapshot(newSubmission.id, pcgResp.submission_id)
-        } catch (e) {
-            // Best-effort only; keep UX flow even if this fails
-        }
+        } catch {}
 
         return await redirectWithToast(
             `/customer/submissions/${newSubmission.id}/review?draft=${encodeURIComponent(draftNonce)}`,
@@ -583,6 +618,12 @@ export async function action({ request }: ActionFunctionArgs) {
     }
 }
 
+/* ======================================
+   Component — NewSubmission (Step 1 UI)
+   ======================================
+   Drives the metadata form, recipient wiring, split/doc blocks,
+   file pre-caching, and client-side validations.
+*/
 export default function NewSubmission() {
     const { user, availableNpis, retryInitial, retryInitialDocs } = useLoaderData<typeof loader>() as {
         user: any
@@ -595,6 +636,7 @@ export default function NewSubmission() {
     const navigate = useNavigate()
     const isSubmitting = nav.formData?.get('intent') === 'create'
 
+    // Conform setup (validate onBlur; prefill when retrying)
     const [form, fields] = useForm({
         id: 'create-submission',
         constraint: getZodConstraint(CreateSubmissionSchema),
@@ -602,24 +644,31 @@ export default function NewSubmission() {
             return parseWithZod(formData, { schema: CreateSubmissionSchema })
         },
         shouldRevalidate: 'onBlur',
-        defaultValue: retryInitial ?? undefined, // prefill when retrying
+        defaultValue: retryInitial ?? undefined,
     })
 
+    // One-off nonce for draft cache keys (per tab)
     const [draftNonce] = React.useState(() => crypto.randomUUID())
 
-    // ----- Purpose → Category → Recipient wiring -----
+    /* --------------------------------------------
+       Purpose → Category → Recipient (dependent UI)
+       --------------------------------------------
+       - Purpose drives available categories
+       - Category drives available recipients
+       - Selected recipient OID is synced to hidden input
+    */
     const [purpose, setPurpose] = React.useState<SubmissionPurpose | ''>(
         (retryInitial?.purposeOfSubmission as SubmissionPurpose) || ''
     )
 
-    // use the helper's return shape (prevents id/value mismatches)
+    // Helper option types (from enum helpers)
     type CategoryOpt = ReturnType<typeof categoriesForPurpose>[number]
     const categoryOptions: CategoryOpt[] = React.useMemo(
         () => (purpose ? categoriesForPurpose(purpose as SubmissionPurpose) : []),
         [purpose],
     )
 
-    // strict guard to accept only enum keys
+    // Narrow category discriminator
     const isRecipientCategory = (v: string): v is RecipientCategory =>
         (RecipientCategories as readonly string[]).includes(v)
 
@@ -641,26 +690,31 @@ export default function NewSubmission() {
         if (hidden) hidden.value = selectedRecipient || ''
     }, [fields.recipient?.id, selectedRecipient])
 
-    // Reset category/recipient when purpose changes
+    // Reset category/recipient when purpose changes (unless retry prefill)
     React.useEffect(() => {
         setCategoryId('')
         if (!retryInitial) setSelectedRecipient('')
     }, [purpose]) // eslint-disable-line react-hooks/exhaustive-deps
 
-    // Helper line shows "Name (OID)"
     const recipientHelp = React.useMemo(
         () => (selectedRecipient ? recipientHelperLabel(selectedRecipient) : undefined),
         [selectedRecipient],
     )
 
-    // Split kind -> drives autoSplit and document blocks
+    /* ------------------------
+       Split kind → Doc blocks
+       ------------------------
+       - splitKind toggles autoSplit hidden flag
+       - docCount renders 1/3/4/5 blocks in manual mode
+    */
     const [splitKind, setSplitKind] = React.useState<'' | 'manual' | 'auto'>(
-        (retryInitial?.splitKind as 'manual' | 'auto') || ''
+        (retryInitial?.splitKind as 'manual' | 'auto') || 'manual'
     )
     const [docCount, setDocCount] = React.useState<number | ''>(
-        (retryInitial?.docCount as number | undefined) ?? ''
+        (retryInitial?.docCount as number | undefined) ?? 1
     )
 
+    // Keep hidden autoSplit in sync with splitKind
     React.useEffect(() => {
         const hidId = fields.autoSplit?.id
         if (!hidId) return
@@ -671,7 +725,13 @@ export default function NewSubmission() {
         else hidden.value = ''
     }, [splitKind, fields.autoSplit?.id])
 
-    // ---- Document UX + caching ----
+    /* --------------------------
+       Document UX + draft cache
+       --------------------------
+       - We pre-validate size and extension
+       - We write picked files to a per-tab draft cache (draftNonce)
+       - Step 2 will move them → submission cache
+    */
     const [dropErrors, setDropErrors] = React.useState<Record<number, string>>({})
     const [docPicked, setDocPicked] = React.useState<Record<number, boolean>>({})
     const [docFilled, setDocFilled] = React.useState<Record<number, boolean>>({})
@@ -679,7 +739,6 @@ export default function NewSubmission() {
     const [dzReset, setDzReset] = React.useState<Record<number, number>>({})
     const [initialFiles, setInitialFiles] = React.useState<Record<number, File | null>>({})
 
-    // Document metadata state
     type DocMeta = { name: string; filename: string; attachmentControlNum: string }
     const [docMeta, setDocMeta] = React.useState<Record<number, DocMeta>>(() => {
         if (!retryInitial || !retryInitialDocs?.length) return {}
@@ -723,10 +782,12 @@ export default function NewSubmission() {
         return base.replace(/\w\S*/g, (w: string) => w.charAt(0).toUpperCase() + w.slice(1))
     }
 
+    // Handle file selection for a document block (size/ext checks + draft cache write)
     async function handlePick(idx: number, file: File) {
         const BYTES_PER_MB = 1024 * 1024
         const mb = file.size / BYTES_PER_MB
         const isPdf = /\.pdf$/i.test(file.name)
+
         const existingTotalBytes = Object.entries(docSizes).reduce(
             (sum, [k, v]) => sum + (Number(k) === idx ? 0 : v),
             0,
@@ -750,22 +811,16 @@ export default function NewSubmission() {
             return
         }
 
-        // Update UI first (non-blocking)
+        // Update UI state
         setDropErrors(prev => ({ ...prev, [idx]: '' }))
         setDocPicked(prev => ({ ...prev, [idx]: true }))
         setDocSizes(prev => ({ ...prev, [idx]: file.size }))
 
+        // Seed name/filename if empty
         const current = docMeta[idx] ?? { name: '', filename: '', attachmentControlNum: '' }
-        updateDocMeta(
-            idx,
-            {
-                filename: file.name,
-                name: current.name ? current.name : titleCaseFrom(file.name),
-            },
-            true,
-        )
+        updateDocMeta(idx, { filename: file.name, name: current.name ? current.name : titleCaseFrom(file.name) }, true)
 
-        // Best-effort cache write AFTER UI updates (still uses draft nonce on step 1)
+        // Best-effort cache write AFTER UI updates
         try {
             await setCachedFile(draftKey(draftNonce, idx), file)
         } catch (e) {
@@ -773,17 +828,20 @@ export default function NewSubmission() {
         }
     }
 
-    // Try pre-fill from cache (user might navigate back)
+    // Try pre-fill from draft cache on mount / when split changes (user may navigate back)
     React.useEffect(() => {
         void (async () => {
             const count = splitKind === 'manual' ? Number(docCount || 0) : splitKind === 'auto' ? 1 : 0
             if (!count) return
+
             const nextFiles: Record<number, File | null> = {}
             const sizes: Record<number, number> = {}
             const metaUpdates: Record<number, DocMeta> = {}
+
             for (let i = 1; i <= count; i++) {
                 const f = await getCachedFile(draftKey(draftNonce, i))
                 nextFiles[i] = f ?? null
+
                 const base = docMeta[i] ?? { name: '', filename: '', attachmentControlNum: '' }
                 if (f) {
                     sizes[i] = f.size
@@ -797,6 +855,7 @@ export default function NewSubmission() {
                     metaUpdates[i] = base
                 }
             }
+
             setInitialFiles(nextFiles)
             setDocSizes(sizes)
             setDocMeta(prev => {
@@ -812,7 +871,7 @@ export default function NewSubmission() {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [splitKind, docCount, draftNonce])
 
-    // Reset state when split kind / doc count changes
+    // Reset block state if split kind / count changes
     React.useEffect(() => {
         setDocPicked({})
         setDocFilled({})
@@ -820,13 +879,13 @@ export default function NewSubmission() {
         setDocSizes({})
         setDzReset({})
         setInitialFiles({})
+
         if (splitKind) {
             const count = splitKind === 'manual' ? Number(docCount || 0) : 1
             const init: Record<number, DocMeta> = {}
-            for (let i = 1; i <= (count || 0); i++) {
-                init[i] = { name: '', filename: '', attachmentControlNum: '' }
-            }
-            // seed from retryInitialDocs if present
+            for (let i = 1; i <= (count || 0); i++) init[i] = { name: '', filename: '', attachmentControlNum: '' }
+
+            // Seed from retry initial docs if present
             if (retryInitial && retryInitialDocs?.length) {
                 for (let i = 1; i <= Math.min(retryInitialDocs.length, count || 0); i++) {
                     init[i] = {
@@ -843,7 +902,11 @@ export default function NewSubmission() {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [splitKind, docCount])
 
-    // -------- Client-side validation before submit (alerts) --------
+    /* ------------------------------
+       Client-side validation (alerts)
+       ------------------------------
+       Guards obvious issues before POST; server still validates.
+    */
     function validateBeforeSubmit(): boolean {
         const errs: string[] = []
 
@@ -856,9 +919,7 @@ export default function NewSubmission() {
             if (!m.name.trim()) errs.push(`Document #${i}: “Document Name” is required.`)
             if (!m.filename.trim()) errs.push(`Document #${i}: “Filename” is required.`)
             else if (!/\.pdf$/i.test(m.filename.trim())) errs.push(`Document #${i}: “Filename” must end with .pdf.`)
-            if (!m.attachmentControlNum.trim()) {
-                errs.push(`Document #${i}: “Attachment Control Number” is required.`)
-            }
+            if (!m.attachmentControlNum.trim()) errs.push(`Document #${i}: “Attachment Control Number” is required.`)
             if (dropErrors[i]) errs.push(`Document #${i}: ${dropErrors[i]}`)
         }
 
@@ -869,17 +930,18 @@ export default function NewSubmission() {
         return true
     }
 
+    // Lock background scroll while fullscreen Drawer is mounted (better modal UX)
+    React.useEffect(() => {
+        const prev = document.body.style.overflow
+        document.body.style.overflow = 'hidden'
+        return () => {
+            document.body.style.overflow = prev || ''
+        }
+    }, [])
+
+    /* ===== Render ===== */
     return (
-        <InterexLayout
-            user={user}
-            title="Create Submission"
-            subtitle="Step 1 of 3"
-            currentPath="/customer/submissions/new"
-            backGuardEnabled={true}
-            backGuardLogoutUrl="/logout"
-            backGuardRedirectTo="/login"
-            backGuardMessage="Going back will log you out and discard your work. Continue?"
-        >
+        <>
             <LoadingOverlay
                 show={Boolean(isSubmitting)}
                 title="Creating submission…"
@@ -901,6 +963,7 @@ export default function NewSubmission() {
                         if (!validateBeforeSubmit()) e.preventDefault()
                     }}
                 >
+                    {/* Hidden fields (intent, nonce, retry, derived/locked values) */}
                     <input type="hidden" name="intent" value="create" />
                     <input type="hidden" name="draftNonce" value={draftNonce} />
                     {retryInitial?.retrySubmissionId ? (
@@ -915,7 +978,6 @@ export default function NewSubmission() {
 
                         {/* Compact 12-col grid */}
                         <div className="grid grid-cols-1 md:grid-cols-12 gap-4">
-
                             {/* Title (8) */}
                             <div className="md:col-span-8">
                                 <Field
@@ -941,7 +1003,7 @@ export default function NewSubmission() {
                                 </SelectField>
                             </div>
 
-                            {/* Purpose (4) */}
+                            {/* Purpose (4) — changes available recipients */}
                             <div className="md:col-span-4">
                                 <SelectField
                                     labelProps={{ children: 'Purpose of Submission *' }}
@@ -950,7 +1012,8 @@ export default function NewSubmission() {
                                         onChange: (e: React.ChangeEvent<HTMLSelectElement>) => {
                                             const v = e.target.value as SubmissionPurpose | ''
                                             setPurpose(v)
-                                            // Let Conform handle the field value as well
+
+                                            // Also update the Conform field value manually so it tracks the selection
                                             const el = e.currentTarget
                                             const nativeSetter = (Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value') as any)?.set
                                             nativeSetter?.call(el, v)
@@ -969,9 +1032,10 @@ export default function NewSubmission() {
                                 </SelectField>
                             </div>
 
-                            {/* Recipient (8) */}
+                            {/* Recipient (8) — Category + Recipient OID */}
                             <div className="md:col-span-8">
                                 <label className="block text-sm font-medium text-gray-700">Recipient *</label>
+
                                 <div className="mt-1 grid grid-cols-12 gap-2">
                                     {/* Category (5) */}
                                     <select
@@ -1015,14 +1079,17 @@ export default function NewSubmission() {
                                         ))}
                                     </select>
                                 </div>
+
+                                {/* Helpful "Name (OID)" line below the picker */}
                                 {recipientHelp ? <p className="mt-1 text-xs text-gray-500">{recipientHelp}</p> : null}
+
                                 <ErrorList
                                     errors={fields.recipient?.errors}
                                     id={`${fields.recipient?.id ?? 'recipient'}-errors`}
                                 />
                             </div>
 
-                            {/* Heads-up (12) */}
+                            {/* Heads-up (12) — immutable fields after create */}
                             <div className="md:col-span-12 -mt-1 rounded border border-amber-300 bg-amber-50 px-3 py-1.5 text-xs text-amber-900">
                                 <strong>Heads up:</strong> Choose the appropriate <span className="font-semibold">purpose of submission</span> and <span className="font-semibold">recipient</span> because we cannot change these after creating a submission.
                             </div>
@@ -1115,7 +1182,8 @@ export default function NewSubmission() {
                                     onChange={e => {
                                         const v = e.target.value as 'manual' | 'auto' | ''
                                         setSplitKind(v)
-                                        if (v === 'auto') setDocCount('')
+                                        if (v === 'auto') setDocCount('') // docCount only applies to manual mode
+                                        // Reset document UI state
                                         setDocPicked({})
                                         setDocFilled({})
                                         setDropErrors({})
@@ -1153,6 +1221,7 @@ export default function NewSubmission() {
                                         value={docCount}
                                         onChange={e => {
                                             setDocCount(e.target.value ? Number(e.target.value) : '')
+                                            // Reset document UI state
                                             setDocPicked({})
                                             setDocFilled({})
                                             setDropErrors({})
@@ -1179,9 +1248,9 @@ export default function NewSubmission() {
                         <div className="flex items-center justify-between mb-2">
                             <h3 className="text-base font-semibold text-gray-900">Document Metadata</h3>
                             <div className="flex items-center gap-2 text-xs">
-                                <span className="inline-block rounded px-2 py-0.5 ring-1 ring-emerald-300 bg-emerald-50 text-emerald-700">
-                                  Total: {totalSizeMB.toFixed(1)} / 300 MB
-                                </span>
+                <span className="inline-block rounded px-2 py-0.5 ring-1 ring-emerald-300 bg-emerald-50 text-emerald-700">
+                  Total: {totalSizeMB.toFixed(1)} / 300 MB
+                </span>
                             </div>
                         </div>
 
@@ -1273,6 +1342,7 @@ export default function NewSubmission() {
                                         </div>
                                     )
                                 })}
+
                                 {splitKind === 'manual' && !docCount ? (
                                     <div className="rounded-md border border-blue-200 bg-blue-50 p-3 text-sm text-blue-900">
                                         Select <strong>Number of documents</strong> to show blocks.
@@ -1282,6 +1352,7 @@ export default function NewSubmission() {
                         )}
                     </div>
 
+                    {/* ===== Footer Actions ===== */}
                     <div className="flex items-center justify-between">
                         <Link
                             to="/customer/submissions"
@@ -1300,12 +1371,13 @@ export default function NewSubmission() {
                         </StatusButton>
                     </div>
 
+                    {/* Server-side form errors */}
                     <ErrorList
                         errors={actionData && 'result' in actionData ? (actionData as any).result?.error?.formErrors : []}
                         id={form.errorId}
                     />
                 </Form>
             </Drawer>
-        </InterexLayout>
+        </>
     )
 }

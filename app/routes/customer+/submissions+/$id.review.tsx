@@ -1,4 +1,21 @@
 // app/routes/customer+/$id.review.tsx
+
+/**
+ * Step 2 of 3 — Review / Update Submission Metadata
+ * --------------------------------------------------
+ * This route:
+ * - Loads the existing submission (must be a PCG "Draft").
+ * - Refreshes local DB with the latest PCG status (single snapshot in loader).
+ * - Prefills a Conform form so users can tweak metadata before uploading files.
+ * - Allows manual/auto split selection and per-document metadata editing.
+ * - Caches selected files client-side (submission cache) before the actual upload step.
+ * - Sends an "update" to PCG and records audit + submission events.
+ *
+ * NOTE:
+ * - Recipient and Purpose are locked here by design once created in Step 1.
+ * - We do not double-fetch PCG status in the action; loader does it once on load.
+ */
+
 import { getFormProps, getInputProps, getSelectProps, useForm } from '@conform-to/react'
 import { getZodConstraint, parseWithZod } from '@conform-to/zod'
 import { SubmissionEventKind, type SubmissionPurpose as PrismaSubmissionPurpose } from '@prisma/client'
@@ -18,7 +35,6 @@ import {
 import { z } from 'zod'
 import { FileDropzone } from '#app/components/file-dropzone.tsx'
 import { Field, SelectField, TextareaField, ErrorList } from '#app/components/forms.tsx'
-import { InterexLayout } from '#app/components/interex-layout.tsx'
 import { SubmissionActivityLog } from '#app/components/submission-activity-log.tsx'
 import { Drawer } from '#app/components/ui/drawer.tsx'
 import { LoadingOverlay } from '#app/components/ui/loading-overlay.tsx'
@@ -43,8 +59,15 @@ import { prisma } from '#app/utils/db.server.ts'
 import { draftKey, moveCachedFile, subKey, getCachedFile, setCachedFile } from '#app/utils/file-cache.ts'
 import { redirectWithToast } from '#app/utils/toast.server.ts'
 
+/** Lightweight types used across loader/UI */
 type PcgEvent = { kind?: string; payload?: any }
 type PcgStageSource = { responseMessage?: string | null; events?: PcgEvent[] | any[] }
+
+/**
+ * PCG "Draft" detector
+ * - PCG can surface the stage either in the response message or within a PCG_STATUS event payload.
+ * - We prefer the event's stage if present, otherwise fallback to responseMessage, defaulting to "Draft".
+ */
 function isDraftFromPCG(s: PcgStageSource | null | undefined) {
     if (!s) return false
     const stageFromResponse = (s.responseMessage ?? '').toLowerCase()
@@ -53,11 +76,16 @@ function isDraftFromPCG(s: PcgStageSource | null | undefined) {
     return latestStage.includes('draft')
 }
 
+/** NPI (provider) minimal surface for selects */
 type Npi = { id: string; npi: string; name: string | null }
 
 const DEFAULT_ACN_HINT = 'Please specify attachment control number'
 
-// Base schema; dynamic documents handled manually
+/**
+ * Base schema for the Step-2 "update" form
+ * - docCount is dynamic (handled by our manual block rendering),
+ *   so the schema just tolerates it; specific doc subfields validated separately.
+ */
 const UpdateSubmissionMetaSchema = z.object({
     intent: z.literal('update-submission'),
     submissionId: z.string().min(1),
@@ -78,11 +106,19 @@ const UpdateSubmissionMetaSchema = z.object({
 })
 
 /** ===== Helpers to apply PCG Status → local DB ===== */
+
+/** Normalize OID values that may arrive as 'urn:oid:<value>' or plain. */
 function normalizeOid(oid?: string | null) {
     if (!oid) return undefined
     const s = String(oid)
     return s.startsWith('urn:oid:') ? s.slice('urn:oid:'.length) : s
 }
+
+/**
+ * PCG → Prisma purpose mapping
+ * - PCG returns contentType codes; we map known values to local enum.
+ * - If unknown, leave it unchanged (undefined).
+ */
 function mapPcgPurposeCodeToLocalEnum(code?: string | null): PrismaSubmissionPurpose | undefined {
     const c = (code ?? '').trim()
     if (!c) return undefined
@@ -94,6 +130,12 @@ function mapPcgPurposeCodeToLocalEnum(code?: string | null): PrismaSubmissionPur
         default: return undefined
     }
 }
+
+/**
+ * Fetch PCG status (best-effort), create a PCG_STATUS event,
+ * then overwrite local DB fields with authoritative data from PCG.
+ * Swallows failures so the loader UX isn't blocked.
+ */
 async function applyStatusToDb(submissionId: string, pcgSubmissionId: string) {
     try {
         const statusResp = await pcgGetStatus(pcgSubmissionId)
@@ -107,10 +149,12 @@ async function applyStatusToDb(submissionId: string, pcgSubmissionId: string) {
             },
         })
 
+        // Normalize possible transaction ID fields from PCG
         const rawTxnList = (statusResp as any)?.transactionIdList || (statusResp as any)?.uniqueIdList || ''
         const normalizedTxnList = typeof rawTxnList === 'string' ? rawTxnList.trim() : ''
         const txn = statusResp.esmdTransactionId ?? (normalizedTxnList || null)
 
+        // Project snapshot fields into our submission row
         const updateData: any = {
             responseMessage: statusResp.stage ?? undefined,
             transactionId: txn ?? undefined,
@@ -126,6 +170,7 @@ async function applyStatusToDb(submissionId: string, pcgSubmissionId: string) {
         const mappedPurpose = mapPcgPurposeCodeToLocalEnum(statusResp.purposeOfSubmission?.contentType)
         if (mappedPurpose) updateData.purposeOfSubmission = mappedPurpose
 
+        // Optional combined errors in a single surface
         const allErrors = [
             ...(statusResp.errorList ?? []),
             ...(statusResp.errors ?? []),
@@ -142,6 +187,15 @@ async function applyStatusToDb(submissionId: string, pcgSubmissionId: string) {
     }
 }
 
+/**
+ * Loader
+ * - Authenticates user.
+ * - Loads submission + events.
+ * - Refreshes single PCG status snapshot (if pcgSubmissionId exists).
+ * - Validates "Draft" stage (only drafts are editable).
+ * - Computes allowed NPIs based on RBAC.
+ * - Prepares initial form values + document set.
+ */
 export async function loader({ request, params }: LoaderFunctionArgs) {
     const userId = await requireUserId(request)
     const user = await prisma.user.findUnique({
@@ -187,6 +241,7 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
         if (!submission) throw new Response('Not found', { status: 404 })
     }
 
+    // Only editable in Draft stage (per PCG)
     if (!isDraftFromPCG(submission)) {
         throw await redirectWithToast(`/customer/submissions`, {
             type: 'error',
@@ -194,6 +249,7 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
             description: 'Only draft submissions (from PCG) can be reviewed or updated.',
         })
     }
+    // Must have a PCG submission id to continue
     if (!submission.pcgSubmissionId) {
         throw await redirectWithToast(`/customer/submissions/new`, {
             type: 'error',
@@ -202,6 +258,7 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
         })
     }
 
+    // RBAC → available NPIs list
     const isSystemAdmin = user.roles.some(r => r.name === 'system-admin')
     const isCustomerAdmin = user.roles.some(r => r.name === 'customer-admin') || isSystemAdmin
     const isProviderGroupAdmin = user.roles.some(r => r.name === 'provider-group-admin') || isCustomerAdmin
@@ -225,6 +282,7 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
                     .filter(un => un.provider?.active)
                     .map(un => ({ id: un.provider.id, npi: un.provider.npi, name: un.provider.name }))
 
+    // Compose initial form values from latest META_UPDATED or DRAFT_CREATED payload
     const metaEvent =
         submission.events.find(e => e.kind === SubmissionEventKind.META_UPDATED) ??
         submission.events.find(e => e.kind === SubmissionEventKind.DRAFT_CREATED)
@@ -248,6 +306,7 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
         threshold: Number(latestMeta?.threshold ?? submission.threshold ?? 100),
     }
 
+    // Prepare a UI-safe view of events (ISO strings for dates)
     const eventsUi = submission.events.map(e => ({
         id: e.id,
         kind: e.kind,
@@ -270,6 +329,10 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     })
 }
 
+/**
+ * Extract N document blocks from the form.
+ * Validates per-document fields and returns both the shaped list and errors.
+ */
 function collectDocuments(formData: FormData, kind: 'manual' | 'auto', docCount?: number) {
     const errors: string[] = []
     const count = kind === 'manual' ? Number(docCount) : 1
@@ -292,6 +355,16 @@ function collectDocuments(formData: FormData, kind: 'manual' | 'auto', docCount?
     return { documents, errors }
 }
 
+/**
+ * Action — Updates metadata both locally and on PCG
+ * - Validates request.
+ * - Enforces RBAC against the chosen provider.
+ * - Validates/collects document block fields.
+ * - Sends update to PCG (pcgUpdateSubmission).
+ * - Writes META_UPDATED + PCG_UPDATE_* events.
+ * - Writes audit log with changed-field diff (best-effort).
+ * - Redirects back to the same review route (loader refreshes PCG once).
+ */
 export async function action({ request }: ActionFunctionArgs) {
     const userId = await requireUserId(request)
     const formData = await request.formData()
@@ -301,6 +374,7 @@ export async function action({ request }: ActionFunctionArgs) {
     }
     const v = parsed.value as any
 
+    // Require existing submission and that it is still Draft + has pcgSubmissionId
     const submission = await prisma.submission.findUnique({ where: { id: v.submissionId }, include: { provider: true } })
     if (!submission) return data({ result: parsed.reply({ formErrors: ['Submission not found'] }) }, { status: 404 })
     if (!isDraftFromPCG(submission)) {
@@ -310,6 +384,7 @@ export async function action({ request }: ActionFunctionArgs) {
         return data({ result: parsed.reply({ formErrors: ['Remote submission_id not available'] }) }, { status: 400 })
     }
 
+    // RBAC: the chosen provider must be valid + within user's scope
     const user = await prisma.user.findUnique({
         where: { id: userId },
         include: { roles: true, customer: true, providerGroup: true, userNpis: { include: { provider: true } } },
@@ -343,9 +418,11 @@ export async function action({ request }: ActionFunctionArgs) {
         }
     }
 
+    // Validate and shape document metadata
     const { documents, errors } = collectDocuments(formData, v.splitKind, v.docCount)
     if (errors.length) return data({ result: parsed.reply({ formErrors: errors }) }, { status: 400 })
 
+    // Construct PCG payload (same builder used by create flow for consistency)
     const pcgPayload = buildCreateSubmissionPayload({
         purposeOfSubmission: v.purposeOfSubmission,
         author_npi: provider.npi,
@@ -368,11 +445,14 @@ export async function action({ request }: ActionFunctionArgs) {
     })
 
     try {
+        // Push update to PCG
         const resp = await pcgUpdateSubmission(submission.pcgSubmissionId, pcgPayload)
 
+        // Normalize authorType casing in DB
         const authorTypeDb =
             v.authorType === 'institutional' ? 'Institutional' : 'Individual'
 
+        // Persist local submission changes
         await prisma.submission.update({
             where: { id: v.submissionId },
             data: {
@@ -391,6 +471,7 @@ export async function action({ request }: ActionFunctionArgs) {
             },
         })
 
+        // Event log: keep a local audit of what we sent + PCG outcome
         await prisma.submissionEvent.create({
             data: { submissionId: v.submissionId, kind: SubmissionEventKind.META_UPDATED, message: 'Local metadata updated', payload: pcgPayload },
         })
@@ -407,7 +488,7 @@ export async function action({ request }: ActionFunctionArgs) {
         // We redirect back to the review route where the loader
         // calls applyStatusToDb() once. This avoids duplicate PCG_STATUS events.
 
-        // Audit log (success) with changed fields diff
+        // Audit log (success) with changed fields diff (best-effort)
         try {
             const prev: Record<string, unknown> | null = (() => {
                 if (!v?._initial_json) return null
@@ -451,12 +532,14 @@ export async function action({ request }: ActionFunctionArgs) {
             })
         } catch {}
 
+        // Back to review; loader will refresh status once.
         return await redirectWithToast(`/customer/submissions/${v.submissionId}/review`, {
             type: 'success',
             title: 'Submission Updated',
             description: resp?.status ?? 'PCG accepted updated metadata.',
         })
     } catch (e: any) {
+        // Record PCG update failure to events + audit
         await prisma.submissionEvent.create({
             data: { submissionId: v.submissionId, kind: 'PCG_UPDATE_ERROR', message: e?.message?.toString?.() ?? 'Update failed' },
         })
@@ -490,6 +573,13 @@ export async function action({ request }: ActionFunctionArgs) {
     }
 }
 
+/**
+ * Component — ReviewSubmission
+ * - Renders the Step-2 review UI.
+ * - Locks Purpose & Recipient (as per business rule).
+ * - Manages split/document blocks and submission cache for files.
+ * - Provides an "Update Submission" toggle gate to avoid accidental updates.
+ */
 export default function ReviewSubmission() {
     const loaderData = useLoaderData<typeof loader>()
     const { user, submission, initial, initialJson, initialDocs } = loaderData
@@ -501,6 +591,7 @@ export default function ReviewSubmission() {
     const location = useLocation()
     const isUpdating = nav.formData?.get('intent') === 'update-submission'
 
+    // Conform form binding; validate onBlur; start from loader-provided defaults
     const [form, fields] = useForm({
         id: 'review-submission',
         constraint: getZodConstraint(UpdateSubmissionMetaSchema),
@@ -516,6 +607,7 @@ export default function ReviewSubmission() {
         (initial.purposeOfSubmission as SubmissionPurpose) || ''
     )
 
+    // If the recipient OID does not exist in our directory, we show a hint to pick a valid one.
     const initialRecipientKnown = React.useMemo(
         () => Boolean(getRecipientByOid(initial.recipient ?? '')),
         [initial.recipient]
@@ -535,6 +627,7 @@ export default function ReviewSubmission() {
     const isRecipientCategory = (v: string): v is RecipientCategory =>
         (RecipientCategories as readonly string[]).includes(v)
 
+    // Determine the initial category from the current (locked) recipient OID
     const initialCategory = React.useMemo<RecipientCategory | ''>(() => {
         if (!initialRecipientKnown) return ''
         const cat = categoryForOid(initial.recipient ?? '')
@@ -543,6 +636,7 @@ export default function ReviewSubmission() {
 
     const [categoryId, setCategoryId] = React.useState<RecipientCategory | ''>(initialCategory)
 
+    // Compute the recipient list based on purpose + category
     type RecipientOpt = { value: string; label: string }
     const recipientOptions: RecipientOpt[] = React.useMemo(
         () => (purpose && categoryId ? recipientsFor(categoryId, purpose as SubmissionPurpose) : []),
@@ -551,7 +645,7 @@ export default function ReviewSubmission() {
 
     const [selectedRecipient, setSelectedRecipient] = React.useState<string>(initialRecipientKnown ? (initial.recipient ?? '') : '')
 
-    // Clear recipient if no longer valid for the current purpose/category
+    // If recipient changes (unlocked), ensure it's valid for current purpose/category; here it’s locked.
     React.useEffect(() => {
         if (recipientLocked) return
         if (!purpose) {
@@ -567,7 +661,7 @@ export default function ReviewSubmission() {
         }
     }, [purpose, categoryId, selectedRecipient, recipientLocked])
 
-    // Keep hidden input in sync with chosen OID (or lock to initial)
+    // Keep hidden "recipient" input synced (locked → initial value)
     React.useEffect(() => {
         const hidId = fields.recipient?.id
         if (!hidId) return
@@ -580,10 +674,11 @@ export default function ReviewSubmission() {
         [selectedRecipient],
     )
 
-    // Split kind controls
+    // Split kind + docCount state (docCount derived from initial doc set length)
     const [splitKind, setSplitKind] = React.useState<'manual' | 'auto'>(initial.splitKind as 'manual' | 'auto')
     const [docCount, setDocCount] = React.useState<number>(Math.max(1, initialDocs?.length ?? 1))
 
+    // Keep hidden autoSplit input aligned with the splitKind select
     React.useEffect(() => {
         const hidId = fields.autoSplit?.id
         if (!hidId) return
@@ -591,7 +686,7 @@ export default function ReviewSubmission() {
         if (hidden) hidden.value = splitKind === 'auto' ? 'true' : 'false'
     }, [splitKind, fields.autoSplit?.id])
 
-    // ---- Cache wiring ----
+    // ---- Cache wiring (submission-scoped) ----
     const [dropErrors, setDropErrors] = React.useState<Record<number, string>>({})
     const [docPicked, setDocPicked] = React.useState<Record<number, boolean>>({})
     const [docChanged, setDocChanged] = React.useState<Record<number, boolean>>({})
@@ -599,7 +694,7 @@ export default function ReviewSubmission() {
     const [dzReset, setDzReset] = React.useState<Record<number, number>>({})
     const [initialFiles, setInitialFiles] = React.useState<Record<number, File | null>>({})
 
-    // Document metadata state (seeded from initialDocs)
+    // Document metadata state (seed from initialDocs)
     type DocMeta = { name: string; filename: string; attachmentControlNum: string }
     const [docMeta, setDocMeta] = React.useState<Record<number, DocMeta>>(() => {
         const seed: Record<number, DocMeta> = {}
@@ -615,11 +710,13 @@ export default function ReviewSubmission() {
         return seed
     })
 
+    // Aggregate size display (client-side hint only)
     const totalSizeMB = React.useMemo(
         () => Object.values(docSizes).reduce((a, b) => a + b, 0) / (1024 * 1024),
         [docSizes],
     )
 
+    // Track if a given doc block deviates from initial values (for UX hints or future logic)
     function hasChanged(i: number, next: DocMeta) {
         const preset = initialDocs?.[i - 1] || { name: '', filename: '', attachmentControlNum: '' }
         return (
@@ -629,6 +726,7 @@ export default function ReviewSubmission() {
         )
     }
 
+    /** Update per-document metadata state + "changed" tracking */
     function updateDocMeta(i: number, patch: Partial<DocMeta>) {
         setDocMeta(prev => {
             const base = prev[i] ?? { name: '', filename: '', attachmentControlNum: '' }
@@ -639,12 +737,16 @@ export default function ReviewSubmission() {
         })
     }
 
+    /** Convert a filename into a nicer title-case suggestion (used when seeding name from picked file). */
     function titleCaseFrom(filename: string) {
         const base = filename.replace(/\.pdf$/i, '').replace(/[_-]+/g, ' ').trim()
         return base.replace(/\w\S*/g, w => w.charAt(0).toUpperCase() + w.slice(1))
     }
 
-    // Move draft cache -> submission cache on first load if ?draft= is present
+    /**
+     * If the user navigates back from Step 3 with ?draft=,
+     * move files from the draft cache to the submission cache (one-time), then strip the param.
+     */
     React.useEffect(() => {
         const params = new URLSearchParams(location.search)
         const draft = params.get('draft')
@@ -682,6 +784,10 @@ export default function ReviewSubmission() {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [location.key])
 
+    /**
+     * If the user edits a filename in the text field, mirror the change in the cached File (rename),
+     * so later upload uses the desired filename.
+     */
     async function maybeRenameCachedFileTo(i: number, desiredFilename: string) {
         if (!/\.pdf$/i.test(desiredFilename)) return
         const key = subKey(submission.id, i)
@@ -694,6 +800,12 @@ export default function ReviewSubmission() {
         setInitialFiles(prev => ({ ...prev, [i]: renamed }))
     }
 
+    /**
+     * Handle dropzone pick:
+     * - Guard PDF + per-file (≤150MB) and per-submission (≤300MB) limits
+     * - Seed name/filename from the file if missing
+     * - Write into submission cache
+     */
     async function handlePick(idx: number, file: File) {
         const BYTES_PER_MB = 1024 * 1024
         const mb = file.size / BYTES_PER_MB
@@ -739,7 +851,10 @@ export default function ReviewSubmission() {
         }
     }
 
-    // Load any existing cached files for this submission when docCount changes
+    /**
+     * On docCount change (e.g., switching split options),
+     * hydrate from submission cache and seed missing name/filename fields.
+     */
     React.useEffect(() => {
         void (async () => {
             const next: Record<number, File | null> = {}
@@ -766,7 +881,7 @@ export default function ReviewSubmission() {
         })()
     }, [docCount, submission.id])
 
-    // -------- Client-side validation before submit (alerts) --------
+    /** Client-side guardrails prior to POST; server revalidates everything. */
     function validateBeforeSubmit(): boolean {
         const errs: string[] = []
         const count = splitKind === 'manual' ? Number(docCount || 0) : 1
@@ -792,15 +907,18 @@ export default function ReviewSubmission() {
         return true
     }
 
+    // Lock background scroll while this fullscreen Drawer is mounted
+    React.useEffect(() => {
+        const prev = document.body.style.overflow
+        document.body.style.overflow = 'hidden'
+        return () => {
+            document.body.style.overflow = prev || ''
+        }
+    }, [])
+
     return (
-        <InterexLayout user={user}
-                       title="Review & Update"
-                       subtitle="Step 2 of 3"
-                       currentPath={`/customer/submissions/${submission.id}/review`}
-                       backGuardLogoutUrl="/logout"
-                       backGuardRedirectTo="/login"
-                       backGuardMessage="Going back will log you out and discard your work. Continue?"
-        >
+        <>
+            {/* Overlay while action is pending */}
             <LoadingOverlay show={Boolean(isUpdating)} title="Updating submission…" message="Hold tight while we push your changes to PCG." />
 
             <Drawer key={`drawer-review-${submission.id}`} isOpen onClose={() => navigate('/customer/submissions')} title={`Review Submission: ${submission.title}`} size="fullscreen">
@@ -817,6 +935,7 @@ export default function ReviewSubmission() {
                             if (!validateBeforeSubmit()) e.preventDefault()
                         }}
                     >
+                        {/* Hidden plumbing for Conform + diff/audit */}
                         <input type="hidden" name="intent" value="update-submission" />
                         <input type="hidden" name="submissionId" value={submission.id} />
                         <input type="hidden" name="_initial_json" value={initialJson} />
@@ -844,6 +963,7 @@ export default function ReviewSubmission() {
                                     </SelectField>
                                 </div>
 
+                                {/* Purpose (locked) */}
                                 <div className="md:col-span-6">
                                     <label className="block text-sm font-medium text-gray-700">Purpose *</label>
                                     <p className="mt-1 text-xs text-gray-500">🔒 This field is locked during review.</p>
@@ -863,14 +983,14 @@ export default function ReviewSubmission() {
                                     </select>
                                 </div>
 
-                                {/* Recipient (Category + Recipient only) */}
+                                {/* Recipient (Category + Recipient only) — both locked here */}
                                 <div className="md:col-span-6">
                                     <label className="block text-sm font-medium text-gray-700">Recipient *</label>
                                     {/* subtle locked note */}
                                     <p className="mt-1 text-xs text-gray-500">🔒 This field is locked during review.</p>
 
                                     {!initialRecipientKnown ? (
-                                        <div className="mt-1 mb-2 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                                        <div className="mt-1 mb-2 rounded border border-amber-200 bg-amber-50 px3 py-2 text-xs text-amber-900">
                                             The current recipient OID isn’t in the directory. Please pick a valid recipient below to update this submission.
                                         </div>
                                     ) : null}
@@ -927,6 +1047,7 @@ export default function ReviewSubmission() {
                                     <ErrorList errors={fields.recipient?.errors} id={`${fields.recipient?.id ?? 'recipient'}-errors`} />
                                 </div>
 
+                                {/* NPI/Claim/Case/Comments/X12/Threshold */}
                                 <div className="md:col-span-6">
                                     <SelectField labelProps={{ children: 'NPI *' }} selectProps={getSelectProps(fields.providerId)} errors={fields.providerId?.errors}>
                                         {availableNpis.map((p: Npi) => (
@@ -1031,6 +1152,7 @@ export default function ReviewSubmission() {
                                     <div key={i} className="mb-4 rounded-md border border-gray-200 p-3">
                                         <div className="mb-2 text-sm font-medium text-gray-700">Document #{i}</div>
 
+                                        {/* Dropzone writes to submission cache; upload occurs in Step 3 */}
                                         <FileDropzone
                                             key={`dz-${i}-${dzReset[i] ?? 0}`}
                                             label="Attach PDF (optional)"
@@ -1103,6 +1225,7 @@ export default function ReviewSubmission() {
                             })}
                         </div>
 
+                        {/* Inline guidance to ensure users press "Update" if they changed metadata */}
                         <div className="rounded-md border border-red-500 bg-amber-50 p-3 text-sm text-amber-900">
                             <strong>Heads up:</strong> If any edits are made to the metadata, please make sure to choose "yes" from the dropdown below and click on "update submission" to update the metadata for the submission. Once updated please click on "Next" button to proceed with
                             next step (Upload documents).
@@ -1111,6 +1234,7 @@ export default function ReviewSubmission() {
                         {/* ===== Update + Next controls ===== */}
                         <div className="grid grid-cols-1 md:grid-cols-12 gap-4 items-start">
 
+                            {/* Toggle shows/hides the Update button to avoid accidental updates */}
                             <div className="md:col-span-8">
                                 <label className="block text-sm font-medium text-gray-700 mb-1">Need to update submission?</label>
                                 <select
@@ -1143,6 +1267,7 @@ export default function ReviewSubmission() {
                                 </StatusButton>
                             </div>
 
+                            {/* Proceed to Step 3: Upload documents */}
                             <div className="md:col-span-4 md:justify-self-end">
                                 <Link
                                     to={`/customer/submissions/${submission.id}/upload`}
@@ -1153,12 +1278,14 @@ export default function ReviewSubmission() {
                             </div>
                         </div>
 
+                        {/* Server-side form errors (Conform reply) */}
                         <ErrorList errors={actionData && 'result' in actionData ? (actionData as any).result?.error?.formErrors : []} id={form.errorId} />
                     </Form>
 
+                    {/* Right-rail activity log */}
                     <SubmissionActivityLog events={submission.events ?? []} />
                 </div>
             </Drawer>
-        </InterexLayout>
+        </>
     )
 }

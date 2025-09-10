@@ -1,3 +1,21 @@
+// app/routes/customer+/$id.upload.tsx
+
+/**
+ * Step 3 of 3 — Upload & Submit Documents
+ * ---------------------------------------
+ * This route:
+ * - Shows the list of document filenames expected by PCG (from Step 1/2 metadata).
+ * - Pulls any cached files (set in Step 2) and lets the user review/replace them.
+ * - Enforces filename EXACT match, per-file (≤150 MB) and total (≤300 MB) size limits.
+ * - Uploads all files to PCG in one shot and marks the submission as SUBMITTED.
+ * - Logs success/error events and best-effort PCG status after upload.
+ *
+ * Notes:
+ * - Only PCG "Draft" submissions are eligible to upload; we guard this in loader/action.
+ * - File inputs here are bound by expected filenames to prevent mismatched documents.
+ * - We do a best-effort PCG status refresh after upload to enrich activity logs.
+ */
+
 import { parseWithZod } from '@conform-to/zod'
 import { SubmissionEventKind } from '@prisma/client'
 import * as React from 'react'
@@ -15,7 +33,6 @@ import {
 } from 'react-router'
 import { z } from 'zod'
 import { FileDropzone } from '#app/components/file-dropzone.tsx'
-import { InterexLayout } from '#app/components/interex-layout.tsx'
 import { SubmissionActivityLog } from '#app/components/submission-activity-log.tsx'
 import { Drawer } from '#app/components/ui/drawer.tsx'
 import { LoadingOverlay } from '#app/components/ui/loading-overlay.tsx'
@@ -26,8 +43,15 @@ import { prisma } from '#app/utils/db.server.ts'
 import { getCachedFile, subKey } from '#app/utils/file-cache.ts'
 import { redirectWithToast } from '#app/utils/toast.server.ts'
 
+/** Minimal PCG types used for stage detection */
 type PcgEvent = { kind?: string; payload?: any }
 type PcgStageSource = { responseMessage?: string | null; events?: PcgEvent[] | any[] }
+
+/**
+ * Detect PCG "Draft" stage.
+ * Stage may come from the submission.responseMessage OR a PCG_STATUS event payload.
+ * We prefer the event if present, else responseMessage, defaulting to 'Draft'.
+ */
 function isDraftFromPCG(s: PcgStageSource) {
     const stageFromResponse = (s.responseMessage ?? '').toLowerCase()
     const stageFromEvent = ((s.events ?? []).find((e: any) => e?.kind === 'PCG_STATUS')?.payload?.stage ?? '').toLowerCase()
@@ -35,11 +59,20 @@ function isDraftFromPCG(s: PcgStageSource) {
     return latestStage.includes('draft')
 }
 
+/** Form schema (very small): validates intent + submissionId */
 const FileUploadSchema = z.object({
     intent: z.literal('upload-file'),
     submissionId: z.string().min(1, 'Submission ID is required'),
 })
 
+/**
+ * Loader
+ * - Authenticates user.
+ * - Loads submission with provider, existing documents, and recent events.
+ * - Verifies PCG stage is Draft and that submission has a pcgSubmissionId.
+ * - Derives expected filenames from latest META_UPDATED or DRAFT_CREATED payload.
+ * - Shapes events for UI consumption (ISO dates).
+ */
 export async function loader({ request, params }: LoaderFunctionArgs) {
     const userId = await requireUserId(request)
     const id = params.id as string
@@ -83,10 +116,14 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
         })
     }
 
-    const metaEv = submission.events.find(e => e.kind === SubmissionEventKind.META_UPDATED) ?? submission.events.find(e => e.kind === SubmissionEventKind.DRAFT_CREATED)
+    // Pull expected filenames from last meta payload (Step 1/2 source of truth)
+    const metaEv =
+        submission.events.find(e => e.kind === SubmissionEventKind.META_UPDATED) ??
+        submission.events.find(e => e.kind === SubmissionEventKind.DRAFT_CREATED)
     const docSet: Array<any> = Array.isArray((metaEv?.payload as any)?.document_set) ? (metaEv!.payload as any).document_set : []
     const expectedFilenames = docSet.map(d => d.filename).filter(Boolean)
 
+    // ISO-ify event dates for client rendering
     const eventsUi = submission.events.map(e => ({
         id: e.id,
         kind: e.kind,
@@ -102,6 +139,15 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     })
 }
 
+/**
+ * Action
+ * - Validates request + submission eligibility (must be Draft + have pcgSubmissionId).
+ * - Re-derives expected filenames from latest meta (server-side source of truth).
+ * - Validates that selected files exist, match count and exact names, and pass size limits.
+ * - Uploads files to PCG; records submissionDocument rows and submission status.
+ * - Logs PCG_UPLOAD_SUCCESS + best-effort PCG_STATUS; writes audit logs.
+ * - On error: marks submission ERROR, logs PCG_UPLOAD_ERROR, writes audit log, and redirects with toast.
+ */
 export async function action({ request }: ActionFunctionArgs) {
     const userId = await requireUserId(request)
     const user = await prisma.user.findUnique({
@@ -132,16 +178,18 @@ export async function action({ request }: ActionFunctionArgs) {
     }
 
     // Get expected filenames from latest meta
-    const metaEv = submission.events.find(e => e.kind === SubmissionEventKind.META_UPDATED) ?? submission.events.find(e => e.kind === SubmissionEventKind.DRAFT_CREATED)
+    const metaEv =
+        submission.events.find(e => e.kind === SubmissionEventKind.META_UPDATED) ??
+        submission.events.find(e => e.kind === SubmissionEventKind.DRAFT_CREATED)
     const expected: string[] = Array.isArray((metaEv?.payload as any)?.document_set)
         ? (metaEv!.payload as any).document_set.map((d: any) => d.filename).filter(Boolean)
         : []
 
-    // Collect files[]
+    // Collect files[] from multipart form
     const files = (formData.getAll('files') as File[]).filter(f => f && f.size > 0)
     if (!files.length) return data({ result: parsed.reply({ formErrors: ['Please select file(s) to upload'] }) }, { status: 400 })
 
-    // Count must match
+    // Count must match what metadata expects
     if (expected.length !== files.length) {
         return data(
             { result: parsed.reply({ formErrors: [`You selected ${files.length} file(s), but ${expected.length} file(s) are expected as per metadata.`] }) },
@@ -149,7 +197,7 @@ export async function action({ request }: ActionFunctionArgs) {
         )
     }
 
-    // Validate names
+    // Validate names (exact match)
     const incomingNames = files.map(f => f.name)
     const missing = expected.filter(fn => !incomingNames.includes(fn))
     const extras = incomingNames.filter(fn => !expected.includes(fn))
@@ -172,8 +220,10 @@ export async function action({ request }: ActionFunctionArgs) {
 
     // All good: upload
     try {
+        // Send files to PCG
         const pcgResp = await pcgUploadFiles(submission.pcgSubmissionId, files)
 
+        // Persist document rows for each uploaded file
         for (const file of files) {
             await prisma.submissionDocument.create({
                 data: {
@@ -189,6 +239,7 @@ export async function action({ request }: ActionFunctionArgs) {
             })
         }
 
+        // Mark submission submitted; store PCG submission status string if provided
         await prisma.submission.update({
             where: { id: submissionId },
             data: {
@@ -198,6 +249,7 @@ export async function action({ request }: ActionFunctionArgs) {
             },
         })
 
+        // Event: upload success
         await prisma.submissionEvent.create({
             data: {
                 submissionId,
@@ -228,7 +280,7 @@ export async function action({ request }: ActionFunctionArgs) {
             })
         } catch {}
 
-        // Optionally pull PCG status and log it
+        // Best-effort: pull PCG status and log it (does not block UX)
         try {
             const statusResp = await pcgGetStatus(submission.pcgSubmissionId!)
             await prisma.submissionEvent.create({
@@ -270,12 +322,14 @@ export async function action({ request }: ActionFunctionArgs) {
             } catch {}
         } catch {}
 
+        // All done: back to list with success toast
         return await redirectWithToast(`/customer/submissions`, {
             type: 'success',
             title: 'Files Uploaded',
             description: `${files.length} file(s) uploaded and submitted successfully.`,
         })
     } catch (e: any) {
+        // Persist failure on the submission and log an event
         await prisma.submission.update({
             where: { id: submissionId },
             data: {
@@ -308,6 +362,7 @@ export async function action({ request }: ActionFunctionArgs) {
             })
         } catch {}
 
+        // Stay on upload screen with error toast
         return await redirectWithToast(`/customer/submissions/${submissionId}/upload`, {
             type: 'error',
             title: 'Upload Failed',
@@ -316,6 +371,13 @@ export async function action({ request }: ActionFunctionArgs) {
     }
 }
 
+/**
+ * Component — UploadSubmission
+ * - Renders one dropzone per expected filename (order aligned with metadata).
+ * - Rebuilds initial files from submission cache (subKey) on mount/nav changes.
+ * - Performs live client-side validations: exact filenames, per-file and total sizes.
+ * - Disables submit until everything is consistent and under size limits.
+ */
 export default function UploadSubmission() {
     const { user, submission, expectedFilenames } = useLoaderData<typeof loader>()
     const actionData = useActionData<typeof action>()
@@ -329,12 +391,20 @@ export default function UploadSubmission() {
         () => expectedFilenames.map(() => null),
     )
 
+    // Live validation surfaces
     const [mismatch, setMismatch] = React.useState<string[]>([])
     const [missing, setMissing] = React.useState<string[]>([])
     const [pickedTotalMB, setPickedTotalMB] = React.useState(0)
     const [perFileTooBig, setPerFileTooBig] = React.useState<string[]>([])
     const [ready, setReady] = React.useState(false)
 
+    /**
+     * Recompute client-side validations whenever files change.
+     * - mismatch: filename must equal the expected value for each slot.
+     * - missing: any slot without a file selected.
+     * - perFileTooBig: files over 150 MB.
+     * - pickedTotalMB: aggregate size (must be ≤ 300 MB).
+     */
     function recomputeValidations(nextFiles: Array<File | null>) {
         const BYTES_PER_MB = 1024 * 1024
         const mism: string[] = []
@@ -363,6 +433,10 @@ export default function UploadSubmission() {
         setPickedTotalMB(totalMB)
     }
 
+    /**
+     * Hydrate picked files from submission cache (subKey) so users returning
+     * from Step 2 don't need to re-select files. Then recompute validations.
+     */
     async function rebuildFromCache() {
         setReady(false)
         const next: Array<File | null> = []
@@ -382,6 +456,7 @@ export default function UploadSubmission() {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [location.key])
 
+    // Gate for submit button
     const canSubmit =
         ready &&
         mismatch.length === 0 &&
@@ -389,15 +464,18 @@ export default function UploadSubmission() {
         perFileTooBig.length === 0 &&
         pickedTotalMB <= 300
 
+    // Lock background scroll while fullscreen Drawer is mounted
+    React.useEffect(() => {
+        const prev = document.body.style.overflow
+        document.body.style.overflow = 'hidden'
+        return () => {
+            document.body.style.overflow = prev || ''
+        }
+    }, [])
+
     return (
-        <InterexLayout user={user}
-                       title="Upload & Submit"
-                       subtitle="Step 3 of 3"
-                       currentPath={`/customer/submissions/${submission.id}/upload`}
-                       backGuardLogoutUrl="/logout"
-                       backGuardRedirectTo="/login"
-                       backGuardMessage="Going back will log you out and discard your work. Continue?"
-        >
+        <>
+            {/* Overlay during upload */}
             <LoadingOverlay
                 show={Boolean(isUploading)}
                 title="Uploading your files…"
@@ -412,6 +490,7 @@ export default function UploadSubmission() {
                 size="fullscreen"
             >
                 <div className="space-y-8">
+                    {/* Context: expected filenames, constraints, and what to do */}
                     <div className="rounded-md bg-gray-50 p-4 text-sm text-gray-700">
                         <p>We’ve pulled your files from the secure cache. You can review, replace, or attach them here, then submit.</p>
                         <div className="mt-2">
@@ -425,9 +504,11 @@ export default function UploadSubmission() {
 
                     {/* Upload form with one dropzone per expected file */}
                     <Form method="POST" encType="multipart/form-data" className="space-y-4">
+                        {/* Hidden form fields for action routing */}
                         <input type="hidden" name="intent" value="upload-file" />
                         <input type="hidden" name="submissionId" value={submission.id} />
 
+                        {/* One FileDropzone per expected filename (slot-based) */}
                         <div className="space-y-4">
                             {expectedFilenames.map((expected, idx) => (
                                 <div key={`${expected}-${idx}`} className="rounded-md border border-gray-200 bg-white p-3">
@@ -452,7 +533,7 @@ export default function UploadSubmission() {
                             ))}
                         </div>
 
-                        {/* Alerts */}
+                        {/* Validation surfaces (client-side) */}
                         {(mismatch.length || missing.length || perFileTooBig.length || pickedTotalMB > 300) ? (
                             <div className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800">
                                 <div className="font-semibold mb-1">Please fix the following before submitting:</div>
@@ -484,9 +565,7 @@ export default function UploadSubmission() {
                                     </div>
                                 ) : null}
                                 {pickedTotalMB > 300 ? <div>Total size {pickedTotalMB.toFixed(1)} MB exceeds 300 MB.</div> : null}
-                                <div className="mt-3">
-
-                                </div>
+                                <div className="mt-3"></div>
                             </div>
                         ) : (
                             <div className="rounded-md border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-800">
@@ -494,6 +573,7 @@ export default function UploadSubmission() {
                             </div>
                         )}
 
+                        {/* Footer controls */}
                         <div className="flex items-center justify-between pt-4 border-t">
                             <Link
                                 to={`/customer/submissions/${submission.id}/review`}
@@ -512,6 +592,7 @@ export default function UploadSubmission() {
                             </StatusButton>
                         </div>
 
+                        {/* Server-side validation messages (from action) */}
                         {actionData && 'result' in actionData && (actionData as any).result?.error?.formErrors?.length ? (
                             <div className="mt-4 rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800">
                                 {(actionData as any).result.error.formErrors.map((msg: string, i: number) => (
@@ -521,9 +602,10 @@ export default function UploadSubmission() {
                         ) : null}
                     </Form>
 
+                    {/* Right-rail/section: activity log for this submission */}
                     <SubmissionActivityLog events={submission.events ?? []} />
                 </div>
             </Drawer>
-        </InterexLayout>
+        </>
     )
 }
