@@ -217,6 +217,93 @@ export default function AdminAllLettersPage() {
     // Dedupe guard to avoid double-open (e.g., StrictMode)
     const pendingIds = React.useRef<Record<string, true>>({})
 
+    // NEW: last sync meta PER TYPE (Eastern + local + trigger)
+    type SyncTrigger = 'manual' | 'auto'
+    type SyncMeta = {
+        trigger: SyncTrigger
+        whenUtc: string
+        whenEastern: string
+        whenLocal: string
+    }
+    function isSyncMeta(val: unknown): val is SyncMeta {
+        if (!val || typeof val !== 'object') return false
+        const v = val as Record<string, unknown>
+        return (
+            (v.trigger === 'manual' || v.trigger === 'auto') &&
+            typeof v.whenUtc === 'string' &&
+            typeof v.whenEastern === 'string' &&
+            typeof v.whenLocal === 'string'
+        )
+    }
+    const [lastSyncMetaByType, setLastSyncMetaByType] = React.useState<
+        Record<TabType, SyncMeta | null>
+    >({
+        PREPAY: null,
+        POSTPAY: null,
+        POSTPAY_OTHER: null,
+    })
+
+    // Load previously recorded per-type times from localStorage on mount
+    React.useEffect(() => {
+        try {
+            const types: TabType[] = ['PREPAY', 'POSTPAY', 'POSTPAY_OTHER']
+            const next: Record<TabType, SyncMeta | null> = {
+                PREPAY: null,
+                POSTPAY: null,
+                POSTPAY_OTHER: null,
+            }
+            for (const t of types) {
+                const raw = typeof window !== 'undefined' ? localStorage.getItem(`emdr.sync.last.${t}`) : null
+                if (raw) {
+                    const parsed = JSON.parse(raw) as unknown
+                    if (isSyncMeta(parsed)) {
+                        next[t] = parsed
+                    }
+                }
+            }
+            setLastSyncMetaByType(next)
+        } catch {
+            // ignore
+        }
+    }, [])
+
+    // Helper to record a sync trigger moment for a specific type
+    function recordSyncTrigger(type: TabType, source: SyncTrigger) {
+        const now = new Date()
+        const whenEastern = new Intl.DateTimeFormat('en-US', {
+            timeZone: 'America/New_York',
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit',
+            hour: '2-digit',
+            minute: '2-digit',
+            hour12: false,
+            timeZoneName: 'short',
+        }).format(now)
+        const whenLocal = new Intl.DateTimeFormat(undefined, {
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit',
+            hour: '2-digit',
+            minute: '2-digit',
+            hour12: false,
+            timeZoneName: 'short',
+        }).format(now)
+
+        const payload: SyncMeta = {
+            trigger: source,
+            whenUtc: now.toISOString(),
+            whenEastern,
+            whenLocal,
+        }
+        try {
+            localStorage.setItem(`emdr.sync.last.${type}`, JSON.stringify(payload))
+        } catch {
+            // ignore storage failures
+        }
+        setLastSyncMetaByType(prev => ({ ...prev, [type]: payload }))
+    }
+
     React.useEffect(() => {
         const d: any = jsonFetcher.data
         if (!d) return
@@ -312,8 +399,16 @@ export default function AdminAllLettersPage() {
     }
 
     function SyncBar({ type }: { type: TabType }) {
+        const meta = lastSyncMetaByType[type]
         return (
-            <Form method="post" className="ml-auto flex items-end gap-3">
+            <Form
+                method="post"
+                className="ml-auto flex items-end gap-3"
+                onSubmit={() => {
+                    // Record time+zone for THIS type as soon as user triggers the sync
+                    recordSyncTrigger(type, 'manual')
+                }}
+            >
                 <input type="hidden" name="intent" value="sync" />
                 <input type="hidden" name="type" value={type} />
                 <div>
@@ -336,10 +431,22 @@ export default function AdminAllLettersPage() {
                         className="border rounded px-2 py-1 text-sm"
                     />
                 </div>
-                <button className="bg-blue-600 text-white text-sm font-semibold rounded px-3 py-1.5 disabled:opacity-50">
-                    <Icon name="update" className="inline h-4 w-4 mr-1" />
-                    Fetch new letters
-                </button>
+                <div className="flex flex-col items-start">
+                    <button className="bg-blue-600 text-white text-sm font-semibold rounded px-3 py-1.5 disabled:opacity-50">
+                        <Icon name="update" className="inline h-4 w-4 mr-1" />
+                        Fetch new letters
+                    </button>
+                    {/* Two-line Last fetch display to avoid layout stretching */}
+                    <div className="mt-1 text-[11px] leading-tight text-gray-500">
+                        <div>
+                            <span className="font-medium">Last fetch:</span>{' '}
+                            {meta ? meta.whenEastern : '—'}
+                        </div>
+                        <div className="text-[10px] text-gray-400">
+                            {meta ? `(Local: ${meta.whenLocal}) — ${meta.trigger}` : '\u00A0'}
+                        </div>
+                    </div>
+                </div>
             </Form>
         )
     }

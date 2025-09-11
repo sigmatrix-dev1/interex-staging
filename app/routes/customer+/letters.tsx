@@ -6,13 +6,13 @@ import {
     data,
     useLoaderData,
     Form,
+    useFetcher,
 } from 'react-router'
 
 import { InterexLayout } from '#app/components/interex-layout.tsx'
-import { JsonViewer } from '#app/components/json-view.tsx'
 import { Icon } from '#app/components/ui/icon.tsx'
 import { LoadingOverlay } from '#app/components/ui/loading-overlay.tsx'
-import { syncLetters, downloadLetterPdf } from '#app/services/letters.server.ts'
+import { syncLetters } from '#app/services/letters.server.ts'
 import { requireUserId } from '#app/utils/auth.server.ts'
 import { prisma } from '#app/utils/db.server.ts'
 import { INTEREX_ROLES } from '#app/utils/interex-roles.ts'
@@ -20,6 +20,7 @@ import { useIsPending } from '#app/utils/misc.tsx'
 import { requireRoles } from '#app/utils/role-redirect.server.ts'
 import { audit } from '#app/utils/audit.server.ts'
 import { Prisma } from '@prisma/client'
+import { pcgDownloadEmdrLetterFile } from '#app/services/pcg-hih.server.ts'
 
 type TabType = 'PREPAY' | 'POSTPAY' | 'POSTPAY_OTHER'
 
@@ -42,15 +43,30 @@ export async function loader({ request }: LoaderFunctionArgs) {
         INTEREX_ROLES.PROVIDER_GROUP_ADMIN,
         INTEREX_ROLES.BASIC_USER,
     ])
-    if (!user.customerId)
-        throw new Response('User must be associated with a customer', {
-            status: 400,
-        })
+    if (!user.customerId) {
+        throw new Response('User must be associated with a customer', { status: 400 })
+    }
 
     const url = new URL(request.url)
     const search = url.searchParams.get('search')?.trim() || ''
 
+    const roleNames = user.roles.map(r => r.name)
+    const isCustomerAdmin = roleNames.includes(INTEREX_ROLES.CUSTOMER_ADMIN)
+    const isProviderGroupAdmin = roleNames.includes(INTEREX_ROLES.PROVIDER_GROUP_ADMIN)
+    const isBasicUser = roleNames.includes(INTEREX_ROLES.BASIC_USER)
+
+    // Base scope: always restrict to the user's customer
     const baseWhere: any = { customerId: user.customerId }
+
+    // Narrow by role:
+    if (!isCustomerAdmin && isBasicUser) {
+        baseWhere.provider = {
+            userNpis: { some: { userId: user.id } },
+        }
+    }
+    // (Optional) If you later add concrete provider-group membership, add it here
+    // for isProviderGroupAdmin.
+
     if (search) {
         baseWhere.OR = [
             { externalLetterId: { contains: search } },
@@ -114,6 +130,11 @@ export async function action({ request }: ActionFunctionArgs) {
     })
     if (!user) throw new Response('Unauthorized', { status: 401 })
 
+    const roleNames = user.roles.map(r => r.name)
+    const isCustomerAdmin = roleNames.includes(INTEREX_ROLES.CUSTOMER_ADMIN)
+    const isProviderGroupAdmin = roleNames.includes(INTEREX_ROLES.PROVIDER_GROUP_ADMIN)
+    const isBasicUser = roleNames.includes(INTEREX_ROLES.BASIC_USER)
+
     const form = await request.formData()
     const intent = String(form.get('intent') || '')
 
@@ -159,59 +180,40 @@ export async function action({ request }: ActionFunctionArgs) {
         }
     }
 
-    if (intent === 'download') {
-        // All allowed viewers can download
-        requireRoles(user, [
-            INTEREX_ROLES.CUSTOMER_ADMIN,
-            INTEREX_ROLES.PROVIDER_GROUP_ADMIN,
-            INTEREX_ROLES.BASIC_USER,
-        ])
+    // JSON-returning download used by the "View" pill (same pattern as admin)
+    if (intent === 'download-json') {
         const type = String(form.get('type')) as TabType
         const externalLetterId = String(form.get('externalLetterId') || '')
-        if (!externalLetterId)
-            return data({ error: 'Missing externalLetterId' }, { status: 400 })
-
-        // Verify the letter belongs to this customer and type
-        let letter: { id: string } | null = null
-        if (type === 'PREPAY') {
-            letter = await prisma.prepayLetter.findFirst({
-                where: { externalLetterId, customerId: user.customerId! },
-                select: { id: true },
-            })
-        } else if (type === 'POSTPAY') {
-            letter = await prisma.postpayLetter.findFirst({
-                where: { externalLetterId, customerId: user.customerId! },
-                select: { id: true },
-            })
-        } else {
-            letter = await prisma.postpayOtherLetter.findFirst({
-                where: { externalLetterId, customerId: user.customerId! },
-                select: { id: true },
-            })
+        if (!user.customerId || !externalLetterId) {
+            return data({ ok: false, error: 'Missing required parameters' }, { status: 400 })
         }
 
-        if (!letter) return data({ error: 'Not found or not authorized' }, { status: 404 })
+        const providerScope: any = (!roleNames.includes(INTEREX_ROLES.CUSTOMER_ADMIN) && roleNames.includes(INTEREX_ROLES.BASIC_USER))
+            ? { userNpis: { some: { userId: user.id } } }
+            : undefined
 
-        const { fileBase64, filename } = await downloadLetterPdf({ type, externalLetterId })
-        if (!fileBase64) return data({ error: 'No file returned' }, { status: 400 })
+        let row: any = null
+        const whereCommon: any = {
+            externalLetterId,
+            customerId: user.customerId,
+            ...(providerScope ? { provider: providerScope } : {}),
+        }
 
-        await audit({
-            request,
-            user,
-            action: 'LETTER_DOWNLOAD',
-            entityType: 'LETTER',
-            entityId: externalLetterId,
-            success: true,
-            message: `Downloaded ${type} letter ${externalLetterId}`,
-        })
+        if (type === 'PREPAY') {
+            row = await prisma.prepayLetter.findFirst({ where: whereCommon, select: { externalLetterId: true, downloadId: true } })
+        } else if (type === 'POSTPAY') {
+            row = await prisma.postpayLetter.findFirst({ where: whereCommon, select: { externalLetterId: true, downloadId: true } })
+        } else {
+            row = await prisma.postpayOtherLetter.findFirst({ where: whereCommon, select: { externalLetterId: true, downloadId: true } })
+        }
+        if (!row) return data({ ok: false, error: 'Letter not found or not authorized' }, { status: 404 })
 
-        const buf = Buffer.from(fileBase64, 'base64')
-        return new Response(buf, {
-            headers: {
-                'Content-Type': 'application/pdf',
-                'Content-Disposition': `attachment; filename="${filename}"`,
-                'Content-Length': String(buf.length),
-            },
+        const letter_id = row.downloadId ?? row.externalLetterId
+        const payload = await pcgDownloadEmdrLetterFile({ letter_id, letter_type: type })
+        return data({
+            ok: true,
+            meta: { type, externalLetterId, letter_id },
+            payload,
         })
     }
 
@@ -231,6 +233,151 @@ export default function CustomerLettersPage() {
     const canSync = user.roles.some(r =>
         [INTEREX_ROLES.CUSTOMER_ADMIN, INTEREX_ROLES.PROVIDER_GROUP_ADMIN, INTEREX_ROLES.BASIC_USER].includes(r.name),
     )
+
+    // ===== client-side state =====
+    const jsonFetcher = useFetcher()
+    const [loadingId, setLoadingId] = React.useState<string | null>(null)
+    // Dedupe guard to avoid double-open (e.g., StrictMode)
+    const pendingIds = React.useRef<Record<string, true>>({})
+
+    // ---- Last Fetch (per-type) like admin ----
+    type SyncTrigger = 'manual' | 'auto'
+    type SyncMeta = {
+        trigger: SyncTrigger
+        whenUtc: string
+        whenEastern: string
+        whenLocal: string
+    }
+    function isValidSyncMeta(val: unknown): val is SyncMeta {
+        const v = val as Record<string, unknown> | null
+        return !!v
+            && typeof v.whenUtc === 'string'
+            && typeof v.whenEastern === 'string'
+            && typeof v.whenLocal === 'string'
+            && (v.trigger === 'manual' || v.trigger === 'auto')
+    }
+
+    const [lastSyncMetaByType, setLastSyncMetaByType] = React.useState<
+        Record<TabType, SyncMeta | null>
+    >({
+        PREPAY: null,
+        POSTPAY: null,
+        POSTPAY_OTHER: null,
+    })
+
+    // Load previously recorded per-type times from localStorage on mount
+    React.useEffect(() => {
+        try {
+            const types: TabType[] = ['PREPAY', 'POSTPAY', 'POSTPAY_OTHER']
+            const next: Record<TabType, SyncMeta | null> = {
+                PREPAY: null,
+                POSTPAY: null,
+                POSTPAY_OTHER: null,
+            }
+            for (const t of types) {
+                const raw = typeof window !== 'undefined' ? localStorage.getItem(`emdr.sync.last.${t}`) : null
+                if (raw) {
+                    const parsed = JSON.parse(raw)
+                    if (isValidSyncMeta(parsed)) {
+                        next[t] = parsed
+                    }
+                }
+            }
+            setLastSyncMetaByType(next)
+        } catch {
+            // ignore
+        }
+    }, [])
+
+    // Helper to record a sync trigger moment for a specific type
+    function recordSyncTrigger(type: TabType, source: SyncTrigger) {
+        const now = new Date()
+        const whenEastern = new Intl.DateTimeFormat('en-US', {
+            timeZone: 'America/New_York',
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit',
+            hour: '2-digit',
+            minute: '2-digit',
+            hour12: false,
+            timeZoneName: 'short',
+        }).format(now)
+        const whenLocal = new Intl.DateTimeFormat(undefined, {
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit',
+            hour: '2-digit',
+            minute: '2-digit',
+            hour12: false,
+            timeZoneName: 'short',
+        }).format(now)
+
+        const payload: SyncMeta = {
+            trigger: source,
+            whenUtc: now.toISOString(),
+            whenEastern,
+            whenLocal,
+        }
+        try {
+            localStorage.setItem(`emdr.sync.last.${type}`, JSON.stringify(payload))
+        } catch {
+            // ignore storage failures
+        }
+        setLastSyncMetaByType(prev => ({ ...prev, [type]: payload }))
+    }
+    // -------------------------------------------
+
+    React.useEffect(() => {
+        const d: any = jsonFetcher.data
+        if (!d) return
+        if (d.ok && d.meta?.externalLetterId) {
+            const id = String(d.meta.externalLetterId)
+
+            // Only act if this id is currently pending (prevents duplicate opens)
+            if (!pendingIds.current[id]) return
+            delete pendingIds.current[id]
+            setLoadingId(null)
+
+            try {
+                const base64: string | undefined = d.payload?.file_content
+                if (!base64) {
+                    alert('No file returned from API.')
+                    return
+                }
+                const blob = base64ToPdfBlob(base64)
+                const url = URL.createObjectURL(blob)
+
+                // Open exactly once; no extra fallbacks
+                window.open(url, '_blank', 'noopener')
+
+                // Cleanup
+                setTimeout(() => URL.revokeObjectURL(url), 60_000)
+            } catch (e) {
+                console.error(e)
+                alert('Failed to render PDF in browser.')
+            }
+        }
+    }, [jsonFetcher.data])
+
+    function requestViewJson(type: TabType, externalLetterId: string) {
+        setLoadingId(externalLetterId)
+        pendingIds.current[externalLetterId] = true
+        void jsonFetcher.submit(
+            { intent: 'download-json', type, externalLetterId },
+            { method: 'post' },
+        )
+    }
+
+    function base64ToPdfBlob(b64: string) {
+        // tolerate "data:application/pdf;base64,..." and whitespace/newlines
+        const part = b64.includes(',') ? (b64.split(',')[1] ?? b64) : b64
+        const clean = part.replace(/\s/g, '').trim()
+        const byteString = atob(clean)
+        const len = byteString.length
+        const bytes = new Uint8Array(len)
+        for (let i = 0; i < len; i++) bytes[i] = byteString.charCodeAt(i)
+        return new Blob([bytes], { type: 'application/pdf' })
+    }
 
     // yyyy-MM-DD defaults: start = 30 days ago, end = today
     const today = React.useMemo(() => new Date(), [])
@@ -264,8 +411,16 @@ export default function CustomerLettersPage() {
 
     function SyncBar({ type }: { type: TabType }) {
         if (!canSync) return null
+        const meta = lastSyncMetaByType[type]
         return (
-            <Form method="post" className="ml-auto flex items-end gap-3">
+            <Form
+                method="post"
+                className="ml-auto flex items-end gap-3"
+                onSubmit={() => {
+                    // Record time+zone for THIS type as soon as user triggers the sync
+                    recordSyncTrigger(type, 'manual')
+                }}
+            >
                 <input type="hidden" name="intent" value="sync" />
                 <input type="hidden" name="type" value={type} />
                 <div>
@@ -288,10 +443,22 @@ export default function CustomerLettersPage() {
                         className="border rounded px-2 py-1 text-sm"
                     />
                 </div>
-                <button className="bg-blue-600 text-white text-sm font-semibold rounded px-3 py-1.5 disabled:opacity-50">
-                    <Icon name="update" className="inline h-4 w-4 mr-1" />
-                    Fetch new letters
-                </button>
+                <div className="flex flex-col items-start">
+                    <button className="bg-blue-600 text-white text-sm font-semibold rounded px-3 py-1.5 disabled:opacity-50">
+                        <Icon name="update" className="inline h-4 w-4 mr-1" />
+                        Fetch new letters
+                    </button>
+                    {/* Two-line Last fetch display to avoid layout stretching */}
+                    <div className="mt-1 text-[11px] leading-tight text-gray-500">
+                        <div>
+                            <span className="font-medium">Last fetch:</span>{' '}
+                            {meta ? meta.whenEastern : '—'}
+                        </div>
+                        <div className="text-[10px] text-gray-400">
+                            {meta ? `(Local: ${meta.whenLocal}) — ${meta.trigger}` : '\u00A0'}
+                        </div>
+                    </div>
+                </div>
             </Form>
         )
     }
@@ -332,49 +499,70 @@ export default function CustomerLettersPage() {
                             <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Program</th>
                             <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Stage</th>
                             <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">PDF</th>
-                            <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Raw</th>
                         </tr>
                         </thead>
                         <tbody className="bg-white divide-y divide-gray-200">
                         {rows.length === 0 ? (
                             <tr>
-                                <td colSpan={13} className="px-4 py-6 text-sm text-gray-500 text-center">
+                                <td colSpan={12} className="px-4 py-6 text-sm text-gray-500 text-center">
                                     No letters found.
                                 </td>
                             </tr>
                         ) : (
-                            rows.map((row: any) => (
-                                <tr key={row.externalLetterId} className="hover:bg-gray-50">
-                                    <td className="px-4 py-2 text-sm font-mono">{row.externalLetterId}</td>
-                                    <td className="px-4 py-2 text-sm">{row.providerNpi}</td>
-                                    <td className="px-4 py-2 text-sm">{row.provider?.name ?? '—'}</td>
-                                    <td className="px-4 py-2 text-sm">{row.customer?.name ?? '—'}</td>
-                                    <td className="px-4 py-2 text-sm">{row.provider?.providerGroup?.name ?? '—'}</td>
-                                    <td className="px-4 py-2 text-sm">
-                                        {row?.provider?.userNpis?.map((x: any) => x.user.username).filter(Boolean).join(', ') || '—'}
-                                    </td>
-                                    <td className="px-4 py-2 text-sm">
-                                        {row.letterDate ? new Date(row.letterDate).toISOString().slice(0, 10) : '—'}
-                                    </td>
-                                    <td className="px-4 py-2 text-sm">
-                                        {row.respondBy ? new Date(row.respondBy).toISOString().slice(0, 10) : '—'}
-                                    </td>
-                                    <td className="px-4 py-2 text-sm">{row.jurisdiction ?? '—'}</td>
-                                    <td className="px-4 py-2 text-sm">{row.programName ?? '—'}</td>
-                                    <td className="px-4 py-2 text-sm">{row.stage ?? '—'}</td>
-                                    <td className="px-4 py-2 text-sm">
-                                        <Form method="post">
-                                            <input type="hidden" name="intent" value="download" />
-                                            <input type="hidden" name="type" value={type} />
-                                            <input type="hidden" name="externalLetterId" value={row.externalLetterId} />
-                                            <button className="text-blue-600 hover:text-blue-800">Download</button>
-                                        </Form>
-                                    </td>
-                                    <td className="px-4 py-2 text-sm">
-                                        <JsonViewer data={row.raw} />
-                                    </td>
-                                </tr>
-                            ))
+                            rows.map((row: any) => {
+                                const displayLetterId = row.downloadId ?? row.externalLetterId
+                                const isLoading = loadingId === row.externalLetterId
+                                return (
+                                    <tr key={row.externalLetterId} className="hover:bg-gray-50">
+                                        <td
+                                            className="px-4 py-2 text-sm font-mono"
+                                            title={row.externalLetterId ? `Unique ID: ${row.externalLetterId}` : undefined}
+                                        >
+                                            {displayLetterId}
+                                        </td>
+                                        <td className="px-4 py-2 text-sm">{row.providerNpi}</td>
+                                        <td className="px-4 py-2 text-sm">{row.provider?.name ?? '—'}</td>
+                                        <td className="px-4 py-2 text-sm">{row.customer?.name ?? '—'}</td>
+                                        <td className="px-4 py-2 text-sm">{row.provider?.providerGroup?.name ?? '—'}</td>
+                                        <td className="px-4 py-2 text-sm">
+                                            {row?.provider?.userNpis?.map((x: any) => x.user.username).filter(Boolean).join(', ') || '—'}
+                                        </td>
+                                        <td className="px-4 py-2 text-sm">
+                                            {row.letterDate ? new Date(row.letterDate).toISOString().slice(0, 10) : '—'}
+                                        </td>
+                                        <td className="px-4 py-2 text-sm">
+                                            {row.respondBy ? new Date(row.respondBy).toISOString().slice(0, 10) : '—'}
+                                        </td>
+                                        <td className="px-4 py-2 text-sm">{row.jurisdiction ?? '—'}</td>
+                                        <td className="px-4 py-2 text-sm">{row.programName ?? '—'}</td>
+                                        <td className="px-4 py-2 text-sm">{row.stage ?? '—'}</td>
+                                        <td className="px-4 py-2 text-sm">
+                                            <Form method="post" onSubmit={(e) => e.preventDefault()}>
+                                                <button
+                                                    type="button"
+                                                    disabled={isLoading}
+                                                    onClick={() => requestViewJson(type, row.externalLetterId)}
+                                                    className={[
+                                                        'inline-flex items-center rounded-full border px-3 py-1 text-xs font-medium transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2 disabled:opacity-50',
+                                                        isLoading
+                                                            ? 'border-gray-200 bg-gray-100 text-gray-600 cursor-wait focus:ring-gray-300'
+                                                            : 'border-indigo-200 bg-indigo-50 text-indigo-700 hover:bg-indigo-100 focus:ring-indigo-500',
+                                                    ].join(' ')}
+                                                >
+                                                    {isLoading ? (
+                                                        <span className="inline-flex items-center gap-1">
+                                <Icon name="update" className="h-3 w-3 animate-spin" />
+                                Loading…
+                              </span>
+                                                    ) : (
+                                                        <span>View</span>
+                                                    )}
+                                                </button>
+                                            </Form>
+                                        </td>
+                                    </tr>
+                                )
+                            })
                         )}
                         </tbody>
                     </table>
@@ -394,7 +582,7 @@ export default function CustomerLettersPage() {
         >
             <LoadingOverlay show={Boolean(isPending)} />
 
-            <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-6">
+            <div className="max-w-11/12 mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-6">
                 {/* Global search (applies to all sections) */}
                 <SearchBar />
 
