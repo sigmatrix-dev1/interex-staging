@@ -609,8 +609,9 @@ model PrepayLetter {
 
   raw Json
 
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  firstViewedAt DateTime? // NEW
 
   @@index([customerId])
   @@index([providerNpi])
@@ -646,8 +647,9 @@ model PostpayLetter {
 
   raw Json
 
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  firstViewedAt DateTime? // NEW
 
   @@index([customerId])
   @@index([providerNpi])
@@ -683,8 +685,9 @@ model PostpayOtherLetter {
 
   raw Json
 
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  firstViewedAt DateTime? // NEW
 
   @@index([customerId])
   @@index([providerNpi])
@@ -746,7 +749,7 @@ model AppLog {
   createdAt DateTime @default(now())
   level     String // debug | info | warn | error
   module    String? // e.g., 'submissions', 'letters', 'auth'
-  event     String? // e.g., 'FILE_UPLOAD', 'BUTTON_CLICK', 'ROUTE_HIT'
+  event     String? // e.g., 'FILE_UPLOAD', 'BUTTON_CLICK'
   message   String?
 
   // correlation

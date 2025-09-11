@@ -172,7 +172,7 @@ export async function action({ request }: ActionFunctionArgs) {
         })
     }
 
-    // Used by the UI to fetch file_content
+    // Used by the UI to fetch file_content AND stamp first view once
     if (intent === 'download-json') {
         const type = String(form.get('type')) as TabType
         const externalLetterId = String(form.get('externalLetterId') || '')
@@ -180,12 +180,27 @@ export async function action({ request }: ActionFunctionArgs) {
         let row: any = null
         if (type === 'PREPAY') {
             row = await prisma.prepayLetter.findUnique({ where: { externalLetterId } })
+            if (!row) return data({ ok: false, error: 'Letter not found' }, { status: 404 })
+            // NEW: stamp firstViewedAt once
+            await prisma.prepayLetter.updateMany({
+                where: { externalLetterId, firstViewedAt: null },
+                data: { firstViewedAt: new Date() },
+            })
         } else if (type === 'POSTPAY') {
             row = await prisma.postpayLetter.findUnique({ where: { externalLetterId } })
+            if (!row) return data({ ok: false, error: 'Letter not found' }, { status: 404 })
+            await prisma.postpayLetter.updateMany({
+                where: { externalLetterId, firstViewedAt: null },
+                data: { firstViewedAt: new Date() },
+            })
         } else {
             row = await prisma.postpayOtherLetter.findUnique({ where: { externalLetterId } })
+            if (!row) return data({ ok: false, error: 'Letter not found' }, { status: 404 })
+            await prisma.postpayOtherLetter.updateMany({
+                where: { externalLetterId, firstViewedAt: null },
+                data: { firstViewedAt: new Date() },
+            })
         }
-        if (!row) return data({ ok: false, error: 'Letter not found' }, { status: 404 })
 
         const letter_id = row.downloadId ?? row.externalLetterId
         const payload = await pcgDownloadEmdrLetterFile({ letter_id, letter_type: type })
@@ -216,6 +231,9 @@ export default function AdminAllLettersPage() {
     const [loadingId, setLoadingId] = React.useState<string | null>(null)
     // Dedupe guard to avoid double-open (e.g., StrictMode)
     const pendingIds = React.useRef<Record<string, true>>({})
+
+    // Track first-view locally so the table can reflect it immediately after a "View"
+    const [firstViewedAtById, setFirstViewedAtById] = React.useState<Record<string, string>>({})
 
     // NEW: last sync meta PER TYPE (Eastern + local + trigger)
     type SyncTrigger = 'manual' | 'auto'
@@ -327,6 +345,9 @@ export default function AdminAllLettersPage() {
                 // Open exactly once; no extra fallbacks
                 window.open(url, '_blank', 'noopener')
 
+                // Record first-view client-side (server is already stamped)
+                setFirstViewedAtById(prev => (prev[id] ? prev : { ...prev, [id]: new Date().toISOString() }))
+
                 // Cleanup
                 setTimeout(() => URL.revokeObjectURL(url), 60_000)
             } catch (e) {
@@ -364,6 +385,68 @@ export default function AdminAllLettersPage() {
         d.setDate(d.getDate() - 30)
         return d.toISOString().slice(0, 10)
     }, [today])
+
+    // Formatter + helper for Eastern Time display
+    const etFormatter = React.useMemo(
+        () =>
+            new Intl.DateTimeFormat('en-US', {
+                timeZone: 'America/New_York',
+                year: 'numeric',
+                month: '2-digit',
+                day: '2-digit',
+                hour: '2-digit',
+                minute: '2-digit',
+                hour12: false,
+                timeZoneName: 'short',
+            }),
+        [],
+    )
+    function formatET(input?: string | Date | null) {
+        if (!input) return '—'
+        const d = new Date(input)
+        if (isNaN(d.getTime())) return '—'
+        return etFormatter.format(d)
+    }
+
+    // Convert a Date to the UTC epoch representing the same *wall clock time in ET*
+    const toEtEpochMs = React.useCallback((input?: string | Date | null) => {
+        if (!input) return NaN
+        const d = new Date(input)
+        if (isNaN(d.getTime())) return NaN
+        const parts = new Intl.DateTimeFormat('en-US', {
+            timeZone: 'America/New_York',
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit',
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+            hour12: false,
+        }).formatToParts(d)
+        const get = (t: string) => Number(parts.find(p => p.type === t)?.value ?? '0')
+        return Date.UTC(get('year'), get('month') - 1, get('day'), get('hour'), get('minute'), get('second'))
+    }, [])
+
+    function daysLeftEtParts(respondBy?: string | Date | null) {
+        if (!respondBy) return { label: '—', cls: 'bg-gray-100 text-gray-700 ring-gray-200' }
+        const nowMs = toEtEpochMs(new Date())
+        const dueMs = toEtEpochMs(respondBy)
+        if (Number.isNaN(nowMs) || Number.isNaN(dueMs)) {
+            return { label: '—', cls: 'bg-gray-100 text-gray-700 ring-gray-200' }
+        }
+        const MS_DAY = 24 * 60 * 60 * 1000
+        const days = Math.ceil((dueMs - nowMs) / MS_DAY) // may be negative if overdue
+
+        let cls =
+            'bg-emerald-100 text-emerald-700 ring-emerald-200' // default: comfortably far
+        if (days <= 30) cls = 'bg-lime-100 text-lime-700 ring-lime-200'
+        if (days <= 14) cls = 'bg-yellow-100 text-yellow-700 ring-yellow-200'
+        if (days <= 7) cls = 'bg-amber-100 text-amber-700 ring-amber-200'
+        if (days <= 3) cls = 'bg-orange-100 text-orange-700 ring-orange-200'
+        if (days <= 0) cls = 'bg-red-100 text-red-700 ring-red-200'
+
+        return { label: `${days} - ${formatET(respondBy)}`, cls }
+    }
 
     function FilterBar() {
         return (
@@ -471,28 +554,37 @@ export default function AdminAllLettersPage() {
                     </div>
                     <SyncBar type={type} />
                 </div>
+
+                {/* Wide, scrollable table so columns don't get squished */}
                 <div className="overflow-x-auto">
-                    <table className="min-w-full divide-y divide-gray-200">
+                    <table className="min-w-[2000px] table-fixed divide-y divide-gray-200">
                         <thead className="bg-gray-50">
-                        <tr>
-                            <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Letter ID</th>
-                            <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">NPI</th>
-                            <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Provider</th>
-                            <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Customer</th>
-                            <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Provider Group</th>
-                            <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Assigned To</th>
-                            <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Letter Date</th>
-                            <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Respond By</th>
-                            <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Jurisdiction</th>
-                            <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Program</th>
-                            <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Stage</th>
-                            <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">PDF</th>
+                        <tr className="whitespace-nowrap">
+                            <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase w-[170px]">Fetched (ET)</th>
+                            <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase w-[140px]">Letter ID</th>
+                            <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase w-[320px]">Letter Name</th>
+                            <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase w-[140px]">NPI</th>
+                            <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase w-[180px]">Provider</th>
+                            <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase w-[160px]">Customer</th>
+                            <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase w-[170px]">Provider Group</th>
+                            <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase w-[160px]">Assigned To</th>
+                            {/* moved here */}
+                            <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase w-[100px]">PDF</th>
+                            <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase w-[170px]">First Viewed (ET)</th>
+                            {/* remaining columns */}
+                            <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase w-[120px]">Letter Date</th>
+                            <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase w-[140px]">Respond By</th>
+                            <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase w-[240px]">Days Left (ET)</th>
+                            <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase w-[120px]">Jurisdiction</th>
+                            <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase w-[120px]">Program</th>
+                            <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase w-[220px]">Stage</th>
                         </tr>
                         </thead>
+
                         <tbody className="bg-white divide-y divide-gray-200">
                         {rows.length === 0 ? (
                             <tr>
-                                <td colSpan={12} className="px-4 py-6 text-sm text-gray-500 text-center">
+                                <td colSpan={16} className="px-4 py-6 text-sm text-gray-500 text-center">
                                     No letters found.
                                 </td>
                             </tr>
@@ -500,31 +592,43 @@ export default function AdminAllLettersPage() {
                             rows.map((row: any) => {
                                 const displayLetterId = row.downloadId ?? row.externalLetterId
                                 const isLoading = loadingId === row.externalLetterId
+                                const firstViewed = firstViewedAtById[row.externalLetterId] ?? row.firstViewedAt
+                                const daysMeta = daysLeftEtParts(row.respondBy)
+
                                 return (
                                     <tr key={row.externalLetterId} className="hover:bg-gray-50">
                                         <td
-                                            className="px-4 py-2 text-sm font-mono"
+                                            className="px-4 py-2 text-sm whitespace-nowrap"
+                                            title={row.createdAt ? new Date(row.createdAt).toISOString() : undefined}
+                                        >
+                                            {formatET(row.createdAt)}
+                                        </td>
+
+                                        <td
+                                            className="px-4 py-2 text-sm font-mono whitespace-nowrap"
                                             title={row.externalLetterId ? `Unique ID: ${row.externalLetterId}` : undefined}
                                         >
                                             {displayLetterId}
                                         </td>
-                                        <td className="px-4 py-2 text-sm">{row.providerNpi}</td>
-                                        <td className="px-4 py-2 text-sm">{row.provider?.name ?? '—'}</td>
-                                        <td className="px-4 py-2 text-sm">{row.customer?.name ?? '—'}</td>
-                                        <td className="px-4 py-2 text-sm">{row.provider?.providerGroup?.name ?? '—'}</td>
-                                        <td className="px-4 py-2 text-sm">
+
+                                        {/* LETTER NAME now wraps */}
+                                        <td className="px-4 py-2 text-sm whitespace-normal">
+                                            <div className="break-words">
+                                                {row.letterName ?? '—'}
+                                            </div>
+                                        </td>
+
+                                        <td className="px-4 py-2 text-sm whitespace-nowrap">{row.providerNpi}</td>
+                                        <td className="px-4 py-2 text-sm whitespace-nowrap">{row.provider?.name ?? '—'}</td>
+                                        <td className="px-4 py-2 text-sm whitespace-nowrap">{row.customer?.name ?? '—'}</td>
+                                        <td className="px-4 py-2 text-sm whitespace-nowrap">{row.provider?.providerGroup?.name ?? '—'}</td>
+
+                                        <td className="px-4 py-2 text-sm whitespace-nowrap">
                                             {row?.provider?.userNpis?.map((x: any) => x.user.username).filter(Boolean).join(', ') || '—'}
                                         </td>
-                                        <td className="px-4 py-2 text-sm">
-                                            {row.letterDate ? new Date(row.letterDate).toISOString().slice(0, 10) : '—'}
-                                        </td>
-                                        <td className="px-4 py-2 text-sm">
-                                            {row.respondBy ? new Date(row.respondBy).toISOString().slice(0, 10) : '—'}
-                                        </td>
-                                        <td className="px-4 py-2 text-sm">{row.jurisdiction ?? '—'}</td>
-                                        <td className="px-4 py-2 text-sm">{row.programName ?? '—'}</td>
-                                        <td className="px-4 py-2 text-sm">{row.stage ?? '—'}</td>
-                                        <td className="px-4 py-2 text-sm">
+
+                                        {/* moved PDF + First Viewed here */}
+                                        <td className="px-4 py-2 text-sm whitespace-nowrap">
                                             <Form method="post" onSubmit={(e) => e.preventDefault()}>
                                                 <button
                                                     type="button"
@@ -539,15 +643,47 @@ export default function AdminAllLettersPage() {
                                                 >
                                                     {isLoading ? (
                                                         <span className="inline-flex items-center gap-1">
-                                <Icon name="update" className="h-3 w-3 animate-spin" />
-                                Loading…
-                              </span>
+                                                          <Icon name="update" className="h-3 w-3 animate-spin" />
+                                                          Loading…
+                                                        </span>
                                                     ) : (
                                                         <span>View</span>
                                                     )}
                                                 </button>
                                             </Form>
                                         </td>
+
+                                        <td
+                                            className="px-4 py-2 text-sm whitespace-nowrap"
+                                            title={firstViewed ? new Date(firstViewed).toISOString() : undefined}
+                                        >
+                                            {formatET(firstViewed)}
+                                        </td>
+
+                                        {/* remaining columns */}
+                                        <td className="px-4 py-2 text-sm whitespace-nowrap">
+                                            {row.letterDate ? new Date(row.letterDate).toISOString().slice(0, 10) : '—'}
+                                        </td>
+
+                                        <td className="px-4 py-2 text-sm whitespace-nowrap">
+                                            {row.respondBy ? new Date(row.respondBy).toISOString().slice(0, 10) : '—'}
+                                        </td>
+
+                                        <td className="px-4 py-2 text-sm whitespace-nowrap">
+                                            <span
+                                                className={[
+                                                    'inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ring-1',
+                                                    daysMeta.cls,
+                                                ].join(' ')}
+                                                title="Days left — Eastern Time due date"
+                                            >
+                                                {daysMeta.label}
+                                            </span>
+                                        </td>
+
+                                        <td className="px-4 py-2 text-sm whitespace-nowrap">{row.jurisdiction ?? '—'}</td>
+                                        <td className="px-4 py-2 text-sm whitespace-nowrap">{row.programName ?? '—'}</td>
+                                        <td className="px-4 py-2 text-sm whitespace-nowrap">{row.stage ?? '—'}</td>
                                     </tr>
                                 )
                             })
