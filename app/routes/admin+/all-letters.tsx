@@ -6,10 +6,10 @@ import {
     data,
     useLoaderData,
     Form,
+    useFetcher,
 } from 'react-router'
 
 import { InterexLayout } from '#app/components/interex-layout.tsx'
-import { JsonViewer } from '#app/components/json-view.tsx'
 import { Icon } from '#app/components/ui/icon.tsx'
 import { LoadingOverlay } from '#app/components/ui/loading-overlay.tsx'
 import { syncLetters, downloadLetterPdf } from '#app/services/letters.server.ts'
@@ -20,6 +20,7 @@ import { INTEREX_ROLES } from '#app/utils/interex-roles.ts'
 import { useIsPending } from '#app/utils/misc.tsx'
 import { requireRoles } from '#app/utils/role-redirect.server.ts'
 import { Prisma } from '@prisma/client'
+import { pcgDownloadEmdrLetterFile } from '#app/services/pcg-hih.server.ts'
 
 type TabType = 'PREPAY' | 'POSTPAY' | 'POSTPAY_OTHER'
 
@@ -46,6 +47,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
     if (search) {
         baseWhere.OR = [
             { externalLetterId: { contains: search } },
+            { downloadId: { contains: search } }, // allow searching by the API letter id (e.g., 78562)
             { providerNpi: { contains: search } },
             { programName: { contains: search } },
             { jurisdiction: { contains: search } },
@@ -103,8 +105,6 @@ export async function action({ request }: ActionFunctionArgs) {
         select: { id: true, roles: { select: { name: true } } },
     })
     if (!user) throw new Response('Unauthorized', { status: 401 })
-
-    // ✅ Only System Admins can post
     requireRoles(user, [INTEREX_ROLES.SYSTEM_ADMIN])
 
     const form = await request.formData()
@@ -141,9 +141,14 @@ export async function action({ request }: ActionFunctionArgs) {
         }
     }
 
+    // Keep the file-streaming route available (not used by UI now, but harmless)
     if (intent === 'download') {
         const type = String(form.get('type')) as TabType
         const externalLetterId = String(form.get('externalLetterId') || '')
+        const display = (String(form.get('display') || 'attachment').toLowerCase() === 'inline'
+            ? 'inline'
+            : 'attachment') as 'inline' | 'attachment'
+
         const { fileBase64, filename } = await downloadLetterPdf({ type, externalLetterId })
         if (!fileBase64) return data({ error: 'No file returned' }, { status: 400 })
         await audit({
@@ -159,9 +164,35 @@ export async function action({ request }: ActionFunctionArgs) {
         return new Response(buf, {
             headers: {
                 'Content-Type': 'application/pdf',
-                'Content-Disposition': `attachment; filename="${filename}"`,
+                'Content-Disposition': `${display}; filename="${filename}"`,
                 'Content-Length': String(buf.length),
+                'Cache-Control': 'no-store',
+                'X-Content-Type-Options': 'nosniff',
             },
+        })
+    }
+
+    // Used by the UI to fetch file_content
+    if (intent === 'download-json') {
+        const type = String(form.get('type')) as TabType
+        const externalLetterId = String(form.get('externalLetterId') || '')
+
+        let row: any = null
+        if (type === 'PREPAY') {
+            row = await prisma.prepayLetter.findUnique({ where: { externalLetterId } })
+        } else if (type === 'POSTPAY') {
+            row = await prisma.postpayLetter.findUnique({ where: { externalLetterId } })
+        } else {
+            row = await prisma.postpayOtherLetter.findUnique({ where: { externalLetterId } })
+        }
+        if (!row) return data({ ok: false, error: 'Letter not found' }, { status: 404 })
+
+        const letter_id = row.downloadId ?? row.externalLetterId
+        const payload = await pcgDownloadEmdrLetterFile({ letter_id, letter_type: type })
+        return data({
+            ok: true,
+            meta: { type, externalLetterId, letter_id },
+            payload,
         })
     }
 
@@ -179,6 +210,64 @@ export default function AdminAllLettersPage() {
         postpayOtherLetters,
     } = useLoaderData<typeof loader>()
     const isPending = useIsPending()
+
+    // ===== client-side state =====
+    const jsonFetcher = useFetcher()
+    const [loadingId, setLoadingId] = React.useState<string | null>(null)
+    // Dedupe guard to avoid double-open (e.g., StrictMode)
+    const pendingIds = React.useRef<Record<string, true>>({})
+
+    React.useEffect(() => {
+        const d: any = jsonFetcher.data
+        if (!d) return
+        if (d.ok && d.meta?.externalLetterId) {
+            const id = String(d.meta.externalLetterId)
+
+            // Only act if this id is currently pending (prevents duplicate opens)
+            if (!pendingIds.current[id]) return
+            delete pendingIds.current[id]
+            setLoadingId(null)
+
+            try {
+                const base64: string | undefined = d.payload?.file_content
+                if (!base64) {
+                    alert('No file returned from API.')
+                    return
+                }
+                const blob = base64ToPdfBlob(base64)
+                const url = URL.createObjectURL(blob)
+
+                // Open exactly once; no extra fallbacks
+                window.open(url, '_blank', 'noopener')
+
+                // Cleanup
+                setTimeout(() => URL.revokeObjectURL(url), 60_000)
+            } catch (e) {
+                console.error(e)
+                alert('Failed to render PDF in browser.')
+            }
+        }
+    }, [jsonFetcher.data])
+
+    function requestViewJson(type: TabType, externalLetterId: string) {
+        setLoadingId(externalLetterId)
+        pendingIds.current[externalLetterId] = true
+        void jsonFetcher.submit(
+            { intent: 'download-json', type, externalLetterId },
+            { method: 'post' },
+        )
+    }
+
+    function base64ToPdfBlob(b64: string) {
+        // tolerate "data:application/pdf;base64,..." and whitespace/newlines
+        const part = b64.includes(',') ? (b64.split(',')[1] ?? b64) : b64
+        const clean = part.replace(/\s/g, '').trim()
+        const byteString = atob(clean)
+        const len = byteString.length
+        const bytes = new Uint8Array(len)
+        for (let i = 0; i < len; i++) bytes[i] = byteString.charCodeAt(i)
+        return new Blob([bytes], { type: 'application/pdf' })
+    }
 
     // yyyy-MM-DD defaults: start = 30 days ago, end = today
     const today = React.useMemo(() => new Date(), [])
@@ -291,44 +380,71 @@ export default function AdminAllLettersPage() {
                             <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Program</th>
                             <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Stage</th>
                             <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">PDF</th>
-                            <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Raw</th>
                         </tr>
                         </thead>
                         <tbody className="bg-white divide-y divide-gray-200">
                         {rows.length === 0 ? (
-                            <tr><td colSpan={13} className="px-4 py-6 text-sm text-gray-500 text-center">No letters found.</td></tr>
-                        ) : rows.map((row: any) => (
-                            <tr key={row.externalLetterId} className="hover:bg-gray-50">
-                                <td className="px-4 py-2 text-sm font-mono">{row.externalLetterId}</td>
-                                <td className="px-4 py-2 text-sm">{row.providerNpi}</td>
-                                <td className="px-4 py-2 text-sm">{row.provider?.name ?? '—'}</td>
-                                <td className="px-4 py-2 text-sm">{row.customer?.name ?? '—'}</td>
-                                <td className="px-4 py-2 text-sm">{row.provider?.providerGroup?.name ?? '—'}</td>
-                                <td className="px-4 py-2 text-sm">
-                                    {row?.provider?.userNpis?.map((x: any) => x.user.username).filter(Boolean).join(', ') || '—'}
-                                </td>
-                                <td className="px-4 py-2 text-sm">
-                                    {row.letterDate ? new Date(row.letterDate).toISOString().slice(0, 10) : '—'}
-                                </td>
-                                <td className="px-4 py-2 text-sm">
-                                    {row.respondBy ? new Date(row.respondBy).toISOString().slice(0, 10) : '—'}
-                                </td>
-                                <td className="px-4 py-2 text-sm">{row.jurisdiction ?? '—'}</td>
-                                <td className="px-4 py-2 text-sm">{row.programName ?? '—'}</td>
-                                <td className="px-4 py-2 text-sm">{row.stage ?? '—'}</td>
-                                <td className="px-4 py-2 text-sm">
-                                    <Form method="post">
-                                        <input type="hidden" name="intent" value="download" />
-                                        <input type="hidden" name="type" value={type} />
-                                        <input type="hidden" name="externalLetterId" value={row.externalLetterId} />
-                                        <button className="text-blue-600 hover:text-blue-800">Download</button>
-                                    </Form>
-                                </td>
-                                <td className="px-4 py-2 text-sm">
-                                    <JsonViewer data={row.raw} />
+                            <tr>
+                                <td colSpan={12} className="px-4 py-6 text-sm text-gray-500 text-center">
+                                    No letters found.
                                 </td>
                             </tr>
-                        ))}
+                        ) : (
+                            rows.map((row: any) => {
+                                const displayLetterId = row.downloadId ?? row.externalLetterId
+                                const isLoading = loadingId === row.externalLetterId
+                                return (
+                                    <tr key={row.externalLetterId} className="hover:bg-gray-50">
+                                        <td
+                                            className="px-4 py-2 text-sm font-mono"
+                                            title={row.externalLetterId ? `Unique ID: ${row.externalLetterId}` : undefined}
+                                        >
+                                            {displayLetterId}
+                                        </td>
+                                        <td className="px-4 py-2 text-sm">{row.providerNpi}</td>
+                                        <td className="px-4 py-2 text-sm">{row.provider?.name ?? '—'}</td>
+                                        <td className="px-4 py-2 text-sm">{row.customer?.name ?? '—'}</td>
+                                        <td className="px-4 py-2 text-sm">{row.provider?.providerGroup?.name ?? '—'}</td>
+                                        <td className="px-4 py-2 text-sm">
+                                            {row?.provider?.userNpis?.map((x: any) => x.user.username).filter(Boolean).join(', ') || '—'}
+                                        </td>
+                                        <td className="px-4 py-2 text-sm">
+                                            {row.letterDate ? new Date(row.letterDate).toISOString().slice(0, 10) : '—'}
+                                        </td>
+                                        <td className="px-4 py-2 text-sm">
+                                            {row.respondBy ? new Date(row.respondBy).toISOString().slice(0, 10) : '—'}
+                                        </td>
+                                        <td className="px-4 py-2 text-sm">{row.jurisdiction ?? '—'}</td>
+                                        <td className="px-4 py-2 text-sm">{row.programName ?? '—'}</td>
+                                        <td className="px-4 py-2 text-sm">{row.stage ?? '—'}</td>
+                                        <td className="px-4 py-2 text-sm">
+                                            <Form method="post" onSubmit={(e) => e.preventDefault()}>
+                                                <button
+                                                    type="button"
+                                                    disabled={isLoading}
+                                                    onClick={() => requestViewJson(type, row.externalLetterId)}
+                                                    className={[
+                                                        'inline-flex items-center rounded-full border px-3 py-1 text-xs font-medium transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2 disabled:opacity-50',
+                                                        isLoading
+                                                            ? 'border-gray-200 bg-gray-100 text-gray-600 cursor-wait focus:ring-gray-300'
+                                                            : 'border-indigo-200 bg-indigo-50 text-indigo-700 hover:bg-indigo-100 focus:ring-indigo-500',
+                                                    ].join(' ')}
+                                                >
+                                                    {isLoading ? (
+                                                        <span className="inline-flex items-center gap-1">
+                                <Icon name="update" className="h-3 w-3 animate-spin" />
+                                Loading…
+                              </span>
+                                                    ) : (
+                                                        <span>View</span>
+                                                    )}
+                                                </button>
+                                            </Form>
+                                        </td>
+                                    </tr>
+                                )
+                            })
+                        )}
                         </tbody>
                     </table>
                 </div>

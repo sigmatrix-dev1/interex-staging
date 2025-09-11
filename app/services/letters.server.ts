@@ -54,6 +54,32 @@ async function fetchAllPages<T>(
     return items
 }
 
+/** Safely get the correct *download id* from a saved raw payload, per type. */
+function deriveDownloadIdFromRaw(raw: any, type: 'PREPAY' | 'POSTPAY' | 'POSTPAY_OTHER'): string | null {
+    if (!raw || typeof raw !== 'object') return null
+    const keysByType: Record<typeof type, string[]> = {
+        PREPAY: [
+            'eMDRPrePayID', 'emdrPrePayID', 'prePayEMDRId', 'prepayEMDRId', 'prePayEMDRID', 'prePayId',
+        ],
+        POSTPAY: [
+            'eMDRPostPayID', 'emdrPostPayID', 'postPayEMDRId', 'postpayEMDRId', 'postPayEMDRID', 'postPayId',
+        ],
+        POSTPAY_OTHER: [
+            'otherPostPayEMDRId', 'otherPostPayEMDRID',
+        ],
+    }
+    const lowerMap = new Map<string, string>()
+    for (const k of Object.keys(raw)) lowerMap.set(k.toLowerCase(), k)
+    for (const want of keysByType[type]) {
+        const key = lowerMap.get(want.toLowerCase())
+        if (key) {
+            const v = raw[key]
+            if (v != null && String(v).trim()) return String(v).trim()
+        }
+    }
+    return null
+}
+
 // ----------------- PREPAY -----------------
 function extractPrepayFields(x: any) {
     const providerNpi =
@@ -65,6 +91,7 @@ function extractPrepayFields(x: any) {
     const externalLetterId =
         String(x?.letterID ?? x?.eMDRMetaData?.uniqueLetterId ?? x?.eMDRMetaData?.uniqueLetterID ?? '')
 
+    // Keep the mapping generous on sync, but we will NEVER fall back to externalLetterId during download.
     const downloadId = String(x?.eMDRPrePayID ?? x?.letterID ?? '')
 
     return {
@@ -150,6 +177,7 @@ function extractPostpayFields(x: any) {
     const externalLetterId =
         String(x?.letterID ?? x?.eMDRMetaData?.uniqueLetterId ?? x?.eMDRMetaData?.uniqueLetterID ?? '')
 
+    // Keep the mapping generous on sync, but we will NEVER fall back to externalLetterId during download.
     const downloadId = String(x?.eMDRPostPayID ?? x?.letterID ?? '')
 
     return {
@@ -235,6 +263,7 @@ function extractPostpayOtherFields(x: any) {
     const externalLetterId =
         String(x?.letterID ?? x?.eMDRMetaData?.uniqueLetterID ?? x?.eMDRMetaData?.uniqueLetterId ?? '')
 
+    // Correct key for download is otherPostPayEMDRId
     const downloadId = String(x?.otherPostPayEMDRId ?? x?.letterID ?? '')
 
     // Dates in this endpoint are often "MM/DD/YYYY"
@@ -362,27 +391,41 @@ export async function syncLetters(params: { startDate: string; endDate: string; 
 // ----------------- DOWNLOAD -----------------
 
 export async function downloadLetterPdf(args: { type: 'PREPAY' | 'POSTPAY' | 'POSTPAY_OTHER'; externalLetterId: string }) {
-    // find the record to determine the correct downloadId (PCG is inconsistent)
+    // For downloads, we **must** use the correct downloadId per type.
+    // If it's missing (older rows), derive it from raw and backfill once.
+
     if (args.type === 'PREPAY') {
         const row = await prisma.prepayLetter.findUnique({ where: { externalLetterId: args.externalLetterId } })
         if (!row) throw new Error('Letter not found')
-        const letter_id = row.downloadId ?? row.externalLetterId
+        let letter_id = row.downloadId ?? deriveDownloadIdFromRaw(row.raw as any, 'PREPAY')
+        if (!letter_id) throw new Error('Download id missing for PREPAY letter')
+        if (!row.downloadId && letter_id) {
+            await prisma.prepayLetter.update({ where: { externalLetterId: args.externalLetterId }, data: { downloadId: letter_id } })
+        }
         const r = await pcgDownloadEmdrLetterFile({ letter_id, letter_type: 'PREPAY' })
-        return { fileBase64: r.file_content, filename: `PREPAY-${args.externalLetterId}.pdf` }
+        return { fileBase64: r.file_content, filename: (row.letterName || `PREPAY-${args.externalLetterId}.pdf`) }
     }
 
     if (args.type === 'POSTPAY') {
         const row = await prisma.postpayLetter.findUnique({ where: { externalLetterId: args.externalLetterId } })
         if (!row) throw new Error('Letter not found')
-        const letter_id = row.downloadId ?? row.externalLetterId
+        let letter_id = row.downloadId ?? deriveDownloadIdFromRaw(row.raw as any, 'POSTPAY')
+        if (!letter_id) throw new Error('Download id missing for POSTPAY letter')
+        if (!row.downloadId && letter_id) {
+            await prisma.postpayLetter.update({ where: { externalLetterId: args.externalLetterId }, data: { downloadId: letter_id } })
+        }
         const r = await pcgDownloadEmdrLetterFile({ letter_id, letter_type: 'POSTPAY' })
-        return { fileBase64: r.file_content, filename: `POSTPAY-${args.externalLetterId}.pdf` }
+        return { fileBase64: r.file_content, filename: (row.letterName || `POSTPAY-${args.externalLetterId}.pdf`) }
     }
 
     // POSTPAY_OTHER
     const row = await prisma.postpayOtherLetter.findUnique({ where: { externalLetterId: args.externalLetterId } })
     if (!row) throw new Error('Letter not found')
-    const letter_id = row.downloadId ?? row.externalLetterId
+    let letter_id = row.downloadId ?? deriveDownloadIdFromRaw(row.raw as any, 'POSTPAY_OTHER')
+    if (!letter_id) throw new Error('Download id missing for POSTPAY_OTHER letter')
+    if (!row.downloadId && letter_id) {
+        await prisma.postpayOtherLetter.update({ where: { externalLetterId: args.externalLetterId }, data: { downloadId: letter_id } })
+    }
     const r = await pcgDownloadEmdrLetterFile({ letter_id, letter_type: 'POSTPAY_OTHER' })
-    return { fileBase64: r.file_content, filename: `POSTPAY_OTHER-${args.externalLetterId}.pdf` }
+    return { fileBase64: r.file_content, filename: (row.letterName || `POSTPAY_OTHER-${args.externalLetterId}.pdf`) }
 }
