@@ -26,7 +26,6 @@ import { INTEREX_ROLES } from '#app/utils/interex-roles.ts'
 import { useIsPending } from '#app/utils/misc.tsx'
 import type { Prisma } from '@prisma/client'
 
-
 /** Helper: append a provider event (audit) — server-only import inside */
 async function logProviderEvent(input: {
     providerId: string
@@ -74,8 +73,8 @@ async function writeAudit(input: {
     success: boolean
     message?: string | null
     route?: string
-    meta?: Prisma.InputJsonValue | null          // <-- change
-    payload?: Prisma.InputJsonValue | null       // <-- change
+    meta?: Prisma.InputJsonValue | null
+    payload?: Prisma.InputJsonValue | null
 }) {
     const { prisma } = await import('#app/utils/db.server.ts')
     await prisma.auditLog.create({
@@ -91,8 +90,8 @@ async function writeAudit(input: {
             route: input.route ?? '/customer/provider-npis',
             success: input.success,
             message: input.message ?? null,
-            meta: (input.meta ?? {}) as Prisma.InputJsonValue,        // <-- cast default
-            payload: (input.payload ?? {}) as Prisma.InputJsonValue,  // <-- cast default
+            meta: (input.meta ?? {}) as Prisma.InputJsonValue,
+            payload: (input.payload ?? {}) as Prisma.InputJsonValue,
         },
     })
 }
@@ -200,6 +199,9 @@ export async function loader({ request }: LoaderFunctionArgs) {
                 include: {
                     providerGroup: true,
                     _count: { select: { userNpis: true } },
+                    // Include authoritative names from PCG-synced tables (if available)
+                    listDetail: { select: { providerName: true } },
+                    registrationStatus: { select: { providerName: true } },
                 },
                 orderBy: { npi: 'asc' },
             },
@@ -872,6 +874,13 @@ export default function CustomerProviderNpiPage() {
                                             </thead>
                                             <tbody className="bg-white divide-y divide-gray-200">
                                             {customer.providers.map(provider => {
+                                                // Prefer authoritative PCG-synced names if present
+                                                const displayName =
+                                                    provider.listDetail?.providerName ||
+                                                    provider.registrationStatus?.providerName ||
+                                                    provider.name ||
+                                                    'No name'
+
                                                 const canToggle =
                                                     isCustomerAdmin ||
                                                     (isProviderGroupAdmin &&
@@ -888,7 +897,10 @@ export default function CustomerProviderNpiPage() {
                                                             <div className="text-sm font-medium text-gray-900">{provider.npi}</div>
                                                         </td>
                                                         <td className="px-6 py-4">
-                                                            <div className="text-sm text-gray-900">{provider.name || 'No name'}</div>
+                                                            <div className="text-sm text-gray-900">{displayName}</div>
+                                                            {displayName !== (provider.name || '') ? (
+                                                                <div className="text-xs text-gray-500">synced from eMDR/PCG</div>
+                                                            ) : null}
                                                         </td>
                                                         <td className="px-6 py-4 whitespace-nowrap">
                                                             <div className="text-sm text-gray-900">{provider.providerGroup?.name || 'No group'}</div>
@@ -1020,12 +1032,8 @@ export default function CustomerProviderNpiPage() {
                                                     <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-500">
                                                         {new Date(ev.createdAt).toLocaleString()}
                                                     </td>
-                                                    <td className="px-4 py-3 whitespace-nowrap text-sm font-medium text-gray-900">
-                                                        {ev.provider?.npi}
-                                                    </td>
-                                                    <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-900">
-                                                        {ev.provider?.name ?? '—'}
-                                                    </td>
+                                                    <td className="px-4 py-3 whitespace-nowrap text-sm font-medium text-gray-900">{ev.provider?.npi}</td>
+                                                    <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-900">{ev.provider?.name ?? '—'}</td>
                                                     <td className="px-4 py-3 whitespace-nowrap">
                               <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-800">
                                 {ev.kind}
@@ -1142,6 +1150,14 @@ export default function CustomerProviderNpiPage() {
                                 }}
                                 errors={editFields.name?.errors}
                             />
+                            {/* If there's an authoritative remote name, show it for reference */}
+                            {(selectedProvider.listDetail?.providerName || selectedProvider.registrationStatus?.providerName) && (
+                                <div className="text-xs text-gray-500 -mt-3">
+                                    Authoritative (PCG):{' '}
+                                    {selectedProvider.listDetail?.providerName ||
+                                        selectedProvider.registrationStatus?.providerName}
+                                </div>
+                            )}
 
                             <SelectField
                                 labelProps={{ children: 'Provider Group (Optional)' }}
