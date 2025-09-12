@@ -835,6 +835,14 @@ export default function CustomerUsersPage() {
                                                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                                                     Roles
                                                 </th>
+                                                {/* NEW: Customer + Provider Group */}
+                                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                                    Customer
+                                                </th>
+                                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                                    Provider Group
+                                                </th>
+                                                {/* Existing columns */}
                                                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                                                     NPIs
                                                 </th>
@@ -859,11 +867,20 @@ export default function CustomerUsersPage() {
                                                                     key={role.name}
                                                                     className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800"
                                                                 >
-                                    {role.name.replace('-', ' ').replace(/\b\w/g, l => l.toUpperCase())}
-                                  </span>
+                                                                    {role.name.replace('-', ' ').replace(/\b\w/g, l => l.toUpperCase())}
+                                                                </span>
                                                             ))}
                                                         </div>
                                                     </td>
+
+                                                    {/* NEW: Customer & Provider Group cells */}
+                                                    <td className="px-6 py-4 whitespace-nowrap">
+                                                        <div className="text-sm text-gray-900">{customer.name}</div>
+                                                    </td>
+                                                    <td className="px-6 py-4 whitespace-nowrap">
+                                                        <div className="text-sm text-gray-900">{userItem.providerGroup?.name ?? 'No provider group'}</div>
+                                                    </td>
+
                                                     <td className="px-6 py-4 whitespace-nowrap">
                                                         <div className="max-w-48">
                                                             {userItem.userNpis && userItem.userNpis.length > 0 ? (
@@ -873,8 +890,8 @@ export default function CustomerUsersPage() {
                                                                             <span className="font-mono text-gray-900">{userNpi.provider.npi}</span>
                                                                             {userNpi.provider.name && (
                                                                                 <span className="text-gray-600 ml-1">
-                                            - {userNpi.provider.name.length > 15 ? `${userNpi.provider.name.substring(0, 15)}...` : userNpi.provider.name}
-                                          </span>
+                                                                                    - {userNpi.provider.name.length > 15 ? `${userNpi.provider.name.substring(0, 15)}...` : userNpi.provider.name}
+                                                                                </span>
                                                                             )}
                                                                         </div>
                                                                     ))}
@@ -929,8 +946,8 @@ export default function CustomerUsersPage() {
 
                                                             {userItem.id === user.id && (
                                                                 <span className="text-gray-400" title="Cannot delete your own account">
-                                    <Icon name="lock-closed" className="h-4 w-4" />
-                                  </span>
+                                                                    <Icon name="lock-closed" className="h-4 w-4" />
+                                                                </span>
                                                             )}
                                                         </div>
                                                     </td>
@@ -1279,8 +1296,12 @@ export default function CustomerUsersPage() {
                                     <div>
                                         <span className="text-gray-500">Role:</span>
                                         <span className="ml-2 font-medium">
-                      {selectedUser.roles[0]?.name.replace('-', ' ').replace(/\b\w/g, l => l.toUpperCase())}
-                    </span>
+                                            {selectedUser.roles[0]?.name.replace('-', ' ').replace(/\b\w/g, l => l.toUpperCase())}
+                                        </span>
+                                    </div>
+                                    <div>
+                                        <span className="text-gray-500">Customer:</span>
+                                        <span className="ml-2 font-medium">{customer.name}</span>
                                     </div>
                                     <div>
                                         <span className="text-gray-500">Provider Group:</span>
@@ -1308,8 +1329,8 @@ export default function CustomerUsersPage() {
                                                     <span className="font-mono mr-1">{provider.npi}</span>
                                                     {provider.name && (
                                                         <span className="text-blue-600">
-                              - {provider.name.length > 20 ? `${provider.name.substring(0, 20)}...` : provider.name}
-                            </span>
+                                                            - {provider.name.length > 20 ? `${provider.name.substring(0, 20)}...` : provider.name}
+                                                        </span>
                                                     )}
                                                     <button
                                                         type="button"
