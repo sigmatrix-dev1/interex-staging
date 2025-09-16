@@ -1151,7 +1151,7 @@ export default function CustomerUsersPage() {
                                                                         }`}
                                                                         title={userItem.active ? 'Deactivate user' : 'Activate user'}
                                                                     >
-                                                                        <Icon name={userItem.active ? 'stop' : 'play'} className="h-4 w-4 mr-1" />
+                                                                        <Icon name={userItem.active ? 'lock-closed' : 'lock-open-1'} className="h-4 w-4 mr-1" />
                                                                         {userItem.active ? 'Deactivate' : 'Activate'}
                                                                     </button>
                                                                 ) : (
