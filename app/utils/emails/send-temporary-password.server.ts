@@ -1,3 +1,5 @@
+// app/utils/emails/send-temporary-password.server.ts
+
 import { sendEmail } from '../email.server.ts'
 import { TemporaryPasswordEmail } from './temporary-password-email.tsx'
 

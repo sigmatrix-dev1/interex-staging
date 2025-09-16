@@ -1,3 +1,5 @@
+// app/utils/role-redirect.server.ts
+
 import { redirect } from 'react-router'
 import { INTEREX_ROLES } from './interex-roles.ts'
 

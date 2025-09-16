@@ -1,3 +1,5 @@
+// app/utils/email.server.ts
+
 import { render } from '@react-email/components'
 import { type ReactElement } from 'react'
 import { z } from 'zod'

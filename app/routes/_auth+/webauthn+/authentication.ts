@@ -1,3 +1,5 @@
+// app/routes/_auth+/webauthn+/authentication.ts
+
 import {
 	generateAuthenticationOptions,
 	verifyAuthenticationResponse,

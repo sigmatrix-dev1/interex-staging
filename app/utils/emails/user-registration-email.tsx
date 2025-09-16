@@ -1,3 +1,5 @@
+// app/utils/emails/user-registration-email.tsx
+
 import {
   Html,
   Head,

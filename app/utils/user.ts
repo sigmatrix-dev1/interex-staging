@@ -1,3 +1,5 @@
+// app/utils/user.ts
+
 import { useRouteLoaderData } from 'react-router'
 import { type loader as rootLoader } from '#app/root.tsx'
 

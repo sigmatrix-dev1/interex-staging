@@ -1,3 +1,5 @@
+// app/utils/emails/send-user-registration.server.ts
+
 import { sendEmail } from '../email.server.ts'
 import { UserRegistrationEmail } from './user-registration-email.tsx'
 

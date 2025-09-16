@@ -28,6 +28,7 @@ import { generateTemporaryPassword, hashPassword } from '#app/utils/password.ser
 import { useIsPending } from '#app/utils/misc.tsx'
 import { redirectWithToast, getToast } from '#app/utils/toast.server.ts'
 import { sendUserRegistrationEmail } from '#app/utils/emails/send-user-registration.server.ts'
+import { sendAdminPasswordManualResetEmail } from '#app/utils/emails/send-admin-password-manual-reset.server.ts'
 import {
     USERNAME_MIN_LENGTH,
     USERNAME_MAX_LENGTH,
@@ -41,7 +42,6 @@ const CreateUserSchema = z.object({
     name: z.string().min(1, 'Name is required'),
     email: z.string().email('Invalid email address'),
     username: z.string().min(3, 'Username must be at least 3 characters'),
-    // allow creating customer-admin
     role: z.enum(['customer-admin', 'provider-group-admin', 'basic-user']),
     providerGroupId: z.string().optional(),
 })
@@ -54,15 +54,25 @@ const UpdateUserSchema = z.object({
     providerGroupId: z.string().optional(),
 })
 
-const DeleteUserSchema = z.object({
-    intent: z.literal('delete'),
-    userId: z.string().min(1, 'User ID is required'),
-})
-
 const AssignNpisSchema = z.object({
     intent: z.literal('assign-npis'),
     userId: z.string().min(1, 'User ID is required'),
     providerIds: z.array(z.string()).default([]),
+})
+
+// ✅ One reset action
+const ResetPasswordSchema = z.object({
+    intent: z.literal('reset-password'),
+    userId: z.string().min(1, 'User ID is required'),
+    mode: z.enum(['auto', 'manual']),
+    manualPassword: z.string().optional(),
+})
+
+// ✅ New: Activate/Deactivate user
+const SetActiveSchema = z.object({
+    intent: z.literal('set-active'),
+    userId: z.string().min(1, 'User ID is required'),
+    status: z.enum(['active', 'inactive']),
 })
 
 // Lightweight schema for live availability checks
@@ -75,9 +85,10 @@ const CheckAvailabilitySchema = z.object({
 const ActionSchema = z.discriminatedUnion('intent', [
     CreateUserSchema,
     UpdateUserSchema,
-    DeleteUserSchema,
     AssignNpisSchema,
     CheckAvailabilitySchema,
+    ResetPasswordSchema,
+    SetActiveSchema,
 ])
 
 export async function loader({ request }: LoaderFunctionArgs) {
@@ -167,12 +178,10 @@ export async function loader({ request }: LoaderFunctionArgs) {
                     where: userWhereConditions,
                     include: {
                         roles: { select: { name: true } },
-                        providerGroup: { select: { id: true, name: true } },
+                        providerGroup: { select: { id: true, name: true} },
                         userNpis: {
                             include: {
-                                provider: {
-                                    select: { id: true, npi: true, name: true, providerGroupId: true },
-                                },
+                                provider: { select: { id: true, npi: true, name: true, providerGroupId: true } },
                             },
                         },
                     },
@@ -202,6 +211,8 @@ export async function action({ request }: ActionFunctionArgs) {
         where: { id: userId },
         select: {
             id: true,
+            name: true,
+            email: true,
             customerId: true,
             providerGroupId: true,
             roles: { select: { name: true } },
@@ -247,7 +258,7 @@ export async function action({ request }: ActionFunctionArgs) {
         }
     }
 
-    // Handle create action
+    // Create
     if (action.intent === 'create') {
         const { name, email, username, role, providerGroupId } = action
 
@@ -256,7 +267,7 @@ export async function action({ request }: ActionFunctionArgs) {
             return data({ error: 'Only customer administrators can create customer administrators.' }, { status: 403 })
         }
 
-        // Check if email already exists
+        // Email exists
         const existingUser = await prisma.user.findUnique({
             where: { email: email.toLowerCase() },
         })
@@ -267,7 +278,7 @@ export async function action({ request }: ActionFunctionArgs) {
             )
         }
 
-        // Check if username already exists
+        // Username exists
         const existingUsername = await prisma.user.findUnique({
             where: { username: username.toLowerCase() },
         })
@@ -358,7 +369,7 @@ export async function action({ request }: ActionFunctionArgs) {
         })
     }
 
-    // Handle update action
+    // Update
     if (action.intent === 'update') {
         const { userId: targetUserId, name, role, providerGroupId } = action
 
@@ -425,55 +436,7 @@ export async function action({ request }: ActionFunctionArgs) {
         })
     }
 
-    // Handle delete action
-    if (action.intent === 'delete') {
-        const { userId: targetUserId } = action
-
-        const targetUser = await prisma.user.findFirst({
-            where: {
-                id: targetUserId,
-                customerId: user.customerId,
-                roles: { some: { name: { in: ['customer-admin', 'provider-group-admin', 'basic-user'] } } },
-            },
-            include: { roles: { select: { name: true } } },
-        })
-        if (!targetUser) {
-            return data({ error: 'User not found or not authorized to delete this user' }, { status: 404 })
-        }
-
-        if (isProviderGroupAdmin && !isCustomerAdmin) {
-            if (targetUser.providerGroupId !== user.providerGroupId) {
-                return redirectWithToast('/customer/users', {
-                    type: 'error',
-                    title: 'Cannot delete user',
-                    description: 'You can only delete users in your assigned provider group.',
-                })
-            }
-        }
-
-        // Keep protection: cannot delete customer admins
-        const isTargetCustomerAdmin = targetUser.roles.some(role => role.name === 'customer-admin')
-        if (isTargetCustomerAdmin) {
-            return redirectWithToast('/customer/users', {
-                type: 'error',
-                title: 'Cannot delete user',
-                description: 'Cannot delete customer administrators.',
-            })
-        }
-
-        await prisma.userNpi.deleteMany({ where: { userId: targetUserId } })
-        await prisma.userImage.deleteMany({ where: { userId: targetUserId } })
-        const userName = targetUser.name
-        await prisma.user.delete({ where: { id: targetUserId } })
-
-        return redirectWithToast('/customer/users', {
-            type: 'success',
-            title: 'User deleted',
-            description: `${userName} has been deleted successfully.`,
-        })
-    }
-
-    // Handle assign NPIs action
+    // Assign NPIs
     if (action.intent === 'assign-npis') {
         const { userId: targetUserId, providerIds } = action
 
@@ -517,6 +480,146 @@ export async function action({ request }: ActionFunctionArgs) {
         })
     }
 
+    // Reset password
+    if (action.intent === 'reset-password') {
+        const { userId: targetUserId, mode } = action
+        const manualPassword = action.mode === 'manual' ? action.manualPassword : undefined
+
+        const targetUser = await prisma.user.findFirst({
+            where: { id: targetUserId, customerId: user.customerId },
+            include: { roles: { select: { name: true } }, customer: { select: { name: true } } },
+        })
+        if (!targetUser) {
+            return redirectWithToast('/customer/users', {
+                type: 'error',
+                title: 'User not found',
+                description: 'Unable to reset password. Please refresh and try again.',
+            })
+        }
+
+        const targetIsCustomerAdmin = targetUser.roles.some(r => r.name === 'customer-admin')
+        if (targetIsCustomerAdmin && !isCustomerAdmin) {
+            return redirectWithToast('/customer/users', {
+                type: 'error',
+                title: 'Not allowed',
+                description: 'Only customer administrators can reset passwords for customer administrators.',
+            })
+        }
+
+        if (isProviderGroupAdmin && !isCustomerAdmin) {
+            if (targetUser.providerGroupId !== user.providerGroupId) {
+                return redirectWithToast('/customer/users', {
+                    type: 'error',
+                    title: 'Wrong scope',
+                    description: 'You can only reset passwords for users in your provider group.',
+                })
+            }
+        }
+
+        if (mode === 'manual') {
+            const pwd = (manualPassword ?? '').trim()
+            if (pwd.length < 8) {
+                return data(
+                    { result: submission.reply({ fieldErrors: { manualPassword: ['Password must be at least 8 characters'] } }) },
+                    { status: 400 },
+                )
+            }
+        }
+
+        const newPassword = mode === 'auto' ? generateTemporaryPassword() : (manualPassword ?? '')
+        const passwordHash = hashPassword(newPassword)
+
+        await prisma.password.upsert({
+            where: { userId: targetUserId },
+            create: { userId: targetUserId, hash: passwordHash },
+            update: { hash: passwordHash },
+        })
+        await prisma.session.deleteMany({ where: { userId: targetUserId } })
+
+        const loginUrl = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/login`
+        await sendAdminPasswordManualResetEmail({
+            to: targetUser.email,
+            recipientName: targetUser.name || targetUser.username,
+            requestedByName: user.name ?? undefined,
+            customerName: targetUser.customer?.name ?? undefined,
+            username: targetUser.username,
+            tempPassword: newPassword,
+            loginUrl,
+        })
+
+        return redirectWithToast('/customer/users', {
+            type: 'success',
+            title: 'Password reset',
+            description: `A new ${mode === 'auto' ? 'temporary' : 'manual'} password was emailed to ${targetUser.email}.`,
+        })
+    }
+
+    // ✅ Activate / Deactivate (soft off-boarding)
+    if (action.intent === 'set-active') {
+        const { userId: targetUserId, status } = action
+
+        const targetUser = await prisma.user.findFirst({
+            where: { id: targetUserId, customerId: user.customerId },
+            include: { roles: { select: { name: true } } },
+        })
+        if (!targetUser) {
+            return redirectWithToast('/customer/users', {
+                type: 'error',
+                title: 'User not found',
+                description: 'Unable to update user status. Please refresh and try again.',
+            })
+        }
+
+        // Don’t allow self de/activation
+        if (targetUserId === user.id) {
+            return redirectWithToast('/customer/users', {
+                type: 'error',
+                title: 'Not allowed',
+                description: 'You cannot change the active status of your own account.',
+            })
+        }
+
+        const targetIsCustomerAdmin = targetUser.roles.some(r => r.name === 'customer-admin')
+
+        // Scope checks
+        if (!isCustomerAdmin && isProviderGroupAdmin) {
+            if (targetIsCustomerAdmin) {
+                return redirectWithToast('/customer/users', {
+                    type: 'error',
+                    title: 'Not allowed',
+                    description: 'Only customer administrators can change status of customer administrators.',
+                })
+            }
+            if (targetUser.providerGroupId !== user.providerGroupId) {
+                return redirectWithToast('/customer/users', {
+                    type: 'error',
+                    title: 'Wrong scope',
+                    description: 'You can only change status for users in your provider group.',
+                })
+            }
+        }
+
+        const makeActive = status === 'active'
+
+        await prisma.user.update({
+            where: { id: targetUserId },
+            data: { active: makeActive },
+        })
+
+        // Kill sessions when deactivating
+        if (!makeActive) {
+            await prisma.session.deleteMany({ where: { userId: targetUserId } })
+        }
+
+        return redirectWithToast('/customer/users', {
+            type: 'success',
+            title: makeActive ? 'User activated' : 'User deactivated',
+            description: makeActive
+                ? `${targetUser.name ?? targetUser.username} can log in again.`
+                : `${targetUser.name ?? targetUser.username} has been signed out and can no longer log in.`,
+        })
+    }
+
     return data({ error: 'Invalid action' }, { status: 400 })
 }
 
@@ -529,7 +632,7 @@ export default function CustomerUsersPage() {
 
     const [drawerState, setDrawerState] = useState<{
         isOpen: boolean
-        mode: 'create' | 'edit' | 'assign-npis'
+        mode: 'create' | 'edit' | 'assign-npis' | 'reset-password'
         userId?: string
     }>({ isOpen: false, mode: 'create' })
 
@@ -640,16 +743,19 @@ export default function CustomerUsersPage() {
             setDrawerState({ isOpen: true, mode: 'edit', userId })
         } else if (action === 'assign-npis' && userId) {
             setDrawerState({ isOpen: true, mode: 'assign-npis', userId })
+        } else if (action === 'reset' && userId) {
+            setDrawerState({ isOpen: true, mode: 'reset-password', userId })
         } else {
             setDrawerState({ isOpen: false, mode: 'create' })
         }
     }, [searchParams])
 
-    const openDrawer = (mode: 'create' | 'edit' | 'assign-npis', userId?: string) => {
+    const openDrawer = (mode: 'create' | 'edit' | 'assign-npis' | 'reset-password', userId?: string) => {
         const newParams = new URLSearchParams(searchParams)
         if (mode === 'create') newParams.set('action', 'add')
         else if (mode === 'edit') newParams.set('action', 'edit')
         else if (mode === 'assign-npis') newParams.set('action', 'assign-npis')
+        else if (mode === 'reset-password') newParams.set('action', 'reset')
         if (userId) newParams.set('userId', userId)
         setSearchParams(newParams)
     }
@@ -688,6 +794,17 @@ export default function CustomerUsersPage() {
             : undefined,
     })
 
+    // Reset form
+    const [resetForm, resetFields] = useForm({
+        id: 'reset-password-form',
+        constraint: getZodConstraint(ResetPasswordSchema),
+        lastResult: actionData && 'result' in actionData ? actionData.result : undefined,
+        onValidate({ formData }) {
+            return parseWithZod(formData, { schema: ResetPasswordSchema })
+        },
+        defaultValue: { mode: 'auto' },
+    })
+
     // Track selected role and provider group for NPI filtering / UI
     const [createSelectedRole, setCreateSelectedRole] = useState<string>('')
     const [createSelectedProviderGroup, setCreateSelectedProviderGroup] = useState<string>('')
@@ -695,6 +812,12 @@ export default function CustomerUsersPage() {
     const [editSelectedProviderGroup, setEditSelectedProviderGroup] = useState<string>(
         selectedUser?.providerGroup?.id || '',
     )
+
+    // Reset mode local state for conditional field
+    const [resetMode, setResetMode] = useState<'auto' | 'manual'>('auto')
+    useEffect(() => {
+        if (drawerState.mode === 'reset-password') setResetMode('auto')
+    }, [drawerState.mode])
 
     // NPI Assignment state
     const [selectedNpis, setSelectedNpis] = useState<string[]>([])
@@ -739,6 +862,29 @@ export default function CustomerUsersPage() {
     }
 
     const viewerIsCustomerAdmin = user.roles.some(r => r.name === 'customer-admin')
+    const viewerIsProviderGroupAdmin = user.roles.some(r => r.name === 'provider-group-admin')
+
+    // ✅ Activate/Deactivate modal state
+    const [statusModal, setStatusModal] = useState<{
+        isOpen: boolean
+        userId?: string
+        userName?: string | null
+        nextStatus: 'active' | 'inactive'
+        acknowledged: boolean
+    }>({ isOpen: false, nextStatus: 'inactive', acknowledged: false })
+
+    function openStatusModal(u: { id: string; name: string | null; active: boolean }) {
+        setStatusModal({
+            isOpen: true,
+            userId: u.id,
+            userName: u.name ?? 'User',
+            nextStatus: u.active ? 'inactive' : 'active',
+            acknowledged: false,
+        })
+    }
+    function closeStatusModal() {
+        setStatusModal(s => ({ ...s, isOpen: false }))
+    }
 
     return (
         <>
@@ -752,7 +898,8 @@ export default function CustomerUsersPage() {
                     backTo="/customer"
                     currentPath="/customer/users"
                 >
-                    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+                    {/* Full-width container (no max width), minimal horizontal padding */}
+                    <div className="w-full max-w-none px-2 sm:px-4 lg:px-6 py-6">
                         <div className="space-y-8">
                             {/* Search */}
                             <div className="bg-white shadow rounded-lg p-6">
@@ -822,139 +969,201 @@ export default function CustomerUsersPage() {
                                         </button>
                                     </div>
                                 ) : (
-                                    <div className="overflow-hidden">
-                                        <table className="min-w-full divide-y divide-gray-200">
-                                            <thead className="bg-gray-50">
-                                            <tr>
-                                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                                                    Name
-                                                </th>
-                                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                                                    Username
-                                                </th>
-                                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                                                    Roles
-                                                </th>
-                                                {/* NEW: Customer + Provider Group */}
-                                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                                                    Customer
-                                                </th>
-                                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                                                    Provider Group
-                                                </th>
-                                                {/* Existing columns */}
-                                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                                                    NPIs
-                                                </th>
-                                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                                                    Actions
-                                                </th>
-                                            </tr>
-                                            </thead>
-                                            <tbody className="bg-white divide-y divide-gray-200">
-                                            {customer.users.map(userItem => (
-                                                <tr key={userItem.id} className="hover:bg-gray-50">
-                                                    <td className="px-6 py-4 whitespace-nowrap">
-                                                        <div className="text-sm font-medium text-gray-900">{userItem.name}</div>
-                                                    </td>
-                                                    <td className="px-6 py-4 whitespace-nowrap">
-                                                        <div className="text-sm text-gray-900">{userItem.username}</div>
-                                                    </td>
-                                                    <td className="px-6 py-4 whitespace-nowrap">
-                                                        <div className="flex flex-wrap gap-1">
-                                                            {userItem.roles.map(role => (
-                                                                <span
-                                                                    key={role.name}
-                                                                    className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800"
-                                                                >
-                                                                    {role.name.replace('-', ' ').replace(/\b\w/g, l => l.toUpperCase())}
-                                                                </span>
-                                                            ))}
-                                                        </div>
-                                                    </td>
+                                    // Scrollable area: horizontal + vertical with sticky header
+                                    <div className="overflow-x-auto">
+                                        <div className="max-h-[70vh] overflow-y-auto">
+                                            <table className="min-w-[1500px] w-full divide-y divide-gray-200">
+                                                <thead className="bg-gray-50 sticky top-0 z-10">
+                                                <tr>
+                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                                        Name
+                                                    </th>
+                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                                        Username
+                                                    </th>
+                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                                        Roles
+                                                    </th>
+                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                                        Customer
+                                                    </th>
+                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                                        Provider Group
+                                                    </th>
+                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                                        NPIs
+                                                    </th>
+                                                    {/* New Status + action columns */}
+                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                                        Status
+                                                    </th>
+                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                                        Edit
+                                                    </th>
+                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                                        Assign&nbsp;NPIs
+                                                    </th>
+                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                                        Reset&nbsp;Password
+                                                    </th>
+                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                                        Activate/Deactivate
+                                                    </th>
+                                                </tr>
+                                                </thead>
+                                                <tbody className="bg-white divide-y divide-gray-200">
+                                                {customer.users.map(userItem => {
+                                                    const isTargetCustomerAdmin = userItem.roles.some(r => r.name === 'customer-admin')
+                                                    const inViewerGroup =
+                                                        !viewerIsProviderGroupAdmin ||
+                                                        viewerIsCustomerAdmin ||
+                                                        (user.providerGroupId && userItem.providerGroup?.id === user.providerGroupId)
 
-                                                    {/* NEW: Customer & Provider Group cells */}
-                                                    <td className="px-6 py-4 whitespace-nowrap">
-                                                        <div className="text-sm text-gray-900">{customer.name}</div>
-                                                    </td>
-                                                    <td className="px-6 py-4 whitespace-nowrap">
-                                                        <div className="text-sm text-gray-900">{userItem.providerGroup?.name ?? 'No provider group'}</div>
-                                                    </td>
+                                                    const canReset =
+                                                        viewerIsCustomerAdmin ||
+                                                        (viewerIsProviderGroupAdmin && !isTargetCustomerAdmin && inViewerGroup)
 
-                                                    <td className="px-6 py-4 whitespace-nowrap">
-                                                        <div className="max-w-48">
-                                                            {userItem.userNpis && userItem.userNpis.length > 0 ? (
-                                                                <div className="space-y-1">
-                                                                    {userItem.userNpis.slice(0, 3).map(userNpi => (
-                                                                        <div key={userNpi.provider.id} className="text-xs">
-                                                                            <span className="font-mono text-gray-900">{userNpi.provider.npi}</span>
-                                                                            {userNpi.provider.name && (
-                                                                                <span className="text-gray-600 ml-1">
-                                                                                    - {userNpi.provider.name.length > 15 ? `${userNpi.provider.name.substring(0, 15)}...` : userNpi.provider.name}
-                                                                                </span>
+                                                    const canToggle =
+                                                        viewerIsCustomerAdmin ||
+                                                        (viewerIsProviderGroupAdmin && !isTargetCustomerAdmin && inViewerGroup)
+
+                                                    const isBasic = userItem.roles.some(r => r.name === 'basic-user')
+
+                                                    return (
+                                                        <tr
+                                                            key={userItem.id}
+                                                            className={`hover:bg-gray-50 ${!userItem.active ? 'bg-gray-50 opacity-60' : ''}`}
+                                                        >
+                                                            <td className="px-6 py-4 whitespace-nowrap">
+                                                                <div className="text-sm font-medium text-gray-900">{userItem.name}</div>
+                                                            </td>
+                                                            <td className="px-6 py-4 whitespace-nowrap">
+                                                                <div className="text-sm text-gray-900">{userItem.username}</div>
+                                                            </td>
+                                                            <td className="px-6 py-4 whitespace-nowrap">
+                                                                <div className="flex flex-wrap gap-1">
+                                                                    {userItem.roles.map(role => (
+                                                                        <span
+                                                                            key={role.name}
+                                                                            className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800"
+                                                                        >
+                                        {role.name.replace('-', ' ').replace(/\b\w/g, l => l.toUpperCase())}
+                                      </span>
+                                                                    ))}
+                                                                </div>
+                                                            </td>
+
+                                                            <td className="px-6 py-4 whitespace-nowrap">
+                                                                <div className="text-sm text-gray-900">{customer.name}</div>
+                                                            </td>
+                                                            <td className="px-6 py-4 whitespace-nowrap">
+                                                                <div className="text-sm text-gray-900">{userItem.providerGroup?.name ?? 'No provider group'}</div>
+                                                            </td>
+
+                                                            <td className="px-6 py-4 whitespace-nowrap">
+                                                                <div className="max-w-48">
+                                                                    {userItem.userNpis && userItem.userNpis.length > 0 ? (
+                                                                        <div className="space-y-1">
+                                                                            {userItem.userNpis.slice(0, 3).map(userNpi => (
+                                                                                <div key={userNpi.provider.id} className="text-xs">
+                                                                                    <span className="font-mono text-gray-900">{userNpi.provider.npi}</span>
+                                                                                    {userNpi.provider.name && (
+                                                                                        <span className="text-gray-600 ml-1">
+                                                - {userNpi.provider.name.length > 15 ? `${userNpi.provider.name.substring(0, 15)}...` : userNpi.provider.name}
+                                              </span>
+                                                                                    )}
+                                                                                </div>
+                                                                            ))}
+                                                                            {userItem.userNpis.length > 3 && (
+                                                                                <div className="text-xs text-gray-500">+{userItem.userNpis.length - 3} more</div>
                                                                             )}
                                                                         </div>
-                                                                    ))}
-                                                                    {userItem.userNpis.length > 3 && (
-                                                                        <div className="text-xs text-gray-500">+{userItem.userNpis.length - 3} more</div>
+                                                                    ) : (
+                                                                        <span className="text-xs text-gray-400">No NPIs assigned</span>
                                                                     )}
                                                                 </div>
-                                                            ) : (
-                                                                <span className="text-xs text-gray-400">No NPIs assigned</span>
-                                                            )}
-                                                        </div>
-                                                    </td>
-                                                    <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
-                                                        <div className="flex items-center space-x-2">
-                                                            <button
-                                                                onClick={() => openDrawer('edit', userItem.id)}
-                                                                className="text-blue-600 hover:text-blue-800 p-1"
-                                                                title="Edit user"
-                                                            >
-                                                                <Icon name="pencil-1" className="h-4 w-4" />
-                                                            </button>
+                                                            </td>
 
-                                                            {/* NPI Assignment for basic users */}
-                                                            {userItem.roles.some(role => role.name === 'basic-user') && (
+                                                            {/* Status pill */}
+                                                            <td className="px-6 py-4 whitespace-nowrap">
+                                  <span
+                                      className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
+                                          userItem.active ? 'bg-green-100 text-green-800' : 'bg-gray-200 text-gray-700'
+                                      }`}
+                                  >
+                                    {userItem.active ? 'Active' : 'Inactive'}
+                                  </span>
+                                                            </td>
+
+                                                            {/* Edit column */}
+                                                            <td className="px-6 py-4 whitespace-nowrap text-sm">
                                                                 <button
-                                                                    onClick={() => openDrawer('assign-npis', userItem.id)}
-                                                                    className="text-green-600 hover:text-green-800 p-1"
-                                                                    title="Assign NPIs"
+                                                                    onClick={() => openDrawer('edit', userItem.id)}
+                                                                    className="inline-flex items-center px-2.5 py-1 rounded-md text-blue-700 hover:text-blue-900 hover:bg-blue-50"
+                                                                    title="Edit user"
                                                                 >
-                                                                    <Icon name="file-text" className="h-4 w-4" />
+                                                                    <Icon name="pencil-1" className="h-4 w-4 mr-1" />
+                                                                    Edit
                                                                 </button>
-                                                            )}
+                                                            </td>
 
-                                                            {userItem.id !== user.id && (
-                                                                <Form method="post" className="inline">
-                                                                    <input type="hidden" name="intent" value="delete" />
-                                                                    <input type="hidden" name="userId" value={userItem.id} />
+                                                            {/* Assign NPIs column */}
+                                                            <td className="px-6 py-4 whitespace-nowrap text-sm">
+                                                                {isBasic ? (
                                                                     <button
-                                                                        type="submit"
-                                                                        className="text-red-600 hover:text-red-800 p-1"
-                                                                        title="Delete user"
-                                                                        onClick={e => {
-                                                                            if (!confirm(`Are you sure you want to delete "${userItem.name}"? This action cannot be undone.`)) {
-                                                                                e.preventDefault()
-                                                                            }
-                                                                        }}
+                                                                        onClick={() => openDrawer('assign-npis', userItem.id)}
+                                                                        className="inline-flex items-center px-2.5 py-1 rounded-md text-green-700 hover:text-green-900 hover:bg-green-50"
+                                                                        title="Assign NPIs"
                                                                     >
-                                                                        <Icon name="trash" className="h-4 w-4" />
+                                                                        <Icon name="file-text" className="h-4 w-4 mr-1" />
+                                                                        Assign
                                                                     </button>
-                                                                </Form>
-                                                            )}
+                                                                ) : (
+                                                                    <span className="text-gray-300">—</span>
+                                                                )}
+                                                            </td>
 
-                                                            {userItem.id === user.id && (
-                                                                <span className="text-gray-400" title="Cannot delete your own account">
-                                                                    <Icon name="lock-closed" className="h-4 w-4" />
-                                                                </span>
-                                                            )}
-                                                        </div>
-                                                    </td>
-                                                </tr>
-                                            ))}
-                                            </tbody>
-                                        </table>
+                                                            {/* Reset Password column */}
+                                                            <td className="px-6 py-4 whitespace-nowrap text-sm">
+                                                                {canReset && userItem.id !== user.id ? (
+                                                                    <button
+                                                                        onClick={() => openDrawer('reset-password', userItem.id)}
+                                                                        className="inline-flex items-center px-2.5 py-1 rounded-md text-indigo-700 hover:text-indigo-900 hover:bg-indigo-50"
+                                                                        title="Reset password"
+                                                                    >
+                                                                        <Icon name="reset" className="h-4 w-4 mr-1" />
+                                                                        Reset
+                                                                    </button>
+                                                                ) : (
+                                                                    <span className="text-gray-300">—</span>
+                                                                )}
+                                                            </td>
+
+                                                            {/* Activate/Deactivate column */}
+                                                            <td className="px-6 py-4 whitespace-nowrap text-sm">
+                                                                {canToggle && userItem.id !== user.id ? (
+                                                                    <button
+                                                                        onClick={() => openStatusModal(userItem)}
+                                                                        className={`inline-flex items-center px-2.5 py-1 rounded-md ${
+                                                                            userItem.active
+                                                                                ? 'text-red-700 hover:text-red-900 hover:bg-red-50'
+                                                                                : 'text-green-700 hover:text-green-900 hover:bg-green-50'
+                                                                        }`}
+                                                                        title={userItem.active ? 'Deactivate user' : 'Activate user'}
+                                                                    >
+                                                                        <Icon name={userItem.active ? 'stop' : 'play'} className="h-4 w-4 mr-1" />
+                                                                        {userItem.active ? 'Deactivate' : 'Activate'}
+                                                                    </button>
+                                                                ) : (
+                                                                    <span className="text-gray-300">—</span>
+                                                                )}
+                                                            </td>
+                                                        </tr>
+                                                    )
+                                                })}
+                                                </tbody>
+                                            </table>
+                                        </div>
                                     </div>
                                 )}
                             </div>
@@ -1269,7 +1478,7 @@ export default function CustomerUsersPage() {
                 )}
             </Drawer>
 
-            {/* NPI Assignment Drawer */}
+            {/* Assign NPIs Drawer */}
             <Drawer
                 isOpen={drawerState.isOpen && drawerState.mode === 'assign-npis'}
                 onClose={closeDrawer}
@@ -1296,8 +1505,8 @@ export default function CustomerUsersPage() {
                                     <div>
                                         <span className="text-gray-500">Role:</span>
                                         <span className="ml-2 font-medium">
-                                            {selectedUser.roles[0]?.name.replace('-', ' ').replace(/\b\w/g, l => l.toUpperCase())}
-                                        </span>
+                      {selectedUser.roles[0]?.name.replace('-', ' ').replace(/\b\w/g, l => l.toUpperCase())}
+                    </span>
                                     </div>
                                     <div>
                                         <span className="text-gray-500">Customer:</span>
@@ -1314,7 +1523,7 @@ export default function CustomerUsersPage() {
                                 </div>
                             </div>
 
-                            {/* Selected NPIs - Bubble UI */}
+                            {/* Selected NPIs */}
                             {selectedNpis.length > 0 && (
                                 <div>
                                     <label className="block text-sm font-medium text-gray-700 mb-2">
@@ -1329,8 +1538,8 @@ export default function CustomerUsersPage() {
                                                     <span className="font-mono mr-1">{provider.npi}</span>
                                                     {provider.name && (
                                                         <span className="text-blue-600">
-                                                            - {provider.name.length > 20 ? `${provider.name.substring(0, 20)}...` : provider.name}
-                                                        </span>
+                              - {provider.name.length > 20 ? `${provider.name.substring(0, 20)}...` : provider.name}
+                            </span>
                                                     )}
                                                     <button
                                                         type="button"
@@ -1363,7 +1572,7 @@ export default function CustomerUsersPage() {
                                 </div>
                             </div>
 
-                            {/* Available NPIs List */}
+                            {/* Available NPIs */}
                             <div>
                                 <label className="block text-sm font-medium text-gray-700 mb-2">
                                     Available NPIs
@@ -1386,25 +1595,21 @@ export default function CustomerUsersPage() {
                                                     }`}
                                                     onClick={() => toggleNpiSelection(provider.id)}
                                                 >
-                                                    <div className="flex items-center justify-between">
-                                                        <div className="flex-1">
-                                                            <div className="flex items-center space-x-3">
-                                                                <input
-                                                                    type="checkbox"
-                                                                    checked={selectedNpis.includes(provider.id)}
-                                                                    onChange={() => toggleNpiSelection(provider.id)}
-                                                                    className="h-4 w-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500"
-                                                                />
-                                                                <div>
-                                                                    <div className="text-sm font-medium text-gray-900">
-                                                                        <span className="font-mono">{provider.npi}</span>
-                                                                        {provider.name && <span className="ml-2 text-gray-600">- {provider.name}</span>}
-                                                                    </div>
-                                                                    {provider.providerGroup && (
-                                                                        <div className="text-xs text-gray-500">Group: {provider.providerGroup.name}</div>
-                                                                    )}
-                                                                </div>
+                                                    <div className="flex items-center space-x-3">
+                                                        <input
+                                                            type="checkbox"
+                                                            checked={!!selectedNpis.includes(provider.id)}
+                                                            onChange={() => toggleNpiSelection(provider.id)}
+                                                            className="h-4 w-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500"
+                                                        />
+                                                        <div>
+                                                            <div className="text-sm font-medium text-gray-900">
+                                                                <span className="font-mono">{provider.npi}</span>
+                                                                {provider.name && <span className="ml-2 text-gray-600">- {provider.name}</span>}
                                                             </div>
+                                                            {provider.providerGroup && (
+                                                                <div className="text-xs text-gray-500">Group: {provider.providerGroup.name}</div>
+                                                            )}
                                                         </div>
                                                     </div>
                                                 </div>
@@ -1435,6 +1640,173 @@ export default function CustomerUsersPage() {
                     </Form>
                 )}
             </Drawer>
+
+            {/* Reset Password Drawer */}
+            <Drawer
+                isOpen={drawerState.isOpen && drawerState.mode === 'reset-password'}
+                onClose={closeDrawer}
+                title={`Reset Password${selectedUser ? ` — ${selectedUser.name}` : ''}`}
+                size="md"
+            >
+                {selectedUser && (
+                    <Form method="post" {...getFormProps(resetForm)}>
+                        <input type="hidden" name="intent" value="reset-password" />
+                        <input type="hidden" name="userId" value={selectedUser.id} />
+
+                        <div className="space-y-6">
+                            <div className="bg-gray-50 rounded-lg p-4 text-sm">
+                                <div className="grid grid-cols-2 gap-4">
+                                    <div><span className="text-gray-500">User:</span><span className="ml-2 font-medium">{selectedUser.name}</span></div>
+                                    <div><span className="text-gray-500">Username:</span><span className="ml-2 font-medium">{selectedUser.username}</span></div>
+                                    <div className="col-span-2"><span className="text-gray-500">Email:</span><span className="ml-2 font-medium">{selectedUser.email}</span></div>
+                                </div>
+                            </div>
+
+                            <fieldset>
+                                <legend className="text-sm font-medium text-gray-900 mb-2">Password mode</legend>
+                                <div className="space-y-2">
+                                    <label className="inline-flex items-center gap-2">
+                                        <input
+                                            {...getInputProps(resetFields.mode, { type: 'radio' })}
+                                            type="radio"
+                                            name={resetFields.mode.name}
+                                            value="auto"
+                                            defaultChecked
+                                            onChange={() => setResetMode('auto')}
+                                        />
+                                        <span className="text-sm text-gray-700">Auto-generate a strong password</span>
+                                    </label>
+                                    <label className="inline-flex items-center gap-2">
+                                        <input
+                                            {...getInputProps(resetFields.mode, { type: 'radio' })}
+                                            type="radio"
+                                            name={resetFields.mode.name}
+                                            value="manual"
+                                            onChange={() => setResetMode('manual')}
+                                        />
+                                        <span className="text-sm text-gray-700">Manually set a password</span>
+                                    </label>
+                                </div>
+                            </fieldset>
+
+                            {resetMode === 'manual' && (
+                                <Field
+                                    labelProps={{ children: 'New Password' }}
+                                    inputProps={{
+                                        ...getInputProps(resetFields.manualPassword, { type: 'password' }),
+                                        name: 'manualPassword',
+                                        placeholder: 'Enter a password (min 8 characters)',
+                                        minLength: 8,
+                                        required: true,
+                                        autoComplete: 'new-password',
+                                    }}
+                                    errors={resetFields.manualPassword.errors}
+                                />
+                            )}
+
+                            <ErrorList id={resetForm.errorId} errors={resetForm.errors} />
+
+                            <div className="flex justify-end gap-3 pt-4 border-t border-gray-200">
+                                <button
+                                    type="button"
+                                    onClick={closeDrawer}
+                                    className="inline-flex justify-center py-2 px-4 border border-gray-300 shadow-sm text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                                >
+                                    Cancel
+                                </button>
+                                <StatusButton
+                                    type="submit"
+                                    disabled={isPending}
+                                    status={isPending ? 'pending' : 'idle'}
+                                    className="inline-flex justify-center py-2 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                                >
+                                    Reset & Email Password
+                                </StatusButton>
+                            </div>
+                        </div>
+                    </Form>
+                )}
+            </Drawer>
+
+            {/* ✅ Caution modal for Activate/Deactivate */}
+            {statusModal.isOpen && (
+                <div className="fixed inset-0 z-50">
+                    {/* backdrop */}
+                    <div
+                        className="absolute inset-0 bg-black/30"
+                        onClick={closeStatusModal}
+                        aria-hidden="true"
+                    />
+                    {/* panel */}
+                    <div className="absolute inset-0 flex items-center justify-center p-4">
+                        <div className="w-full max-w-md rounded-lg bg-white shadow-xl">
+                            <div className="px-5 py-4 border-b border-gray-200">
+                                <h3 className="text-sm font-semibold text-gray-900">
+                                    {statusModal.nextStatus === 'inactive' ? 'Deactivate User' : 'Activate User'}
+                                </h3>
+                            </div>
+
+                            <div className="px-5 py-4 space-y-3 text-sm text-gray-700">
+                                <p>
+                                    You are about to <strong>{statusModal.nextStatus === 'inactive' ? 'deactivate' : 'activate'}</strong>{' '}
+                                    <span className="font-medium">{statusModal.userName}</span>.
+                                </p>
+
+                                {statusModal.nextStatus === 'inactive' ? (
+                                    <ul className="list-disc pl-5 space-y-1">
+                                        <li>The user will be signed out from all devices immediately.</li>
+                                        <li>The user will not be able to log in until reactivated.</li>
+                                        <li>No data will be deleted; you can reactivate at any time.</li>
+                                    </ul>
+                                ) : (
+                                    <ul className="list-disc pl-5 space-y-1">
+                                        <li>The user will be able to log in again.</li>
+                                    </ul>
+                                )}
+
+                                <label className="mt-2 inline-flex items-start gap-2">
+                                    <input
+                                        type="checkbox"
+                                        className="mt-1 h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                                        checked={statusModal.acknowledged}
+                                        onChange={e => setStatusModal(s => ({ ...s, acknowledged: e.currentTarget.checked }))}
+                                    />
+                                    <span>I understand the impact of this action.</span>
+                                </label>
+                            </div>
+
+                            <div className="px-5 py-3 border-t border-gray-200 flex justify-end gap-3">
+                                <button
+                                    type="button"
+                                    onClick={closeStatusModal}
+                                    className="inline-flex justify-center py-2 px-3 rounded-md border border-gray-300 text-sm text-gray-700 bg-white hover:bg-gray-50"
+                                >
+                                    Cancel
+                                </button>
+
+                                <Form method="post">
+                                    <input type="hidden" name="intent" value="set-active" />
+                                    <input type="hidden" name="userId" value={statusModal.userId} />
+                                    <input type="hidden" name="status" value={statusModal.nextStatus} />
+                                    <StatusButton
+                                        type="submit"
+                                        disabled={!statusModal.acknowledged || isPending}
+                                        status={isPending ? 'pending' : 'idle'}
+                                        className={`inline-flex justify-center py-2 px-3 rounded-md text-sm text-white ${
+                                            statusModal.nextStatus === 'inactive'
+                                                ? 'bg-red-600 hover:bg-red-700'
+                                                : 'bg-green-600 hover:bg-green-700'
+                                        }`}
+                                        onClick={() => setTimeout(closeStatusModal, 0)}
+                                    >
+                                        {statusModal.nextStatus === 'inactive' ? 'Deactivate User' : 'Activate User'}
+                                    </StatusButton>
+                                </Form>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
         </>
     )
 }

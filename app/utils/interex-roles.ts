@@ -1,3 +1,5 @@
+// app/utils/interex-roles.ts
+
 /**
  * Interex Role Hierarchy and Permission Utilities
  * 

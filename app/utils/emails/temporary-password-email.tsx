@@ -1,3 +1,5 @@
+// app/utils/emails/temporary-password-email.tsx
+
 import {
   Html,
   Head,

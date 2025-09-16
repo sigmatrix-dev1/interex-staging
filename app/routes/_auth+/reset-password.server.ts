@@ -1,3 +1,5 @@
+// app/routes/_auth+/reset-password.server.ts
+
 import { invariant } from '@epic-web/invariant'
 import { data, redirect } from 'react-router'
 import { prisma } from '#app/utils/db.server.ts'
