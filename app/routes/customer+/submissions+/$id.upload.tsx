@@ -6,7 +6,7 @@
  * This route:
  * - Shows the list of document filenames expected by PCG (from Step 1/2 metadata).
  * - Pulls any cached files (set in Step 2) and lets the user review/replace them.
- * - Enforces filename EXACT match, per-file (≤150 MB) and total (≤300 MB) size limits.
+ * - Enforces filename EXACT match, per-file (≤75 MB manual; ≤600 MB auto) and total (≤600 MB) size limits.
  * - Uploads all files to PCG in one shot and marks the submission as SUBMITTED.
  * - Logs success/error events and best-effort PCG status after upload.
  *
@@ -408,7 +408,7 @@ export default function UploadSubmission() {
      * - mismatch: filename must equal the expected value for each slot.
      * - missing: any slot without a file selected.
     * - perFileTooBig: files over per-file limit (75 MB manual; 600 MB auto).
-     * - pickedTotalMB: aggregate size (must be ≤ 300 MB).
+     * - pickedTotalMB: aggregate size (must be ≤ 600 MB).
      */
     function recomputeValidations(nextFiles: Array<File | null>) {
         const mism: string[] = []
