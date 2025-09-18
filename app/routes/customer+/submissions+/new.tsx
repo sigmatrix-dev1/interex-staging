@@ -35,6 +35,7 @@ import { z } from 'zod'
 /* =========================
    UI Components & Utilities
    ========================= */
+import { INPUT_CLS, SELECT_CLS, READONLY_CLS } from '#app/components/control-classes.ts'
 import { FileDropzone } from '#app/components/file-dropzone.tsx'
 import { Field, SelectField, TextareaField, ErrorList } from '#app/components/forms.tsx'
 import { Drawer } from '#app/components/ui/drawer.tsx'
@@ -651,11 +652,7 @@ export default function NewSubmission() {
         defaultValue: retryInitial ?? undefined,
     })
 
-    // 🔧 Consistent control sizing across inputs & selects
-    const CONTROL_BASE = 'mt-1 block w-full rounded-md text-sm'
-    const INPUT_CLS = `${CONTROL_BASE} border border-gray-300 bg-white px-3 h-10 text-gray-900 focus:border-indigo-500 focus:ring-indigo-500`
-    const SELECT_CLS = `${CONTROL_BASE} border border-gray-300 bg-white pl-3 pr-10 h-10 text-gray-900 focus:border-indigo-500 focus:ring-indigo-500`
-    const READONLY_CLS = `${CONTROL_BASE} border border-gray-200 bg-gray-50 px-3 h-10 text-gray-700`
+    // Shared control classes (centralized for consistency)
 
     // One-off nonce for draft cache keys (per tab)
     const [draftNonce] = React.useState(() => crypto.randomUUID())

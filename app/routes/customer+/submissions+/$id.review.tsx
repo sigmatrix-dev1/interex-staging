@@ -12,7 +12,7 @@
  * - Sends an "update" to PCG and records audit + submission events.
  *
  * NOTE:
- * - Recipient and Purpose are locked here by design once created in Step 1.
+ * - Recipient and Purpose can be edited here; action validates and updates PCG accordingly.
  * - We do not double-fetch PCG status in the action; loader does it once on load.
  */
 
@@ -33,6 +33,7 @@ import {
     type ActionFunctionArgs,
 } from 'react-router'
 import { z } from 'zod'
+import { INPUT_CLS, SELECT_CLS, READONLY_CLS } from '#app/components/control-classes.ts'
 import { FileDropzone } from '#app/components/file-dropzone.tsx'
 // (moved below)
 import { Field, SelectField, TextareaField, ErrorList } from '#app/components/forms.tsx'
@@ -375,6 +376,18 @@ export async function action({ request }: ActionFunctionArgs) {
         return data({ result: parsed.reply() }, { status: parsed.status === 'error' ? 400 : 200 })
     }
     const v = parsed.value as any
+    // Validate recipient against purpose mapping (defensive server guard)
+    try {
+        const cat = categoryForOid(v.recipient)
+        if (!cat) {
+            return data({ result: parsed.reply({ formErrors: ['Recipient is not recognized. Please choose a valid recipient.'] }) }, { status: 400 })
+        }
+        const allowed = recipientsFor(cat, v.purposeOfSubmission as SubmissionPurpose)
+        if (!allowed.some(o => o.value === v.recipient)) {
+            return data({ result: parsed.reply({ formErrors: ['Selected recipient is not valid for the chosen purpose.'] }) }, { status: 400 })
+        }
+    } catch {}
+
 
     // Require existing submission and that it is still Draft + has pcgSubmissionId
     const submission = await prisma.submission.findUnique({ where: { id: v.submissionId }, include: { provider: true } })
@@ -578,7 +591,7 @@ export async function action({ request }: ActionFunctionArgs) {
 /**
  * Component — ReviewSubmission
  * - Renders the Step-2 review UI.
- * - Locks Purpose & Recipient (as per business rule).
+ * - Allows editing Purpose & Recipient with dependent select mapping.
  * - Manages split/document blocks and submission cache for files.
  * - Provides an "Update Submission" toggle gate to avoid accidental updates.
  */
@@ -604,8 +617,10 @@ export default function ReviewSubmission() {
         defaultValue: initial,
     })
 
+    // Control classes from shared module (kept consistent with Step 1)
+
     // ----- Purpose → Category → Recipient (no custom mode) -----
-    const [purpose] = React.useState<SubmissionPurpose | ''>(
+    const [purpose, setPurpose] = React.useState<SubmissionPurpose | ''>(
         (initial.purposeOfSubmission as SubmissionPurpose) || ''
     )
 
@@ -615,8 +630,7 @@ export default function ReviewSubmission() {
         [initial.recipient]
     )
 
-    // Recipient is locked in review step
-    const recipientLocked = true
+    // Recipient is editable in review step
 
     // Category options (exact helper shape)
     type CategoryOpt = ReturnType<typeof categoriesForPurpose>[number]
@@ -649,7 +663,6 @@ export default function ReviewSubmission() {
 
     // If recipient changes (unlocked), ensure it's valid for current purpose/category; here it’s locked.
     React.useEffect(() => {
-        if (recipientLocked) return
         if (!purpose) {
             setCategoryId('')
             setSelectedRecipient('')
@@ -661,19 +674,25 @@ export default function ReviewSubmission() {
                 setSelectedRecipient('')
             }
         }
-    }, [purpose, categoryId, selectedRecipient, recipientLocked])
+    }, [purpose, categoryId, selectedRecipient])
 
-    // Keep hidden "recipient" input synced (locked → initial value)
+    // Keep hidden "recipient" input synced with selection
     React.useEffect(() => {
         const hidId = fields.recipient?.id
         if (!hidId) return
         const hidden = document.getElementById(hidId) as HTMLInputElement | null
-        if (hidden) hidden.value = recipientLocked ? (initial.recipient || '') : (selectedRecipient || '')
-    }, [fields.recipient?.id, selectedRecipient, recipientLocked, initial.recipient])
+        if (hidden) hidden.value = selectedRecipient || ''
+    }, [fields.recipient?.id, selectedRecipient])
 
     const recipientHelp = React.useMemo(
         () => (selectedRecipient ? recipientHelperLabel(selectedRecipient) : undefined),
         [selectedRecipient],
+    )
+
+    // If purpose changed from the initial value, prompt to reselect recipient
+    const purposeChanged = React.useMemo(
+        () => Boolean(purpose) && String(initial.purposeOfSubmission || '') !== String(purpose || ''),
+        [initial.purposeOfSubmission, purpose]
     )
 
     // Split kind + docCount state (docCount derived from initial doc set length)
@@ -943,8 +962,7 @@ export default function ReviewSubmission() {
                         <input type="hidden" name="_initial_json" value={initialJson} />
                         <input {...getInputProps(fields.recipient, { type: 'hidden' })} />
                         <input {...getInputProps(fields.autoSplit, { type: 'hidden' })} />
-                        {/* hidden input to submit locked Purpose value */}
-                        <input {...getInputProps(fields.purposeOfSubmission, { type: 'hidden' })} />
+                        {/* Purpose binds directly via SelectField; no hidden input needed */}
 
                         {/* ===== Submission Details ===== */}
                         <div className="rounded-lg border border-gray-200 bg-white p-4">
@@ -952,11 +970,11 @@ export default function ReviewSubmission() {
 
                             <div className="grid grid-cols-1 md:grid-cols-12 gap-4">
                                 <div className="md:col-span-6">
-                                    <Field labelProps={{ children: 'Title *' }} inputProps={{ ...getInputProps(fields.title, { type: 'text' }) }} errors={fields.title?.errors} />
+                                    <Field labelProps={{ children: 'Title *' }} inputProps={{ ...getInputProps(fields.title, { type: 'text' }), className: INPUT_CLS }} errors={fields.title?.errors} />
                                 </div>
 
                                 <div className="md:col-span-6">
-                                    <SelectField labelProps={{ children: 'Author Type *' }} selectProps={getSelectProps(fields.authorType)} errors={fields.authorType?.errors}>
+                                    <SelectField labelProps={{ children: 'Author Type *' }} selectProps={{ ...getSelectProps(fields.authorType), className: SELECT_CLS }} errors={fields.authorType?.errors}>
                                         {AuthorTypeEnum.options.map((a: string) => (
                                             <option key={a} value={a}>
                                                 {formatEnum(a)}
@@ -965,35 +983,50 @@ export default function ReviewSubmission() {
                                     </SelectField>
                                 </div>
 
-                                {/* Purpose (locked) */}
+                                {/* Purpose (editable) */}
                                 <div className="md:col-span-6">
-                                    <label className="block text-sm font-medium text-gray-700">Purpose *</label>
-                                    <p className="mt-1 text-xs text-gray-500">🔒 This field is locked during review.</p>
-                                    <select
-                                        value={purpose}
-                                        onChange={() => {}}
-                                        disabled={true}
-                                        aria-disabled="true"
-                                        title="Locked during review"
-                                        className="mt-1 block w-full rounded-md border border-gray-300 bg-gray-100 text-gray-500 cursor-not-allowed opacity-80 py-2 pl-3 pr-10 text-sm focus:border-gray-300 focus:outline-none focus:ring-0"
+                                    <SelectField
+                                        labelProps={{ children: 'Purpose of Submission *' }}
+                                        selectProps={{
+                                            ...getSelectProps(fields.purposeOfSubmission!),
+                                            className: SELECT_CLS,
+                                            onChange: (e: React.ChangeEvent<HTMLSelectElement>) => {
+                                                const v = e.target.value as SubmissionPurpose | ''
+                                                setPurpose(v)
+                                                // reset dependent fields
+                                                setCategoryId('')
+                                                setSelectedRecipient('')
+                                                // ensure Conform receives the updated value
+                                                const el = e.currentTarget
+                                                const nativeSetter = (Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value') as any)?.set
+                                                nativeSetter?.call(el, v)
+                                                el.dispatchEvent(new Event('input', { bubbles: true }))
+                                                el.dispatchEvent(new Event('change', { bubbles: true }))
+                                            },
+                                        }}
+                                        errors={fields.purposeOfSubmission?.errors}
                                     >
                                         {SubmissionPurposeValues.map((p: string) => (
                                             <option key={p} value={p}>
                                                 {formatEnum(p)}
                                             </option>
                                         ))}
-                                    </select>
+                                    </SelectField>
                                 </div>
 
-                                {/* Recipient (Category + Recipient only) — both locked here */}
+                                {/* Recipient (Category + Recipient) — editable */}
                                 <div className="md:col-span-6">
                                     <label className="block text-sm font-medium text-gray-700">Recipient *</label>
-                                    {/* subtle locked note */}
-                                    <p className="mt-1 text-xs text-gray-500">🔒 This field is locked during review.</p>
 
                                     {!initialRecipientKnown ? (
                                         <div className="mt-1 mb-2 rounded border border-amber-200 bg-amber-50 px3 py-2 text-xs text-amber-900">
                                             The current recipient OID isn’t in the directory. Please pick a valid recipient below to update this submission.
+                                        </div>
+                                    ) : null}
+
+                                    {purposeChanged && !selectedRecipient ? (
+                                        <div className="mt-1 mb-2 text-xs text-amber-700">
+                                            Purpose changed — please reselect a recipient.
                                         </div>
                                     ) : null}
 
@@ -1006,10 +1039,8 @@ export default function ReviewSubmission() {
                                                 setCategoryId(isRecipientCategory(raw) ? raw : '')
                                                 setSelectedRecipient('')
                                             }}
-                                            disabled={true}
-                                            aria-disabled="true"
-                                            title="Locked during review"
-                                            className="md:col-span-5 rounded-md border border-gray-300 bg-gray-100 text-gray-500 cursor-not-allowed opacity-80 py-2 px-2 text-sm focus:border-gray-300 focus:outline-none focus:ring-0 shadow-sm"
+                                            disabled={!purpose}
+                                            className={`md:col-span-5 ${SELECT_CLS}`}
                                             aria-label="Recipient Category"
                                         >
                                             <option value="" disabled>
@@ -1026,10 +1057,8 @@ export default function ReviewSubmission() {
                                         <select
                                             value={selectedRecipient}
                                             onChange={e => setSelectedRecipient(e.target.value)}
-                                            disabled={true}
-                                            aria-disabled="true"
-                                            title="Locked during review"
-                                            className="md:col-span-7 rounded-md border border-gray-300 bg-gray-100 text-gray-500 cursor-not-allowed opacity-80 py-2 pl-3 pr-10 text-sm focus:border-gray-300 focus:outline-none focus:ring-0 shadow-sm"
+                                            disabled={!categoryId || recipientOptions.length === 0}
+                                            className={`md:col-span-7 ${SELECT_CLS}`}
                                             aria-label="Recipient OID"
                                         >
                                             <option value="" disabled>
@@ -1051,7 +1080,7 @@ export default function ReviewSubmission() {
 
                                 {/* NPI/Claim/Case/Comments/X12/Threshold */}
                                 <div className="md:col-span-6">
-                                    <SelectField labelProps={{ children: 'NPI *' }} selectProps={getSelectProps(fields.providerId)} errors={fields.providerId?.errors}>
+                                    <SelectField labelProps={{ children: 'NPI *' }} selectProps={{ ...getSelectProps(fields.providerId), className: SELECT_CLS }} errors={fields.providerId?.errors}>
                                         {availableNpis.map((p: Npi) => (
                                             <option key={p.id} value={p.id}>
                                                 {p.npi}
@@ -1062,11 +1091,11 @@ export default function ReviewSubmission() {
                                 </div>
 
                                 <div className="md:col-span-6">
-                                    <Field labelProps={{ children: 'Claim ID *' }} inputProps={{ ...getInputProps(fields.claimId, { type: 'text' }) }} errors={fields.claimId?.errors} />
+                                    <Field labelProps={{ children: 'Claim ID *' }} inputProps={{ ...getInputProps(fields.claimId, { type: 'text' }), className: INPUT_CLS }} errors={fields.claimId?.errors} />
                                 </div>
 
                                 <div className="md:col-span-6">
-                                    <Field labelProps={{ children: 'Case ID' }} inputProps={{ ...getInputProps(fields.caseId, { type: 'text' }), maxLength: 32 }} errors={fields.caseId?.errors} />
+                                    <Field labelProps={{ children: 'Case ID' }} inputProps={{ ...getInputProps(fields.caseId, { type: 'text' }), maxLength: 32, className: INPUT_CLS }} errors={fields.caseId?.errors} />
                                 </div>
 
                                 <div className="md:col-span-6">
@@ -1078,14 +1107,14 @@ export default function ReviewSubmission() {
                                 </div>
 
                                 <div className="md:col-span-6">
-                                    <SelectField labelProps={{ children: 'Send in X12' }} selectProps={getSelectProps(fields.sendInX12)} errors={fields.sendInX12?.errors}>
+                                    <SelectField labelProps={{ children: 'Send in X12' }} selectProps={{ ...getSelectProps(fields.sendInX12), className: SELECT_CLS }} errors={fields.sendInX12?.errors}>
                                         <option value="false">False</option>
                                         <option value="true">True</option>
                                     </SelectField>
                                 </div>
 
                                 <div className="md:col-span-6">
-                                    <Field labelProps={{ children: 'Threshold' }} inputProps={{ ...getInputProps(fields.threshold, { type: 'number' }), min: 1 }} errors={fields.threshold?.errors} />
+                                    <Field labelProps={{ children: 'Threshold' }} inputProps={{ ...getInputProps(fields.threshold, { type: 'number' }), min: 1, className: INPUT_CLS }} errors={fields.threshold?.errors} />
                                 </div>
                             </div>
                         </div>
@@ -1100,7 +1129,7 @@ export default function ReviewSubmission() {
                                         name="splitKind"
                                         value={splitKind}
                                         onChange={e => setSplitKind(e.target.value as 'manual' | 'auto')}
-                                        className="mt-1 block w-full rounded-md border border-gray-300 bg-white py-2 pl-3 pr-10 text-sm"
+                                        className={SELECT_CLS}
                                     >
                                         <option value="manual">Manual</option>
                                         <option value="auto">Auto</option>
@@ -1113,7 +1142,7 @@ export default function ReviewSubmission() {
                                         type="text"
                                         readOnly
                                         value={splitKind === 'auto' ? 'true' : 'false'}
-                                        className="mt-1 block w-full rounded-md border border-gray-200 bg-white py-2 px-3 text-sm"
+                                        className={READONLY_CLS}
                                     />
                                 </div>
 
@@ -1124,7 +1153,7 @@ export default function ReviewSubmission() {
                                             name="docCount"
                                             value={docCount}
                                             onChange={e => setDocCount(Number(e.target.value))}
-                                            className="mt-1 block w-full rounded-md border border-gray-300 bg-white py-2 pl-3 pr-10 text-sm"
+                                            className={SELECT_CLS}
                                         >
                                             {Array.from({ length: 99 }, (_, i) => i + 1).map(n => (
                                                 <option key={n} value={n}>{n}</option>
@@ -1171,12 +1200,7 @@ export default function ReviewSubmission() {
                                         <div className="grid grid-cols-1 md:grid-cols-12 gap-3 mt-3">
                                             <div className="md:col-span-3">
                                                 <label className="block text-sm text-gray-700">split_no</label>
-                                                <input
-                                                    type="text"
-                                                    readOnly
-                                                    value={i}
-                                                    className="mt-1 block w-full rounded-md border border-gray-200 bg-gray-50 py-2 px-3 text-sm"
-                                                />
+                                                <input type="text" readOnly value={i} className={READONLY_CLS} />
                                             </div>
 
                                             <div className="md:col-span-9" />
@@ -1188,19 +1212,19 @@ export default function ReviewSubmission() {
                                                     type="text"
                                                     value={meta.name}
                                                     onChange={e => updateDocMeta(i, { name: e.currentTarget.value })}
-                                                    className="mt-1 block w-full rounded-md border border-gray-300 bg-white py-2 px-3 text-sm"
+                                                    className={INPUT_CLS}
                                                 />
                                             </div>
 
                                             <div className="md:col-span-6">
-                                                <label className="block textsm text-gray-700">Filename (.pdf) *</label>
+                                                <label className="block text-sm text-gray-700">Filename (.pdf) *</label>
                                                 <input
                                                     name={`doc_filename_${i}`}
                                                     type="text"
                                                     value={meta.filename}
                                                     onBlur={async e => { await maybeRenameCachedFileTo(i, e.currentTarget.value.trim()) }}
                                                     onChange={e => updateDocMeta(i, { filename: e.currentTarget.value })}
-                                                    className="mt-1 block w-full rounded-md border border-gray-300 bg-white py-2 px-3 text-sm"
+                                                    className={INPUT_CLS}
                                                     placeholder="MyDocument.pdf"
                                                 />
                                             </div>
@@ -1212,14 +1236,14 @@ export default function ReviewSubmission() {
                                                     type="text"
                                                     value={meta.attachmentControlNum}
                                                     onChange={e => updateDocMeta(i, { attachmentControlNum: e.currentTarget.value })}
-                                                    className="mt-1 block w-full rounded-md border border-gray-300 bg-white py-2 px-3 text-sm"
+                                                    className={INPUT_CLS}
                                                     placeholder={DEFAULT_ACN_HINT}
                                                 />
                                             </div>
 
                                             <div className="md:col-span-6">
                                                 <label className="block text-sm text-gray-700">Document Type</label>
-                                                <input type="text" readOnly value="pdf" className="mt-1 block w-full rounded-md border border-gray-200 bg-gray-50 py-2 px-3 text-sm" />
+                                                <input type="text" readOnly value="pdf" className={READONLY_CLS} />
                                             </div>
                                         </div>
                                     </div>

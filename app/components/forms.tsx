@@ -1,6 +1,7 @@
 import { useInputControl } from '@conform-to/react'
 import { REGEXP_ONLY_DIGITS_AND_CHARS, type OTPInputProps } from 'input-otp'
 import React, { useId } from 'react'
+import { INPUT_CLS, SELECT_CLS, TEXTAREA_CLS } from '#app/components/control-classes.ts'
 import { cn } from '#app/utils/misc.tsx'
 import { Checkbox, type CheckboxProps } from './ui/checkbox.tsx'
 import {
@@ -50,7 +51,8 @@ export function Field({
 	const fallbackId = useId()
 	const id = inputProps.id ?? fallbackId
 	const errorId = errors?.length ? `${id}-error` : undefined
-	return (
+		const { className: iClassName, ...restInputProps } = inputProps
+		return (
 		<div className={className}>
 			<Label 
 				htmlFor={id} 
@@ -64,7 +66,8 @@ export function Field({
 				id={id}
 				aria-invalid={errorId ? true : undefined}
 				aria-describedby={errorId}
-				{...inputProps}
+				{...restInputProps}
+				className={cn(INPUT_CLS, iClassName)}
 			/>
 			<div className="min-h-[32px] px-4 pt-1 pb-3">
 				{errorId ? <ErrorList id={errorId} errors={errors} /> : null}
@@ -151,14 +154,7 @@ export function TextareaField({
 				aria-invalid={errorId ? true : undefined}
 				aria-describedby={errorId}
 				{...restTextareaProps}
-				className={cn(
-					// ✅ readable defaults
-					'mt-1 block w-full rounded-md border border-gray-300 bg-white text-gray-900 placeholder-gray-400',
-					'shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm',
-					// hard overrides in case a dark theme leaks in
-					'!bg-white !text-gray-900 placeholder-gray-400',
-					tClassName, // allow callers to extend/override
-				)}
+				className={cn(TEXTAREA_CLS, tClassName)}
 			/>
 			<div className="min-h-[32px] px-4 pt-1 pb-3">
 				{errorId ? <ErrorList id={errorId} errors={errors} /> : null}
@@ -247,6 +243,7 @@ export function SelectField({
 	const fallbackId = useId()
 	const id = selectProps.id ?? fallbackId
 	const errorId = errors?.length ? `${id}-error` : undefined
+	const { className: sClassName, ...restSelectProps } = selectProps
 	return (
 		<div className={className}>
 			<div className="flex items-center gap-2 mb-2">
@@ -267,7 +264,8 @@ export function SelectField({
 				id={id}
 				aria-invalid={errorId ? true : undefined}
 				aria-describedby={errorId}
-				{...selectProps}
+				{...restSelectProps}
+				className={cn(SELECT_CLS, sClassName)}
 			>
 				{children}
 			</Select>
