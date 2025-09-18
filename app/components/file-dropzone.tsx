@@ -1,10 +1,13 @@
 import * as React from 'react'
+import { MAX_FILE_MB, BYTES_PER_MB, isPdfFile } from '#app/utils/upload-constraints.ts'
 
 type Props = {
     label?: string
     name?: string
     accept?: string
     note?: React.ReactNode
+    /** Override per-file limit (MB). Defaults to MAX_FILE_MB; useful when split is auto. */
+    maxFileMB?: number
     required?: boolean
     disabled?: boolean
     onPick?: (file: File) => void
@@ -17,6 +20,7 @@ export function FileDropzone({
                                  name,
                                  accept = '.pdf,application/pdf',
                                  note,
+                                 maxFileMB = MAX_FILE_MB,
                                  required,
                                  disabled,
                                  onPick,
@@ -46,16 +50,15 @@ export function FileDropzone({
 
     function chooseFile(f: File | null) {
         if (!f) return
-        const isPdf = f.type === 'application/pdf' || /\.pdf$/i.test(f.name)
-            if (!isPdf) {
-                alert('Please select a PDF file.')
-                return
-            }
-            const MAX_MB = 150
-                if (f.size > MAX_MB * 1024 * 1024) {
-                    alert(`File must be ≤ ${MAX_MB} MB.`)
-                    return
-                    }
+        const isPdf = isPdfFile(f)
+        if (!isPdf) {
+            alert('Please select a PDF file.')
+            return
+        }
+        if (f.size > maxFileMB * BYTES_PER_MB) {
+            alert(`File must be ≤ ${maxFileMB} MB.`)
+            return
+        }
         setFile(f)
         setHiddenInput(f)
         onPick?.(f)
@@ -129,7 +132,7 @@ export function FileDropzone({
                         {file ? file.name : 'Drop a PDF here or click Browse'}
                     </div>
                     <div className="text-xs text-gray-500">
-                        {file ? `${(file.size / 1024 / 1024).toFixed(1)} MB` : 'PDF only · Max 150 MB per file'}
+                        {file ? `${(file.size / BYTES_PER_MB).toFixed(1)} MB` : `PDF only · Max ${maxFileMB} MB per file`}
                     </div>
                 </div>
 

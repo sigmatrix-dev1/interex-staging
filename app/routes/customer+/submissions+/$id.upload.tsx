@@ -42,6 +42,7 @@ import { requireUserId } from '#app/utils/auth.server.ts'
 import { prisma } from '#app/utils/db.server.ts'
 import { getCachedFile, subKey } from '#app/utils/file-cache.ts'
 import { redirectWithToast } from '#app/utils/toast.server.ts'
+import { BYTES_PER_MB, MAX_FILE_MB, MAX_TOTAL_MB, totalsNote, perFileLimitFor, totalsNoteFor } from '#app/utils/upload-constraints.ts'
 
 /** Minimal PCG types used for stage detection */
 type PcgEvent = { kind?: string; payload?: any }
@@ -122,6 +123,7 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
         submission.events.find(e => e.kind === SubmissionEventKind.DRAFT_CREATED)
     const docSet: Array<any> = Array.isArray((metaEv?.payload as any)?.document_set) ? (metaEv!.payload as any).document_set : []
     const expectedFilenames = docSet.map(d => d.filename).filter(Boolean)
+    const autoSplit = Boolean((metaEv?.payload as any)?.auto_split ?? submission.autoSplit)
 
     // ISO-ify event dates for client rendering
     const eventsUi = submission.events.map(e => ({
@@ -136,6 +138,7 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
         user,
         submission: { ...submission, events: eventsUi },
         expectedFilenames, // array
+        autoSplit,
     })
 }
 
@@ -184,6 +187,7 @@ export async function action({ request }: ActionFunctionArgs) {
     const expected: string[] = Array.isArray((metaEv?.payload as any)?.document_set)
         ? (metaEv!.payload as any).document_set.map((d: any) => d.filename).filter(Boolean)
         : []
+    const autoSplit = Boolean((metaEv?.payload as any)?.auto_split ?? submission.autoSplit)
 
     // Collect files[] from multipart form
     const files = (formData.getAll('files') as File[]).filter(f => f && f.size > 0)
@@ -208,13 +212,14 @@ export async function action({ request }: ActionFunctionArgs) {
         return data({ result: parsed.reply({ formErrors: msgs }) }, { status: 400 })
     }
 
-    // Validate sizes: each ≤150MB, total ≤300MB
-    const bytesPerMB = 1024 * 1024
+    // Validate sizes: each ≤ MAX_FILE_MB, total ≤ MAX_TOTAL_MB
+    const bytesPerMB = BYTES_PER_MB
+    const perFileLimit = autoSplit ? MAX_TOTAL_MB : MAX_FILE_MB
     const perFileErrors = files
-        .filter(f => f.size / bytesPerMB > 150)
-        .map(f => `File "${f.name}" is ${(f.size / bytesPerMB).toFixed(1)} MB (max 150 MB per file).`)
+        .filter(f => f.size / bytesPerMB > perFileLimit)
+        .map(f => `File "${f.name}" is ${(f.size / bytesPerMB).toFixed(1)} MB (max ${perFileLimit} MB per file).`)
     const totalSizeMB = files.reduce((acc, f) => acc + f.size, 0) / bytesPerMB
-    const totalError = totalSizeMB > 300 ? [`Total size ${totalSizeMB.toFixed(1)} MB exceeds 300 MB.`] : []
+    const totalError = totalSizeMB > MAX_TOTAL_MB ? [`Total size ${totalSizeMB.toFixed(1)} MB exceeds ${MAX_TOTAL_MB} MB.`] : []
     const sizeErrors = [...perFileErrors, ...totalError]
     if (sizeErrors.length) return data({ result: parsed.reply({ formErrors: sizeErrors }) }, { status: 400 })
 
@@ -379,7 +384,7 @@ export async function action({ request }: ActionFunctionArgs) {
  * - Disables submit until everything is consistent and under size limits.
  */
 export default function UploadSubmission() {
-    const { user, submission, expectedFilenames } = useLoaderData<typeof loader>()
+    const { user: ignoredUser, submission, expectedFilenames, autoSplit } = useLoaderData<typeof loader>()
     const actionData = useActionData<typeof action>()
     const nav = useNavigation()
     const navigate = useNavigate()
@@ -402,11 +407,10 @@ export default function UploadSubmission() {
      * Recompute client-side validations whenever files change.
      * - mismatch: filename must equal the expected value for each slot.
      * - missing: any slot without a file selected.
-     * - perFileTooBig: files over 150 MB.
+    * - perFileTooBig: files over per-file limit (75 MB manual; 600 MB auto).
      * - pickedTotalMB: aggregate size (must be ≤ 300 MB).
      */
     function recomputeValidations(nextFiles: Array<File | null>) {
-        const BYTES_PER_MB = 1024 * 1024
         const mism: string[] = []
         const miss: string[] = []
         const tooBig: string[] = []
@@ -423,7 +427,8 @@ export default function UploadSubmission() {
                 mism.push(`#${i + 1}: selected "${f.name}" ≠ expected "${expected}"`)
             }
             const mb = f.size / BYTES_PER_MB
-            if (mb > 150) tooBig.push(`${f.name} (${mb.toFixed(1)} MB)`)
+            const limit = perFileLimitFor(autoSplit ? 'auto' : 'manual')
+            if (mb > limit) tooBig.push(`${f.name} (${mb.toFixed(1)} MB)`)       
             totalMB += mb
         }
 
@@ -462,7 +467,7 @@ export default function UploadSubmission() {
         mismatch.length === 0 &&
         missing.length === 0 &&
         perFileTooBig.length === 0 &&
-        pickedTotalMB <= 300
+    pickedTotalMB <= MAX_TOTAL_MB
 
     // Lock background scroll while fullscreen Drawer is mounted
     React.useEffect(() => {
@@ -499,7 +504,7 @@ export default function UploadSubmission() {
                                 {expectedFilenames.map(n => <li key={n}>{n}</li>)}
                             </ul>
                         </div>
-                        <p className="mt-1 text-xs text-gray-500">Only PDF. Each ≤ 150 MB. Total ≤ 300 MB.</p>
+                        <p className="mt-1 text-xs text-gray-500">{autoSplit ? totalsNoteFor('auto') : totalsNote}</p>
                     </div>
 
                     {/* Upload form with one dropzone per expected file */}
@@ -520,6 +525,7 @@ export default function UploadSubmission() {
                                         name="files"
                                         label="Attach PDF"
                                         accept="application/pdf"
+                                        maxFileMB={autoSplit ? MAX_TOTAL_MB : MAX_FILE_MB}
                                         note={<span className="text-xs">Expected: <code className="font-mono">{expected}</code></span>}
                                         initialFile={pickedFiles[idx] ?? null}
                                         onPick={(f) => {
@@ -534,7 +540,7 @@ export default function UploadSubmission() {
                         </div>
 
                         {/* Validation surfaces (client-side) */}
-                        {(mismatch.length || missing.length || perFileTooBig.length || pickedTotalMB > 300) ? (
+                        {(mismatch.length || missing.length || perFileTooBig.length || pickedTotalMB > MAX_TOTAL_MB) ? (
                             <div className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800">
                                 <div className="font-semibold mb-1">Please fix the following before submitting:</div>
                                 {missing.length ? (
@@ -558,18 +564,18 @@ export default function UploadSubmission() {
                                 ) : null}
                                 {perFileTooBig.length ? (
                                     <div className="mb-2">
-                                        <div className="font-medium">Files over 150 MB:</div>
+                                        <div className="font-medium">Files over {autoSplit ? MAX_TOTAL_MB : MAX_FILE_MB} MB:</div>
                                         <ul className="list-disc list-inside">
                                             {perFileTooBig.map((n, i) => <li key={`big-${i}`}>{n}</li>)}
                                         </ul>
                                     </div>
                                 ) : null}
-                                {pickedTotalMB > 300 ? <div>Total size {pickedTotalMB.toFixed(1)} MB exceeds 300 MB.</div> : null}
+                                {pickedTotalMB > MAX_TOTAL_MB ? <div>Total size {pickedTotalMB.toFixed(1)} MB exceeds {MAX_TOTAL_MB} MB.</div> : null}
                                 <div className="mt-3"></div>
                             </div>
                         ) : (
                             <div className="rounded-md border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-800">
-                                All good! Files match the expected names. Total: {pickedTotalMB.toFixed(1)} / 300 MB.
+                                All good! Files match the expected names. Total: {pickedTotalMB.toFixed(1)} / {MAX_TOTAL_MB} MB.
                             </div>
                         )}
 

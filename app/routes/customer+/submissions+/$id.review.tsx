@@ -34,6 +34,7 @@ import {
 } from 'react-router'
 import { z } from 'zod'
 import { FileDropzone } from '#app/components/file-dropzone.tsx'
+// (moved below)
 import { Field, SelectField, TextareaField, ErrorList } from '#app/components/forms.tsx'
 import { SubmissionActivityLog } from '#app/components/submission-activity-log.tsx'
 import { Drawer } from '#app/components/ui/drawer.tsx'
@@ -58,6 +59,7 @@ import { requireUserId } from '#app/utils/auth.server.ts'
 import { prisma } from '#app/utils/db.server.ts'
 import { draftKey, moveCachedFile, subKey, getCachedFile, setCachedFile } from '#app/utils/file-cache.ts'
 import { redirectWithToast } from '#app/utils/toast.server.ts'
+import { BYTES_PER_MB, MAX_TOTAL_MB, totalsNoteFor, perFileLimitFor } from '#app/utils/upload-constraints.ts'
 
 /** Lightweight types used across loader/UI */
 type PcgEvent = { kind?: string; payload?: any }
@@ -182,7 +184,7 @@ async function applyStatusToDb(submissionId: string, pcgSubmissionId: string) {
         }
 
         await prisma.submission.update({ where: { id: submissionId }, data: updateData })
-    } catch (e) {
+    } catch {
         // swallow; we don't want to block UX if status refresh fails
     }
 }
@@ -336,8 +338,8 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
 function collectDocuments(formData: FormData, kind: 'manual' | 'auto', docCount?: number) {
     const errors: string[] = []
     const count = kind === 'manual' ? Number(docCount) : 1
-    if (kind === 'manual' && ![1, 3, 4, 5].includes(count)) {
-        errors.push('Number of documents must be 1, 3, 4, or 5.')
+    if (kind === 'manual' && (isNaN(count) || count < 1 || count > 99)) {
+        errors.push('Number of documents must be between 1 and 99 for manual split.')
     }
     const documents: Array<{ name: string; filename: string; attachmentControlNum: string; split_no: number; document_type: 'pdf' }> = []
     for (let i = 1; i <= (kind === 'manual' ? count : 1); i++) {
@@ -582,7 +584,7 @@ export async function action({ request }: ActionFunctionArgs) {
  */
 export default function ReviewSubmission() {
     const loaderData = useLoaderData<typeof loader>()
-    const { user, submission, initial, initialJson, initialDocs } = loaderData
+    const { submission, initial, initialJson, initialDocs } = loaderData
     const availableNpis: Npi[] = loaderData.availableNpis ?? []
 
     const actionData = useActionData<typeof action>()
@@ -603,7 +605,7 @@ export default function ReviewSubmission() {
     })
 
     // ----- Purpose → Category → Recipient (no custom mode) -----
-    const [purpose, setPurpose] = React.useState<SubmissionPurpose | ''>(
+    const [purpose] = React.useState<SubmissionPurpose | ''>(
         (initial.purposeOfSubmission as SubmissionPurpose) || ''
     )
 
@@ -688,8 +690,8 @@ export default function ReviewSubmission() {
 
     // ---- Cache wiring (submission-scoped) ----
     const [dropErrors, setDropErrors] = React.useState<Record<number, string>>({})
-    const [docPicked, setDocPicked] = React.useState<Record<number, boolean>>({})
-    const [docChanged, setDocChanged] = React.useState<Record<number, boolean>>({})
+    const [ignoredDocPicked, setDocPicked] = React.useState<Record<number, boolean>>({})
+    const [ignoredDocChanged, setDocChanged] = React.useState<Record<number, boolean>>({})
     const [docSizes, setDocSizes] = React.useState<Record<number, number>>({})
     const [dzReset, setDzReset] = React.useState<Record<number, number>>({})
     const [initialFiles, setInitialFiles] = React.useState<Record<number, File | null>>({})
@@ -717,14 +719,14 @@ export default function ReviewSubmission() {
     )
 
     // Track if a given doc block deviates from initial values (for UX hints or future logic)
-    function hasChanged(i: number, next: DocMeta) {
+    const hasChanged = React.useCallback((i: number, next: DocMeta) => {
         const preset = initialDocs?.[i - 1] || { name: '', filename: '', attachmentControlNum: '' }
         return (
             (next.name || '') !== (preset.name || '') ||
             (next.filename || '') !== (preset.filename || '') ||
             (next.attachmentControlNum || '') !== (preset.attachmentControlNum || '')
         )
-    }
+    }, [initialDocs])
 
     /** Update per-document metadata state + "changed" tracking */
     function updateDocMeta(i: number, patch: Partial<DocMeta>) {
@@ -802,12 +804,11 @@ export default function ReviewSubmission() {
 
     /**
      * Handle dropzone pick:
-     * - Guard PDF + per-file (≤150MB) and per-submission (≤300MB) limits
+     * - Guard PDF + per-file and per-submission limits
      * - Seed name/filename from the file if missing
      * - Write into submission cache
      */
     async function handlePick(idx: number, file: File) {
-        const BYTES_PER_MB = 1024 * 1024
         const mb = file.size / BYTES_PER_MB
         const isPdf = /\.pdf$/i.test(file.name)
 
@@ -818,9 +819,10 @@ export default function ReviewSubmission() {
         const wouldBeTotalMB = (existingTotalBytes + file.size) / BYTES_PER_MB
 
         let err = ''
+    const perFileLimit = perFileLimitFor(splitKind)
         if (!isPdf) err = 'PDF only'
-        else if (mb > 150) err = `This file is ${mb.toFixed(1)} MB — the per-file limit is 150 MB.`
-        else if (wouldBeTotalMB > 300) err = `Total selected would be ${wouldBeTotalMB.toFixed(1)} MB — the submission limit is 300 MB.`
+        else if (mb > perFileLimit) err = `This file is ${mb.toFixed(1)} MB — the per-file limit is ${perFileLimit} MB.`
+        else if (wouldBeTotalMB > MAX_TOTAL_MB) err = `Total selected would be ${wouldBeTotalMB.toFixed(1)} MB — the submission limit is ${MAX_TOTAL_MB} MB.`
         if (err) {
             window.alert(err)
             setDropErrors(prev => ({ ...prev, [idx]: err }))
@@ -879,7 +881,7 @@ export default function ReviewSubmission() {
             setInitialFiles(next)
             setDocSizes(sizes)
         })()
-    }, [docCount, submission.id])
+    }, [docCount, submission.id, hasChanged])
 
     /** Client-side guardrails prior to POST; server revalidates everything. */
     function validateBeforeSubmit(): boolean {
@@ -1124,10 +1126,9 @@ export default function ReviewSubmission() {
                                             onChange={e => setDocCount(Number(e.target.value))}
                                             className="mt-1 block w-full rounded-md border border-gray-300 bg-white py-2 pl-3 pr-10 text-sm"
                                         >
-                                            <option value={1}>1</option>
-                                            <option value={3}>3</option>
-                                            <option value={4}>4</option>
-                                            <option value={5}>5</option>
+                                            {Array.from({ length: 99 }, (_, i) => i + 1).map(n => (
+                                                <option key={n} value={n}>{n}</option>
+                                            ))}
                                         </select>
                                     </div>
                                 ) : null}
@@ -1139,9 +1140,9 @@ export default function ReviewSubmission() {
                             <div className="flex items-center justify-between mb-2">
                                 <h3 className="text-base font-semibold text-gray-900">Document Metadata</h3>
                                 <div className="flex items-center gap-2 text-xs">
-                  <span className="inline-block rounded px-2 py-0.5 ring-1 ring-emerald-300 bg-emerald-50 text-emerald-700">
-                    Total: {totalSizeMB.toFixed(1)} / 300 MB
-                  </span>
+                                    <span className="inline-block rounded px-2 py-0.5 ring-1 ring-emerald-300 bg-emerald-50 text-emerald-700">
+                                        Total: {totalSizeMB.toFixed(1)} / {MAX_TOTAL_MB} MB
+                                    </span>
                                 </div>
                             </div>
 
@@ -1156,7 +1157,8 @@ export default function ReviewSubmission() {
                                         <FileDropzone
                                             key={`dz-${i}-${dzReset[i] ?? 0}`}
                                             label="Attach PDF (optional)"
-                                            note="Helps pre-check size (≤150 MB) and auto-fill filename/name. Actual upload happens in Step 3."
+                                            maxFileMB={perFileLimitFor(splitKind)}
+                                            note={totalsNoteFor(splitKind)}
                                             onPick={file => handlePick(i, file)}
                                             initialFile={initialFiles[i] ?? null}
                                         />

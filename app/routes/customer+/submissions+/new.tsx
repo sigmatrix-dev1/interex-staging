@@ -57,6 +57,7 @@ import { requireUserId } from '#app/utils/auth.server.ts'
 import { prisma } from '#app/utils/db.server.ts'
 import { draftKey, getCachedFile, setCachedFile } from '#app/utils/file-cache.ts'
 import { redirectWithToast } from '#app/utils/toast.server.ts'
+import { BYTES_PER_MB, MAX_TOTAL_MB, totalsNote, totalsNoteFor, perFileLimitFor } from '#app/utils/upload-constraints.ts'
 
 /* ===============
    Types & Config
@@ -212,8 +213,8 @@ function collectDocumentsFromForm(formData: FormData, kind: 'manual' | 'auto', d
     const count = kind === 'manual' ? Number(docCount) : 1
 
     if (kind === 'manual') {
-        if (![1, 3, 4, 5].includes(count)) {
-            errors.push('Number of documents must be 1, 3, 4, or 5.')
+        if (isNaN(count) || count < 1 || count > 99) {
+            errors.push('Number of documents must be between 1 and 99 for manual split.')
         }
     }
 
@@ -379,11 +380,14 @@ export async function action({ request }: ActionFunctionArgs) {
     } = parsed.value as any
 
     // Split validation
-    if (splitKind === 'manual' && ![1, 3, 4, 5].includes(Number(docCount))) {
-        return data(
-            { result: parsed.reply({ formErrors: ['Please choose the number of documents (1, 3, 4, or 5).'] }) },
-            { status: 400 },
-        )
+    if (splitKind === 'manual') {
+        const n = Number(docCount)
+        if (isNaN(n) || n < 1 || n > 99) {
+            return data(
+                { result: parsed.reply({ formErrors: ['Please choose the number of documents between 1 and 99.'] }) },
+                { status: 400 },
+            )
+        }
     }
 
     // Document blocks
@@ -625,7 +629,7 @@ export async function action({ request }: ActionFunctionArgs) {
    file pre-caching, and client-side validations.
 */
 export default function NewSubmission() {
-    const { user, availableNpis, retryInitial, retryInitialDocs } = useLoaderData<typeof loader>() as {
+    const { user: ignoredUser, availableNpis, retryInitial, retryInitialDocs } = useLoaderData<typeof loader>() as {
         user: any
         availableNpis: Npi[]
         retryInitial: (Record<string, any> & { retrySubmissionId: string; docCount?: number }) | null
@@ -723,8 +727,8 @@ export default function NewSubmission() {
        Document UX + draft cache
        -------------------------- */
     const [dropErrors, setDropErrors] = React.useState<Record<number, string>>({})
-    const [docPicked, setDocPicked] = React.useState<Record<number, boolean>>({})
-    const [docFilled, setDocFilled] = React.useState<Record<number, boolean>>({})
+    const [ignoredDocPicked, setDocPicked] = React.useState<Record<number, boolean>>({})
+    const [ignoredDocFilled, setDocFilled] = React.useState<Record<number, boolean>>({})
     const [docSizes, setDocSizes] = React.useState<Record<number, number>>({})
     const [dzReset, setDzReset] = React.useState<Record<number, number>>({})
     const [initialFiles, setInitialFiles] = React.useState<Record<number, File | null>>({})
@@ -746,7 +750,7 @@ export default function NewSubmission() {
     })
 
     const totalSizeMB = React.useMemo(
-        () => Object.values(docSizes).reduce((a, b) => a + b, 0) / (1024 * 1024),
+        () => Object.values(docSizes).reduce((a, b) => a + b, 0) / BYTES_PER_MB,
         [docSizes],
     )
 
@@ -773,7 +777,6 @@ export default function NewSubmission() {
     }
 
     async function handlePick(idx: number, file: File) {
-        const BYTES_PER_MB = 1024 * 1024
         const mb = file.size / BYTES_PER_MB
         const isPdf = /\.pdf$/i.test(file.name)
 
@@ -781,12 +784,13 @@ export default function NewSubmission() {
             (sum, [k, v]) => sum + (Number(k) === idx ? 0 : v),
             0,
         )
-        const wouldBeTotalMB = (existingTotalBytes + file.size) / BYTES_PER_MB
+    const wouldBeTotalMB = (existingTotalBytes + file.size) / BYTES_PER_MB
 
-        let err = ''
-        if (!isPdf) err = 'PDF only'
-        else if (mb > 150) err = `This file is ${mb.toFixed(1)} MB — the per-file limit is 150 MB.`
-        else if (wouldBeTotalMB > 300) err = `Total selected would be ${wouldBeTotalMB.toFixed(1)} MB — the submission limit is 300 MB.`
+    let err = ''
+    const perFileLimit = perFileLimitFor((splitKind || 'manual') as 'manual' | 'auto')
+    if (!isPdf) err = 'PDF only'
+    else if (mb > perFileLimit) err = `This file is ${mb.toFixed(1)} MB — the per-file limit is ${perFileLimit} MB.`
+    else if (wouldBeTotalMB > MAX_TOTAL_MB) err = `Total selected would be ${wouldBeTotalMB.toFixed(1)} MB — the submission limit is ${MAX_TOTAL_MB} MB.`
         if (err) {
             window.alert(err)
             setDropErrors(prev => ({ ...prev, [idx]: err }))
@@ -1209,10 +1213,9 @@ export default function NewSubmission() {
                                         required
                                     >
                                         <option value="">Select</option>
-                                        <option value={1}>1</option>
-                                        <option value={3}>3</option>
-                                        <option value={4}>4</option>
-                                        <option value={5}>5</option>
+                                        {Array.from({ length: 99 }, (_, i) => i + 1).map(n => (
+                                            <option key={n} value={n}>{n}</option>
+                                        ))}
                                     </select>
                                     <p className="mt-1 text-xs text-gray-500">Each file will be uploaded separately in Step 3.</p>
                                 </div>
@@ -1225,9 +1228,9 @@ export default function NewSubmission() {
                         <div className="flex items-center justify-between mb-2">
                             <h3 className="text-base font-semibold text-gray-900">Document Metadata</h3>
                             <div className="flex items-center gap-2 text-xs">
-                <span className="inline-block rounded px-2 py-0.5 ring-1 ring-emerald-300 bg-emerald-50 text-emerald-700">
-                  Total: {totalSizeMB.toFixed(1)} / 300 MB
-                </span>
+                                <span className="inline-block rounded px-2 py-0.5 ring-1 ring-emerald-300 bg-emerald-50 text-emerald-700">
+                                    Total: {totalSizeMB.toFixed(1)} / {MAX_TOTAL_MB} MB
+                                </span>
                             </div>
                         </div>
 
@@ -1247,7 +1250,8 @@ export default function NewSubmission() {
                                             <FileDropzone
                                                 key={`dz-${i}-${dzReset[i] ?? 0}`}
                                                 label="Attach PDF (optional)"
-                                                note="Pre-check size (≤150 MB) and auto-fill filename/name. Actual upload happens in Step 3."
+                                                maxFileMB={perFileLimitFor((splitKind || 'manual') as 'manual' | 'auto')}
+                                                note={splitKind ? totalsNoteFor(splitKind as 'manual' | 'auto') : totalsNote}
                                                 onPick={file => handlePick(i, file)}
                                                 initialFile={initialFiles[i] ?? null}
                                             />
