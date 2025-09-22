@@ -3,7 +3,6 @@ import { Icon } from '#app/components/ui/icon.tsx'
 import { UserDropdown } from '#app/components/user-dropdown.tsx'
 import { INTEREX_ROLES } from '#app/utils/interex-roles.ts'
 import { type User } from '#app/utils/role-redirect.server.ts'
-import { useOptionalUser } from '#app/utils/user.ts'
 
 interface InterexHeaderProps {
     user: User
@@ -27,7 +26,6 @@ export function InterexHeader({
                                   hideBrandBar = false,
                               }: InterexHeaderProps) {
     const userRoles = user.roles.map(r => r.name)
-    const loggedInUser = useOptionalUser()
 
     const navItems: Array<{ name: string; href: string; icon: string; description: string }> = []
 

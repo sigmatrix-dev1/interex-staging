@@ -1,6 +1,5 @@
 // app/components/submission-activity-log.tsx
 import * as React from 'react'
-import { Icon } from '#app/components/ui/icon.tsx'
 
 type Event = {
     id: string
