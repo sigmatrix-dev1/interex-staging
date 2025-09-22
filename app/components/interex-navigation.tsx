@@ -23,9 +23,15 @@ export function InterexNavigation({ user, currentPath }: InterexNavigationProps)
             },
             {
                 name: 'Audit Logs',
-                href: '/admin/audit-logs',
+                    href: '/admin/audit-logs',
                 icon: 'file-text',
                 description: 'System audit trail',
+            },
+            {
+                name: 'Audit Maintenance',
+                href: '/admin/audit-maintenance',
+                icon: 'settings',
+                description: 'Verify chains & archive batches',
             },
             {
                 name: 'Provider & eMDR Management',

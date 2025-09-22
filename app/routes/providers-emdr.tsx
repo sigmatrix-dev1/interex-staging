@@ -15,6 +15,7 @@ import { JsonViewer } from '#app/components/json-view.tsx'
 import { Drawer } from '#app/components/ui/drawer.tsx'
 import { Icon } from '#app/components/ui/icon.tsx'
 import { LoadingOverlay } from '#app/components/ui/loading-overlay.tsx'
+import { audit } from '#app/services/audit.server.ts'
 import {
     pcgGetProviders,
     pcgUpdateProvider,
@@ -28,7 +29,6 @@ import { requireUserId } from '#app/utils/auth.server.ts'
 import { prisma } from '#app/utils/db.server.ts'
 import { INTEREX_ROLES } from '#app/utils/interex-roles.ts'
 import { useIsPending } from '#app/utils/misc.tsx'
-import { audit } from '#app/utils/audit.server.ts'
 
 type Row = PcgProviderListItem & {
     customerName: string | null
@@ -127,6 +127,33 @@ function buildUpdateFromRemote(r: PcgProviderListItem) {
     if (r.provider_zip !== undefined) u.providerZip = r.provider_zip ?? null
     if ((r as any).provider_id !== undefined) u.pcgProviderId = (r as any).provider_id ?? null
     return u
+}
+
+function writeAdminAudit(request: Request, user: { id: string; name?: string | null; customerId?: string | null; roles: { name: string }[] }, opts: {
+    action: string
+    success: boolean
+    message?: string | null
+    entityType?: string | null
+    entityId?: string | null
+    meta?: unknown
+}) {
+    const route = new URL(request.url).pathname
+    return audit.admin({
+        action: opts.action,
+        actorType: 'USER',
+        actorId: user.id,
+        actorDisplay: user.name || null,
+        customerId: user.customerId || null,
+        status: opts.success ? 'SUCCESS' : 'FAILURE',
+        entityType: opts.entityType || null,
+        entityId: opts.entityId || null,
+        summary: opts.message || null,
+        metadata: {
+            route,
+            roles: user.roles.map(r => r.name),
+            legacyMeta: opts.meta ?? undefined,
+        },
+    })
 }
 
 // Create or find the "System" customer for unassigned NPIs
@@ -465,17 +492,19 @@ export async function action({ request }: ActionFunctionArgs) {
         } catch (err: any) {
             pcgError = err?.message || 'Failed to fetch providers from PCG.'
         }
-        await audit({
-            request,
-            user: await prisma.user.findUnique({
-                where: { id: userId },
-                select: { id: true, email: true, name: true, roles: { select: { name: true } }, customerId: true },
-            }),
-            action: 'PCG_FETCH',
-            entityType: 'PROVIDER',
-            success: !pcgError,
-            message: pcgError ?? 'Fetched providers from PCG',
+        const fullUserFetch = await prisma.user.findUnique({
+            where: { id: userId },
+            select: { id: true, name: true, roles: { select: { name: true } }, customerId: true },
         })
+        if (fullUserFetch) {
+            await writeAdminAudit(request, fullUserFetch, {
+                action: 'PCG_FETCH',
+                entityType: 'PROVIDER',
+                success: !pcgError,
+                message: pcgError ?? 'Fetched providers from PCG',
+                meta: { error: pcgError || undefined },
+            })
+        }
 
         const { rows, storedUpdates } = await composeRows(where)
         return data({
@@ -549,20 +578,20 @@ export async function action({ request }: ActionFunctionArgs) {
         } catch (err: any) {
             pcgError = err?.message || 'Failed to update provider.'
         }
-        await audit({
-            request,
-            user: await prisma.user.findUnique({
-                where: { id: userId },
-                select: { id: true, email: true, name: true, roles: { select: { name: true } }, customerId: true },
-            }),
-            action: 'PROVIDER_UPDATE',
-            entityType: 'PROVIDER',
-            entityId: payload.provider_npi,
-            success: !pcgError,
-            message: pcgError ?? `Updated provider ${payload.provider_npi}`,
-            payload: { updateResponse },
-            meta: payload,
+        const fullUserUpd = await prisma.user.findUnique({
+            where: { id: userId },
+            select: { id: true, name: true, roles: { select: { name: true } }, customerId: true },
         })
+        if (fullUserUpd) {
+            await writeAdminAudit(request, fullUserUpd, {
+                action: 'PROVIDER_UPDATE',
+                entityType: 'PROVIDER',
+                entityId: payload.provider_npi,
+                success: !pcgError,
+                message: pcgError ?? `Updated provider ${payload.provider_npi}`,
+                meta: { error: pcgError || undefined, payload, updateResponse },
+            })
+        }
 
         const { rows, storedUpdates } = await composeRows(where)
         return data({
@@ -645,17 +674,19 @@ export async function action({ request }: ActionFunctionArgs) {
         }
 
         const { rows, storedUpdates } = await composeRows(where)
-        await audit({
-            request,
-            user: await prisma.user.findUnique({
-                where: { id: userId },
-                select: { id: true, email: true, name: true, roles: { select: { name: true } }, customerId: true },
-            }),
-            action: 'REG_FETCH',
-            entityType: 'PROVIDER',
-            success: true,
-            message: `Fetched registration details for ${Object.keys(regById).length} providers`,
+        const fullUserReg = await prisma.user.findUnique({
+            where: { id: userId },
+            select: { id: true, name: true, roles: { select: { name: true } }, customerId: true },
         })
+        if (fullUserReg) {
+            await writeAdminAudit(request, fullUserReg, {
+                action: 'REG_FETCH',
+                entityType: 'PROVIDER',
+                success: true,
+                message: `Fetched registration details for ${Object.keys(regById).length} providers`,
+                meta: { count: Object.keys(regById).length },
+            })
+        }
 
         return data({
             rows,
@@ -748,25 +779,25 @@ export async function action({ request }: ActionFunctionArgs) {
             },
             roleLabel: roleLabelFrom(roleNames),
         })
-        await audit({
-            request,
-            user: await prisma.user.findUnique({
-                where: { id: userId },
-                select: { id: true, email: true, name: true, roles: { select: { name: true } }, customerId: true },
-            }),
-            action:
-                intent === 'emdr-register'
-                    ? 'EMDR_REGISTER'
-                    : intent === 'emdr-deregister'
-                        ? 'EMDR_DEREGISTER'
-                        : 'EMDR_ELECTRONIC_ONLY',
-            entityType: 'PROVIDER',
-            entityId: providerNpi,
-            success: !pcgError,
-            message: pcgError ?? `eMDR action ${intent} for NPI ${providerNpi}`,
-            payload: { updateResponse, regById },
-            meta: { providerId, providerNpi },
+        const fullUserEmdr = await prisma.user.findUnique({
+            where: { id: userId },
+            select: { id: true, name: true, roles: { select: { name: true } }, customerId: true },
         })
+        if (fullUserEmdr) {
+            await writeAdminAudit(request, fullUserEmdr, {
+                action:
+                    intent === 'emdr-register'
+                        ? 'EMDR_REGISTER'
+                        : intent === 'emdr-deregister'
+                            ? 'EMDR_DEREGISTER'
+                            : 'EMDR_ELECTRONIC_ONLY',
+                entityType: 'PROVIDER',
+                entityId: providerNpi,
+                success: !pcgError,
+                message: pcgError ?? `eMDR action ${intent} for NPI ${providerNpi}`,
+                meta: { providerId, providerNpi, error: pcgError || undefined },
+            })
+        }
         return result
     }
 
@@ -1181,12 +1212,7 @@ export default function ProvidersEmdrScopedPage() {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [actionData])
 
-    function ActionResponseCell({ r }: { r: Row }) {
-        const actionJson = lastUpdatedNpi === r.providerNPI ? lastUpdateResponse : undefined
-        const persistedJson = persistedMap.get(r.providerNPI)
-        const jsonToShow = actionJson ?? persistedJson ?? null
-        return jsonToShow ? <JsonViewer data={jsonToShow} /> : <span className="text-gray-400">—</span>
-    }
+    // Removed unused ActionResponseCell (legacy debugging component)
 
     function RegStatusPill({ r, reg }: { r: Row; reg?: RegResp }) {
         const val = reg?.reg_status ?? r.reg_status

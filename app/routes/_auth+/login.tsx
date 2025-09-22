@@ -4,24 +4,18 @@ import { getFormProps, getInputProps, useForm } from '@conform-to/react'
 import { getZodConstraint, parseWithZod } from '@conform-to/zod'
 import { EyeIcon, EyeSlashIcon } from '@heroicons/react/24/outline'
 import { type SEOHandle } from '@nasa-gcn/remix-seo'
-import { startAuthentication } from '@simplewebauthn/browser'
-import { useOptimistic, useState, useTransition } from 'react'
-import { data, Form, Link, redirect, useNavigate, useSearchParams } from 'react-router'
+import { useState } from 'react'
+import { data, Form, Link, redirect, useSearchParams } from 'react-router'
 import { HoneypotInputs } from 'remix-utils/honeypot/react'
 import { z } from 'zod'
 import { GeneralErrorBoundary } from '#app/components/error-boundary.tsx'
 import { CheckboxField, ErrorList, Field } from '#app/components/forms.tsx'
 import { Spacer } from '#app/components/spacer.tsx'
-import { Icon } from '#app/components/ui/icon.tsx'
 import { StatusButton } from '#app/components/ui/status-button.tsx'
 import { login, requireAnonymous } from '#app/utils/auth.server.ts'
 import { prisma } from '#app/utils/db.server.ts'
-import {
-	ProviderConnectionForm,
-	providerNames,
-} from '#app/utils/connections.tsx'
 import { checkHoneypot } from '#app/utils/honeypot.server.ts'
-import { getErrorMessage, useIsPending } from '#app/utils/misc.tsx'
+import { useIsPending } from '#app/utils/misc.tsx'
 import { PasswordSchema, UsernameSchema } from '#app/utils/user-validation.ts'
 import { handleNewSession } from './login.server.ts'
 
@@ -37,9 +31,7 @@ const LoginFormSchema = z.object({
 	remember: z.boolean().optional(),
 })
 
-const AuthenticationOptionsSchema = z.object({
-	options: z.object({ challenge: z.string() }),
-}) satisfies z.ZodType<{ options: PublicKeyCredentialRequestOptionsJSON }>
+// Passkey auth temporarily removed pending re-introduction with updated UX
 
 export async function loader({ request }: { request: Request }) {
 	await requireAnonymous(request)
@@ -55,7 +47,7 @@ export async function action({ request }: { request: Request }) {
 			LoginFormSchema.transform(async (data, ctx) => {
 				if (intent !== null) return { ...data, session: null }
 
-				const session = await login(data)
+				const session = await login(request, data)
 				if (!session) {
 					ctx.addIssue({
 						code: z.ZodIssueCode.custom,
@@ -234,93 +226,7 @@ export default function LoginPage({ actionData }: { actionData: any }) {
 	)
 }
 
-const VerificationResponseSchema = z.discriminatedUnion('status', [
-	z.object({
-		status: z.literal('success'),
-		location: z.string(),
-	}),
-	z.object({
-		status: z.literal('error'),
-		error: z.string(),
-	}),
-])
-
-function PasskeyLogin({
-						  redirectTo,
-						  remember,
-					  }: {
-	redirectTo: string | null
-	remember: boolean
-}) {
-	const [isPending] = useTransition()
-	const [error, setError] = useState<string | null>(null)
-	const [passkeyMessage, setPasskeyMessage] = useOptimistic<string | null>(
-		'Login with a passkey',
-	)
-	const navigate = useNavigate()
-
-	async function handlePasskeyLogin() {
-		try {
-			setPasskeyMessage('Generating Authentication Options')
-			// Get authentication options from the server
-			const optionsResponse = await fetch('/webauthn/authentication')
-			const json = await optionsResponse.json()
-			const { options } = AuthenticationOptionsSchema.parse(json)
-
-			setPasskeyMessage('Requesting your authorization')
-			const authResponse = await startAuthentication({ optionsJSON: options })
-			setPasskeyMessage('Verifying your passkey')
-
-			// Verify the authentication with the server
-			const verificationResponse = await fetch('/webauthn/authentication', {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ authResponse, remember, redirectTo }),
-			})
-
-			const verificationJson = await verificationResponse.json().catch(() => ({
-				status: 'error',
-				error: 'Unknown error',
-			}))
-
-			const parsedResult =
-				VerificationResponseSchema.safeParse(verificationJson)
-			if (!parsedResult.success) {
-				throw new Error(parsedResult.error.message)
-			} else if (parsedResult.data.status === 'error') {
-				throw new Error(parsedResult.data.error)
-			}
-			const { location } = parsedResult.data
-
-			setPasskeyMessage("You're logged in! Navigating...")
-			await navigate(location ?? '/')
-		} catch (e) {
-			const errorMessage = getErrorMessage(e)
-			setError(`Failed to authenticate with passkey: ${errorMessage}`)
-		}
-	}
-
-	return (
-		<form action={handlePasskeyLogin}>
-			<StatusButton
-				id="passkey-login-button"
-				aria-describedby="passkey-login-button-error"
-				className="w-full"
-				status={isPending ? 'pending' : error ? 'error' : 'idle'}
-				type="submit"
-				disabled={isPending}
-			>
-				<span className="inline-flex items-center gap-1.5">
-					<Icon name="passkey" />
-					<span>{passkeyMessage}</span>
-				</span>
-			</StatusButton>
-			<div className="mt-2">
-				<ErrorList errors={[error]} id="passkey-login-button-error" />
-			</div>
-		</form>
-	)
-}
+// (passkey response schema removed with temporary passkey UI removal)
 
 export const meta = () => {
 	return [{ title: 'Login to Interex' }]

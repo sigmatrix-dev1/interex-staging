@@ -241,6 +241,122 @@ model ProviderGroup {
   @@index([customerId])
 }
 
+// =============================================
+// New Normalized Audit Infrastructure (phase 1)
+// =============================================
+
+enum AuditCategory {
+  AUTH
+  SUBMISSION
+  DOCUMENT
+  USER_ROLE
+  TENANT_CFG
+  INTEGRATION
+  SECURITY
+  ADMIN
+  SYSTEM
+  ERROR
+}
+
+enum AuditActorType {
+  USER
+  SYSTEM
+  SERVICE
+}
+
+enum AuditStatus {
+  SUCCESS
+  FAILURE
+  INFO
+  WARNING
+}
+
+model AuditEvent {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+
+  chainKey String
+  seq      Int
+  hashPrev String?
+  hashSelf String
+
+  actorType      AuditActorType
+  actorId        String?
+  actorDisplay   String?
+  actorIp        String?
+  actorUserAgent String?
+
+  customerId String?
+
+  category AuditCategory
+  action   String
+  status   AuditStatus @default(SUCCESS)
+
+  entityType String?
+  entityId   String?
+
+  requestId String?
+  traceId   String?
+  spanId    String?
+
+  summary String?
+  message String?
+
+  metadata String? // canonical JSON (<=2KB)
+  diff     String? // canonical JSON (<=4KB)
+  phi      Boolean @default(false)
+
+  reserved1 String?
+  reserved2 String?
+
+  @@index([createdAt])
+  @@index([chainKey, seq])
+  @@index([category, createdAt])
+  @@index([actorId, createdAt])
+  @@index([customerId, createdAt])
+  @@index([requestId, createdAt])
+  @@index([entityType, entityId])
+}
+
+model AuditEventArchive {
+  id        String   @id @default(cuid())
+  createdAt DateTime
+
+  chainKey String
+  seq      Int
+  hashPrev String?
+  hashSelf String
+
+  actorType      AuditActorType
+  actorId        String?
+  actorDisplay   String?
+  actorIp        String?
+  actorUserAgent String?
+
+  customerId String?
+
+  category AuditCategory
+  action   String
+  status   AuditStatus
+
+  entityType String?
+  entityId   String?
+
+  requestId String?
+  traceId   String?
+  spanId    String?
+
+  summary String?
+  message String?
+
+  metadata String?
+  diff     String?
+  phi      Boolean @default(false)
+
+  reserved1 String?
+  reserved2 String?
+}
+
 model Provider {
   id     String  @id @default(cuid())
   npi    String  @unique
@@ -694,55 +810,6 @@ model PostpayOtherLetter {
   @@index([letterDate])
 }
 
-// ============================
-// Audit Log
-// ============================
-model AuditLog {
-  id        String   @id @default(cuid())
-  createdAt DateTime @default(now())
-
-  // who
-  userId    String?
-  userEmail String?
-  userName  String?
-  rolesCsv  String?
-
-  // scope
-  customerId String?
-
-  // what
-  action     String
-  entityType String?
-  entityId   String?
-
-  // request context
-  route     String?
-  ip        String?
-  userAgent String?
-  requestId String? // NEW
-  traceId   String? // NEW
-  spanId    String? // NEW
-
-  // result
-  success Boolean @default(true)
-  message String?
-
-  // integrity / diffs (optional but useful)
-  beforeHash String? // NEW
-  afterHash  String? // NEW
-  prevHash   String? // NEW (for hash-chain)
-
-  // raw payloads (kept small)
-  meta    Json?
-  payload Json?
-
-  @@index([createdAt])
-  @@index([action, createdAt])
-  @@index([entityType, entityId])
-  @@index([userId, createdAt])
-  @@index([customerId, createdAt])
-  @@index([requestId, createdAt]) // NEW
-}
 
 model AppLog {
   id        String   @id @default(cuid())

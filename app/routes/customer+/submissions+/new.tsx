@@ -53,10 +53,12 @@ import {
     recipientsFor,
     recipientHelperLabel,
 } from '#app/domain/submission-enums.ts'
+import { audit } from '#app/services/audit.server.ts'
 import { buildCreateSubmissionPayload, pcgCreateSubmission, pcgGetStatus } from '#app/services/pcg-hih.server.ts'
 import { requireUserId } from '#app/utils/auth.server.ts'
 import { prisma } from '#app/utils/db.server.ts'
 import { draftKey, getCachedFile, setCachedFile } from '#app/utils/file-cache.ts'
+import { extractRequestContext } from '#app/utils/request-context.server.ts'
 import { redirectWithToast } from '#app/utils/toast.server.ts'
 import { BYTES_PER_MB, MAX_TOTAL_MB, totalsNote, totalsNoteFor, perFileLimitFor } from '#app/utils/upload-constraints.ts'
 
@@ -453,6 +455,7 @@ export async function action({ request }: ActionFunctionArgs) {
     // Retry Flow — Update row then re-create
     // ======================================
     if (retrySubmissionId) {
+        const ctx = await extractRequestContext(request, { requireUser: false })
         const existing = await prisma.submission.findUnique({ where: { id: retrySubmissionId } })
         if (!existing) {
             return data({ result: parsed.reply({ formErrors: ['Retry submission not found'] }) }, { status: 404 })
@@ -477,6 +480,30 @@ export async function action({ request }: ActionFunctionArgs) {
             },
         })
 
+        // Audit: submission metadata updated (retry attempt)
+        try {
+            await audit.submission({
+                action: 'SUBMISSION_UPDATED',
+                actorType: 'USER',
+                actorId: userId,
+                customerId: existing.customerId,
+                entityType: 'SUBMISSION',
+                entityId: retrySubmissionId,
+                requestId: ctx.requestId,
+                traceId: ctx.traceId,
+                spanId: ctx.spanId,
+                summary: 'Submission metadata updated for retry',
+                metadata: {
+                    providerId,
+                    purposeOfSubmission,
+                    autoSplit,
+                    sendInX12,
+                    threshold,
+                    retry: true,
+                },
+            })
+        } catch {}
+
         // Audit the payload we’re about to send
         await prisma.submissionEvent.create({
             data: {
@@ -495,6 +522,23 @@ export async function action({ request }: ActionFunctionArgs) {
                 where: { id: retrySubmissionId },
                 data: { pcgSubmissionId: pcgResp.submission_id, responseMessage: 'Draft', status: 'DRAFT' },
             })
+
+            // Audit: submission status updated to DRAFT after PCG create
+            try {
+                await audit.submission({
+                    action: 'STATUS_UPDATED',
+                    actorType: 'USER',
+                    actorId: userId,
+                    customerId: existing.customerId,
+                    entityType: 'SUBMISSION',
+                    entityId: retrySubmissionId,
+                    requestId: ctx.requestId,
+                    traceId: ctx.traceId,
+                    spanId: ctx.spanId,
+                    summary: 'Submission status set to DRAFT after retry create',
+                    metadata: { status: 'DRAFT', pcgSubmissionId: pcgResp.submission_id },
+                })
+            } catch {}
 
             await prisma.submissionEvent.create({
                 data: {
@@ -531,6 +575,24 @@ export async function action({ request }: ActionFunctionArgs) {
                 },
             })
 
+            // Audit: submission create error (retry)
+            try {
+                await audit.submission({
+                    action: 'SUBMISSION_CREATE_ERROR',
+                    actorType: 'USER',
+                    actorId: userId,
+                    customerId: existing.customerId,
+                    entityType: 'SUBMISSION',
+                    entityId: retrySubmissionId,
+                    requestId: ctx.requestId,
+                    traceId: ctx.traceId,
+                    spanId: ctx.spanId,
+                    status: 'FAILURE',
+                    summary: 'Submission create retry failed',
+                    message: e?.message?.toString?.() ?? 'Create failed',
+                })
+            } catch {}
+
             return await redirectWithToast(`/customer/submissions`, {
                 type: 'error',
                 title: 'Create Failed',
@@ -542,6 +604,7 @@ export async function action({ request }: ActionFunctionArgs) {
     // ==========================
     // Normal Flow — First create
     // ==========================
+    const ctx = await extractRequestContext(request, { requireUser: false })
     const newSubmission = await prisma.submission.create({
         data: {
             title,
@@ -561,6 +624,30 @@ export async function action({ request }: ActionFunctionArgs) {
         },
     })
 
+    // Audit: submission created (local draft)
+    try {
+        await audit.submission({
+            action: 'SUBMISSION_CREATED',
+            actorType: 'USER',
+            actorId: userId,
+            customerId: newSubmission.customerId,
+            entityType: 'SUBMISSION',
+            entityId: newSubmission.id,
+            requestId: ctx.requestId,
+            traceId: ctx.traceId,
+            spanId: ctx.spanId,
+            summary: 'Submission draft created',
+            metadata: {
+                providerId,
+                purposeOfSubmission,
+                autoSplit,
+                sendInX12,
+                threshold,
+                documentCount: documents.length,
+            },
+        })
+    } catch {}
+
     // Audit local draft creation (payload we’re about to send to PCG)
     await prisma.submissionEvent.create({
         data: {
@@ -579,6 +666,23 @@ export async function action({ request }: ActionFunctionArgs) {
             where: { id: newSubmission.id },
             data: { pcgSubmissionId: pcgResp.submission_id, responseMessage: 'Draft', status: 'DRAFT' },
         })
+
+        // Audit: status updated to DRAFT after remote create
+        try {
+            await audit.submission({
+                action: 'STATUS_UPDATED',
+                actorType: 'USER',
+                actorId: userId,
+                customerId: newSubmission.customerId,
+                entityType: 'SUBMISSION',
+                entityId: newSubmission.id,
+                requestId: ctx.requestId,
+                traceId: ctx.traceId,
+                spanId: ctx.spanId,
+                summary: 'Submission status DRAFT after remote create',
+                metadata: { status: 'DRAFT', pcgSubmissionId: pcgResp.submission_id },
+            })
+        } catch {}
 
         await prisma.submissionEvent.create({
             data: {
@@ -614,6 +718,24 @@ export async function action({ request }: ActionFunctionArgs) {
                 message: e?.message?.toString?.() ?? 'Create failed',
             },
         })
+
+        // Audit: submission create error
+        try {
+            await audit.submission({
+                action: 'SUBMISSION_CREATE_ERROR',
+                actorType: 'USER',
+                actorId: userId,
+                customerId: newSubmission.customerId,
+                entityType: 'SUBMISSION',
+                entityId: newSubmission.id,
+                requestId: ctx.requestId,
+                traceId: ctx.traceId,
+                spanId: ctx.spanId,
+                status: 'FAILURE',
+                summary: 'Submission create failed',
+                message: e?.message?.toString?.() ?? 'Create failed',
+            })
+        } catch {}
 
         return await redirectWithToast(`/customer/submissions`, {
             type: 'error',

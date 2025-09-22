@@ -22,9 +22,9 @@ import { Drawer } from '#app/components/ui/drawer.tsx'
 import { Icon } from '#app/components/ui/icon.tsx'
 import { LoadingOverlay } from '#app/components/ui/loading-overlay.tsx'
 import { StatusButton } from '#app/components/ui/status-button.tsx'
+import { audit as auditEvent } from '#app/services/audit.server.ts'
 import { INTEREX_ROLES } from '#app/utils/interex-roles.ts'
 import { useIsPending } from '#app/utils/misc.tsx'
-import type { Prisma } from '@prisma/client'
 
 /** Helper: append a provider event (audit) — server-only import inside */
 async function logProviderEvent(input: {
@@ -56,7 +56,7 @@ async function logProviderEvent(input: {
     })
 }
 
-/** Centralized audit log writer */
+// Shim for legacy audit calls inside this route; maps to AuditEvent.ADMIN category.
 async function writeAudit(input: {
     userId: string
     userEmail?: string | null
@@ -73,27 +73,30 @@ async function writeAudit(input: {
     success: boolean
     message?: string | null
     route?: string
-    meta?: Prisma.InputJsonValue | null
-    payload?: Prisma.InputJsonValue | null
+                meta?: unknown | null
+                payload?: unknown | null
 }) {
-    const { prisma } = await import('#app/utils/db.server.ts')
-    await prisma.auditLog.create({
-        data: {
-            userId: input.userId,
-            userEmail: input.userEmail ?? null,
-            userName: input.userName ?? null,
-            rolesCsv: input.rolesCsv,
-            customerId: input.customerId,
+    try {
+        await auditEvent.admin({
             action: input.action,
+            status: input.success ? 'SUCCESS' : 'FAILURE',
+            actorType: 'USER',
+            actorId: input.userId,
+            actorDisplay: input.userName || input.userEmail || null,
+            customerId: input.customerId,
             entityType: 'PROVIDER',
             entityId: input.entityId ?? null,
-            route: input.route ?? '/customer/provider-npis',
-            success: input.success,
-            message: input.message ?? null,
-            meta: (input.meta ?? {}) as Prisma.InputJsonValue,
-            payload: (input.payload ?? {}) as Prisma.InputJsonValue,
-        },
-    })
+            summary: input.message || null,
+            metadata: {
+                rolesCsv: input.rolesCsv,
+                route: input.route ?? '/customer/provider-npis',
+                meta: input.meta ?? undefined,
+                payload: input.payload ?? undefined,
+            },
+        })
+    } catch {
+        // swallow like legacy
+    }
 }
 
 const CreateProviderSchema = z.object({
@@ -164,7 +167,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
     const userRoles = user.roles.map(r => r.name)
     const isCustomerAdmin = userRoles.includes(INTEREX_ROLES.CUSTOMER_ADMIN)
     const isProviderGroupAdmin = userRoles.includes(INTEREX_ROLES.PROVIDER_GROUP_ADMIN)
-    const isBasicUser = userRoles.includes(INTEREX_ROLES.BASIC_USER)
+    const /* unused (logic retained for possible future scope checks) */ isBasicUser = userRoles.includes(INTEREX_ROLES.BASIC_USER)
 
     if (isProviderGroupAdmin && !isCustomerAdmin && !user.providerGroupId) {
         throw new Response('Provider group admin must be assigned to a provider group', { status: 400 })
@@ -225,7 +228,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
 
     const { toast, headers } = await getToast(request)
     return data(
-        { user, customer, searchParams, toast, events, isCustomerAdmin, isProviderGroupAdmin, isBasicUser },
+        { user, customer, searchParams, toast, events, isCustomerAdmin, isProviderGroupAdmin },
         { headers: headers ?? undefined },
     )
 }
@@ -265,7 +268,6 @@ export async function action({ request }: ActionFunctionArgs) {
     const rolesCsv = userRoles.join(',')
     const isCustomerAdmin = userRoles.includes(INTEREX_ROLES.CUSTOMER_ADMIN)
     const isProviderGroupAdmin = userRoles.includes(INTEREX_ROLES.PROVIDER_GROUP_ADMIN)
-    const isBasicUser = userRoles.includes(INTEREX_ROLES.BASIC_USER)
     if (isProviderGroupAdmin && !isCustomerAdmin && !user.providerGroupId) {
         throw new Response('Provider group admin must be assigned to a provider group', { status: 400 })
     }
@@ -692,7 +694,7 @@ export async function action({ request }: ActionFunctionArgs) {
 }
 
 export default function CustomerProviderNpiPage() {
-    const { user, customer, searchParams, toast, events, isCustomerAdmin, isProviderGroupAdmin, isBasicUser } =
+    const { user, customer, searchParams, toast, events, isCustomerAdmin, isProviderGroupAdmin } =
         useLoaderData<typeof loader>()
     const [urlSearchParams, setUrlSearchParams] = useSearchParams()
     const isPending = useIsPending()

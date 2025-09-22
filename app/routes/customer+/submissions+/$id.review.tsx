@@ -55,10 +55,12 @@ import {
     getRecipientByOid,
     categoryForOid,
 } from '#app/domain/submission-enums.ts'
+import { audit } from '#app/services/audit.server.ts'
 import { buildCreateSubmissionPayload, pcgUpdateSubmission, pcgGetStatus } from '#app/services/pcg-hih.server.ts'
 import { requireUserId } from '#app/utils/auth.server.ts'
 import { prisma } from '#app/utils/db.server.ts'
 import { draftKey, moveCachedFile, subKey, getCachedFile, setCachedFile } from '#app/utils/file-cache.ts'
+import { extractRequestContext } from '#app/utils/request-context.server.ts'
 import { redirectWithToast } from '#app/utils/toast.server.ts'
 import { BYTES_PER_MB, MAX_TOTAL_MB, totalsNoteFor, perFileLimitFor } from '#app/utils/upload-constraints.ts'
 
@@ -459,6 +461,7 @@ export async function action({ request }: ActionFunctionArgs) {
         })),
     })
 
+    const ctx = await extractRequestContext(request, { requireUser: false })
     try {
         // Push update to PCG
         const resp = await pcgUpdateSubmission(submission.pcgSubmissionId, pcgPayload)
@@ -503,46 +506,41 @@ export async function action({ request }: ActionFunctionArgs) {
         // We redirect back to the review route where the loader
         // calls applyStatusToDb() once. This avoids duplicate PCG_STATUS events.
 
-        // Audit log (success) with changed fields diff (best-effort)
+        // Audit: submission updated with diff (best-effort)
         try {
             const prev: Record<string, unknown> | null = (() => {
                 if (!v?._initial_json) return null
-                try {
-                    return JSON.parse(v._initial_json) as Record<string, unknown>
-                } catch {
-                    return null
-                }
+                try { return JSON.parse(v._initial_json) as Record<string, unknown> } catch { return null }
             })()
             const changed: string[] = []
             if (prev) {
-                const keys = [
-                    'title','authorType','purposeOfSubmission','recipient',
-                    'providerId','claimId','caseId','comments','autoSplit','sendInX12','threshold'
-                ]
+                const keys = ['title','authorType','purposeOfSubmission','recipient','providerId','claimId','caseId','comments','autoSplit','sendInX12','threshold']
                 for (const k of keys) {
                     const beforeVal = String((prev as Record<string, unknown>)[k] ?? '')
-                    const afterVal  = String((k === 'authorType'
-                        ? (v.authorType === 'institutional' ? 'Institutional' : 'Individual')
-                        : v[k]) ?? '')
+                    const afterVal = String((k === 'authorType' ? (v.authorType === 'institutional' ? 'Institutional' : 'Individual') : v[k]) ?? '')
                     if (beforeVal !== afterVal) changed.push(k)
                 }
             }
-
-            await prisma.auditLog.create({
-                data: {
-                    userId: user.id,
-                    userEmail: user.email ?? null,
-                    userName: user.name ?? null,
-                    rolesCsv: user.roles.map(r => r.name).join(','),
-                    customerId: submission.customerId ?? null,
-                    action: 'SUBMISSION_UPDATE',
-                    entityType: 'SUBMISSION',
-                    entityId: v.submissionId,
-                    route: '/customer/submissions/:id/review',
-                    success: true,
-                    message: 'Submission metadata updated',
-                    meta: { pcgSubmissionId: submission.pcgSubmissionId, changed },
-                    payload: pcgPayload,
+            await audit.submission({
+                action: 'SUBMISSION_UPDATED',
+                actorType: 'USER',
+                actorId: userId,
+                customerId: submission.customerId ?? undefined,
+                entityType: 'SUBMISSION',
+                entityId: v.submissionId,
+                requestId: ctx.requestId,
+                traceId: ctx.traceId,
+                spanId: ctx.spanId,
+                summary: 'Submission metadata updated',
+                metadata: {
+                    pcgSubmissionId: submission.pcgSubmissionId,
+                    changed,
+                    providerId: v.providerId,
+                    purposeOfSubmission: v.purposeOfSubmission,
+                    autoSplit: v.autoSplit,
+                    sendInX12: v.sendInX12,
+                    threshold: v.threshold,
+                    documentCount: documents.length,
                 },
             })
         } catch {}
@@ -558,25 +556,22 @@ export async function action({ request }: ActionFunctionArgs) {
         await prisma.submissionEvent.create({
             data: { submissionId: v.submissionId, kind: 'PCG_UPDATE_ERROR', message: e?.message?.toString?.() ?? 'Update failed' },
         })
-
-        // Audit log (failure)
+        // Audit: submission update error
         try {
-            await prisma.auditLog.create({
-                data: {
-                    userId: user.id,
-                    userEmail: user.email ?? null,
-                    userName: user.name ?? null,
-                    rolesCsv: user.roles.map(r => r.name).join(','),
-                    customerId: submission.customerId ?? null,
-                    action: 'SUBMISSION_UPDATE',
-                    entityType: 'SUBMISSION',
-                    entityId: v.submissionId,
-                    route: '/customer/submissions/:id/review',
-                    success: false,
-                    message: e?.message?.toString?.() ?? 'Update failed',
-                    meta: { pcgSubmissionId: submission.pcgSubmissionId },
-                    payload: pcgPayload,
-                },
+            await audit.submission({
+                action: 'SUBMISSION_UPDATE_ERROR',
+                actorType: 'USER',
+                actorId: userId,
+                customerId: submission.customerId ?? undefined,
+                entityType: 'SUBMISSION',
+                entityId: v.submissionId,
+                requestId: ctx.requestId,
+                traceId: ctx.traceId,
+                spanId: ctx.spanId,
+                status: 'FAILURE',
+                summary: 'Submission metadata update failed',
+                message: e?.message?.toString?.() ?? 'Update failed',
+                metadata: { pcgSubmissionId: submission.pcgSubmissionId },
             })
         } catch {}
 

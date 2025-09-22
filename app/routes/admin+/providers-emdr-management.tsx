@@ -1,6 +1,6 @@
 // app/routes/admin/providers-emdr-management.tsx
 
-import  { type Prisma } from '@prisma/client'
+import { type Prisma } from '@prisma/client'
 import * as React from 'react'
 import { createPortal } from 'react-dom'
 import {
@@ -17,6 +17,7 @@ import { JsonViewer } from '#app/components/json-view.tsx'
 import { Drawer } from '#app/components/ui/drawer.tsx'
 import { Icon } from '#app/components/ui/icon.tsx'
 import { LoadingOverlay } from '#app/components/ui/loading-overlay.tsx'
+import { audit as auditEvent } from '#app/services/audit.server.ts'
 import {
     pcgGetProviders,
     pcgUpdateProvider,
@@ -70,23 +71,27 @@ async function writeAudit(input: {
     meta?: Prisma.InputJsonValue | null
     payload?: Prisma.InputJsonValue | null
 }) {
-    await prisma.auditLog.create({
-        data: {
-            userId: input.userId,
-            userEmail: input.userEmail ?? null,
-            userName: input.userName ?? null,
-            rolesCsv: input.rolesCsv,
-            customerId: input.customerId ?? null,
+    try {
+        await auditEvent.admin({
             action: input.action,
+            status: input.success ? 'SUCCESS' : 'FAILURE',
+            actorType: 'USER',
+            actorId: input.userId,
+            actorDisplay: input.userName || input.userEmail || null,
+            customerId: input.customerId,
             entityType: input.entityType,
             entityId: input.entityId ?? null,
-            route: input.route ?? '/admin/providers-emdr-management',
-            success: input.success,
-            message: input.message ?? null,
-            meta: (input.meta ?? {}) as Prisma.InputJsonValue,
-            payload: (input.payload ?? {}) as Prisma.InputJsonValue,
-        },
-    })
+            summary: input.message ?? null,
+            metadata: {
+                rolesCsv: input.rolesCsv,
+                route: input.route ?? '/admin/providers-emdr-management',
+                meta: input.meta ?? undefined,
+                payload: input.payload ?? undefined,
+            },
+        })
+    } catch {
+        // swallow just like legacy implementation
+    }
 }
 
 /* ------------------------ Helpers (server) ------------------------ */
@@ -962,14 +967,6 @@ type LastActionSignal = {
     at: string
 }
 
-type StatusChange = {
-    split_number?: string
-    time?: string
-    title?: string
-    esmd_transaction_id?: string | null
-    status?: string
-    [k: string]: any
-}
 
 type ActionSuccess = {
     rows: Row[]
@@ -1372,12 +1369,6 @@ export default function ProviderManagementPage() {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [actionData])
 
-    function ActionResponseCell({ r }: { r: Row }) {
-        const actionJson = lastUpdatedNpi === r.providerNPI ? lastUpdateResponse : undefined
-        const persistedJson = persistedMap.get(r.providerNPI)
-        const jsonToShow = actionJson ?? persistedJson ?? null
-        return jsonToShow ? <JsonViewer data={jsonToShow} /> : <span className="text-gray-400">—</span>
-    }
 
     function RegStatusPill({ r, reg }: { r: Row; reg?: RegResp }) {
         const val = reg?.reg_status ?? r.reg_status
@@ -1412,15 +1403,7 @@ export default function ProviderManagementPage() {
         return { has, payload }
     }
 
-    async function copyErrorJSON() {
-        try {
-            if (errorPopover.data) {
-                await navigator.clipboard.writeText(JSON.stringify(errorPopover.data, null, 2))
-            }
-        } catch {
-            /* ignore */
-        }
-    }
+    // (Removed unused helpers after audit migration cleanup)
 
     const hasEmdrPrereqs = (r: Row) =>
         Boolean((r.provider_name ?? '').trim() && (r.provider_street ?? '').trim() && (r.provider_city ?? '').trim() && (r.provider_state ?? '').trim() && (r.provider_zip ?? '').trim())

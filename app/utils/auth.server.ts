@@ -6,6 +6,8 @@ import bcrypt from 'bcryptjs'
 import { redirect } from 'react-router'
 import { Authenticator } from 'remix-auth'
 import { safeRedirect } from 'remix-utils/safe-redirect'
+import { audit } from '#app/services/audit.server.ts'
+import { extractRequestContext } from '#app/utils/request-context.server.ts'
 import { providers } from './connections.server.ts'
 import { prisma } from './db.server.ts'
 import { combineHeaders, downloadFile } from './misc.tsx'
@@ -94,22 +96,60 @@ export async function requireAnonymous(request: Request) {
     }
 }
 
-export async function login({
-                                username,
-                                password,
-                            }: {
-    username: User['username']
-    password: string
-}) {
-    const user = await verifyUserPassword({ username }, password)
-    if (!user) return null
+export async function login(
+    request: Request,
+    {
+        username,
+        password,
+    }: {
+        username: User['username']
+        password: string
+    },
+) {
+    // Defensive runtime guard: ensure function invoked with correct arguments.
+    if (!(request instanceof Request)) {
+        throw new Error('login(request, { username, password }) called without a valid Request object')
+    }
+    const ctx = await extractRequestContext(request, { requireUser: false })
+    const verified = await verifyUserPassword({ username }, password)
+    if (!verified) {
+        // differentiate reason: user missing/inactive vs bad password is not exposed directly here
+        await audit.auth({
+            action: 'LOGIN_FAILURE',
+            actorType: 'USER',
+            actorId: undefined,
+            actorDisplay: username,
+            customerId: null,
+            requestId: ctx.requestId,
+            traceId: ctx.traceId,
+            spanId: ctx.spanId,
+            metadata: { username, reason: 'INVALID_CREDENTIALS' },
+            summary: 'Login failed',
+            status: 'FAILURE',
+        })
+        return null
+    }
 
     const session = await prisma.session.create({
         select: { id: true, expirationDate: true, userId: true },
         data: {
             expirationDate: getSessionExpirationDate(),
-            userId: user.id,
+            userId: verified.id,
         },
+    })
+
+    await audit.auth({
+        action: 'LOGIN_SUCCESS',
+        actorType: 'USER',
+        actorId: verified.id,
+        actorDisplay: username,
+        customerId: ctx.customerId ?? null,
+        requestId: ctx.requestId,
+        traceId: ctx.traceId,
+        spanId: ctx.spanId,
+        metadata: { username, sessionId: session.id },
+        summary: 'Login successful',
+        status: 'SUCCESS',
     })
     return session
 }
@@ -232,13 +272,35 @@ export async function logout(
     },
     responseInit?: ResponseInit,
 ) {
+    const ctx = await extractRequestContext(request, { requireUser: false })
     const authSession = await authSessionStorage.getSession(
         request.headers.get('cookie'),
     )
     const sessionId = authSession.get(sessionKey)
+    let actorId: string | undefined
     if (sessionId) {
+        const session = await prisma.session.findUnique({
+            where: { id: sessionId },
+            select: { userId: true },
+        })
+        actorId = session?.userId || undefined
         void prisma.session.deleteMany({ where: { id: sessionId } }).catch(() => {})
     }
+
+    await audit.auth({
+        action: 'LOGOUT',
+        actorType: 'USER',
+        actorId: actorId,
+        actorDisplay: ctx.actorDisplay,
+        customerId: ctx.customerId ?? null,
+        requestId: ctx.requestId,
+        traceId: ctx.traceId,
+        spanId: ctx.spanId,
+        metadata: { sessionId, redirectTo },
+        summary: 'User logout',
+        status: 'SUCCESS',
+    })
+
     throw redirect(safeRedirect(redirectTo), {
         ...responseInit,
         headers: combineHeaders(

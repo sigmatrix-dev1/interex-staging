@@ -12,17 +12,42 @@ import {
 import { InterexLayout } from '#app/components/interex-layout.tsx'
 import { Icon } from '#app/components/ui/icon.tsx'
 import { LoadingOverlay } from '#app/components/ui/loading-overlay.tsx'
+import { audit } from '#app/services/audit.server.ts'
 import { syncLetters } from '#app/services/letters.server.ts'
+import { pcgDownloadEmdrLetterFile } from '#app/services/pcg-hih.server.ts'
 import { requireUserId } from '#app/utils/auth.server.ts'
 import { prisma } from '#app/utils/db.server.ts'
 import { INTEREX_ROLES } from '#app/utils/interex-roles.ts'
 import { useIsPending } from '#app/utils/misc.tsx'
 import { requireRoles } from '#app/utils/role-redirect.server.ts'
-import { audit } from '#app/utils/audit.server.ts'
-import { Prisma } from '@prisma/client'
-import { pcgDownloadEmdrLetterFile } from '#app/services/pcg-hih.server.ts'
 
 type TabType = 'PREPAY' | 'POSTPAY' | 'POSTPAY_OTHER'
+
+function writeCustomerAudit(request: Request, user: { id: string; customerId?: string | null; roles: { name: string }[] }, opts: {
+    action: string
+    success: boolean
+    message?: string | null
+    entityType?: string | null
+    entityId?: string | null
+    meta?: unknown
+}) {
+    const route = new URL(request.url).pathname
+    return audit.admin({
+        action: opts.action,
+        actorType: 'USER',
+        actorId: user.id,
+        customerId: user.customerId || null,
+        status: opts.success ? 'SUCCESS' : 'FAILURE',
+        entityType: opts.entityType || null,
+        entityId: opts.entityId || null,
+        summary: opts.message || null,
+        metadata: {
+            route,
+            roles: user.roles.map(r => r.name),
+            legacyMeta: opts.meta ?? undefined,
+        },
+    })
+}
 
 export async function loader({ request }: LoaderFunctionArgs) {
     const userId = await requireUserId(request)
@@ -145,30 +170,21 @@ export async function action({ request }: ActionFunctionArgs) {
         const types: TabType[] = type ? [type] : ['PREPAY', 'POSTPAY', 'POSTPAY_OTHER']
         try {
             await syncLetters({ startDate, endDate, types })
-            await audit({
-                request,
-                user,
+            await writeCustomerAudit(request, user, {
                 action: 'LETTERS_SYNC',
                 entityType: 'LETTER',
                 success: true,
                 message: `Synced ${types.join(', ')} from ${startDate} to ${endDate}`,
-                meta: { types, startDate, endDate } as Prisma.JsonValue,
+                meta: { types, startDate, endDate },
             })
             return data({ ok: true })
         } catch (err: any) {
-            await audit({
-                request,
-                user,
+            await writeCustomerAudit(request, user, {
                 action: 'LETTERS_SYNC',
                 entityType: 'LETTER',
                 success: false,
                 message: err?.message || 'Sync failed',
-                meta: {
-                    types,
-                    startDate,
-                    endDate,
-                    error: String(err?.message || err),
-                } as Prisma.JsonValue,
+                meta: { types, startDate, endDate, error: String(err?.message || err) },
             })
             throw err
         }
@@ -299,6 +315,7 @@ export default function CustomerLettersPage() {
         } catch {
             // ignore
         }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [])
 
     // Helper to record a sync trigger moment for a specific type

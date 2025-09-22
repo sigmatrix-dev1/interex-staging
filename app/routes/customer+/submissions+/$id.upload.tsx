@@ -37,10 +37,12 @@ import { SubmissionActivityLog } from '#app/components/submission-activity-log.t
 import { Drawer } from '#app/components/ui/drawer.tsx'
 import { LoadingOverlay } from '#app/components/ui/loading-overlay.tsx'
 import { StatusButton } from '#app/components/ui/status-button.tsx'
+import { audit } from '#app/services/audit.server.ts'
 import { pcgUploadFiles, pcgGetStatus } from '#app/services/pcg-hih.server.ts'
 import { requireUserId } from '#app/utils/auth.server.ts'
 import { prisma } from '#app/utils/db.server.ts'
 import { getCachedFile, subKey } from '#app/utils/file-cache.ts'
+import { extractRequestContext } from '#app/utils/request-context.server.ts'
 import { redirectWithToast } from '#app/utils/toast.server.ts'
 import { BYTES_PER_MB, MAX_FILE_MB, MAX_TOTAL_MB, totalsNote, perFileLimitFor, totalsNoteFor } from '#app/utils/upload-constraints.ts'
 
@@ -224,6 +226,7 @@ export async function action({ request }: ActionFunctionArgs) {
     if (sizeErrors.length) return data({ result: parsed.reply({ formErrors: sizeErrors }) }, { status: 400 })
 
     // All good: upload
+    const ctx = await extractRequestContext(request, { requireUser: false })
     try {
         // Send files to PCG
         const pcgResp = await pcgUploadFiles(submission.pcgSubmissionId, files)
@@ -264,23 +267,23 @@ export async function action({ request }: ActionFunctionArgs) {
             },
         })
 
-        // Audit: document upload success
+        // Audit: document upload success (one consolidated event)
         try {
-            await prisma.auditLog.create({
-                data: {
-                    userId: user.id,
-                    userEmail: user.email ?? null,
-                    userName: user.name ?? null,
-                    rolesCsv: user.roles.map(r => r.name).join(','),
-                    customerId: submission.customerId ?? null,
-                    action: 'SUBMISSION_UPLOAD_DOCUMENT',
-                    entityType: 'SUBMISSION',
-                    entityId: submissionId,
-                    route: '/customer/submissions/:id/upload',
-                    success: true,
-                    message: `Uploaded ${files.length} document(s)`,
-                    meta: { pcgSubmissionId: submission.pcgSubmissionId },
-                    payload: { files: files.map(f => ({ name: f.name, size: f.size })) },
+            await audit.submission({
+                action: 'DOCUMENT_UPLOADED',
+                actorType: 'USER',
+                actorId: userId,
+                customerId: submission.customerId ?? undefined,
+                entityType: 'SUBMISSION',
+                entityId: submissionId,
+                requestId: ctx.requestId,
+                traceId: ctx.traceId,
+                spanId: ctx.spanId,
+                summary: `Uploaded ${files.length} document(s)`,
+                metadata: {
+                    pcgSubmissionId: submission.pcgSubmissionId,
+                    fileCount: files.length,
+                    files: files.map(f => ({ name: f.name, size: f.size, type: f.type })),
                 },
             })
         } catch {}
@@ -307,22 +310,18 @@ export async function action({ request }: ActionFunctionArgs) {
 
             // Audit: status update success
             try {
-                await prisma.auditLog.create({
-                    data: {
-                        userId: user.id,
-                        userEmail: user.email ?? null,
-                        userName: user.name ?? null,
-                        rolesCsv: user.roles.map(r => r.name).join(','),
-                        customerId: submission.customerId ?? null,
-                        action: 'SUBMISSION_STATUS_UPDATE',
-                        entityType: 'SUBMISSION',
-                        entityId: submissionId,
-                        route: '/customer/submissions/:id/upload',
-                        success: true,
-                        message: statusResp.stage ?? 'PCG status retrieved',
-                        meta: { pcgSubmissionId: submission.pcgSubmissionId },
-                        payload: statusResp,
-                    },
+                await audit.submission({
+                    action: 'STATUS_UPDATED',
+                    actorType: 'USER',
+                    actorId: userId,
+                    customerId: submission.customerId ?? undefined,
+                    entityType: 'SUBMISSION',
+                    entityId: submissionId,
+                    requestId: ctx.requestId,
+                    traceId: ctx.traceId,
+                    spanId: ctx.spanId,
+                    summary: statusResp.stage ?? 'PCG status retrieved',
+                    metadata: { pcgSubmissionId: submission.pcgSubmissionId, pcgStatusStage: statusResp.stage },
                 })
             } catch {}
         } catch {}
@@ -346,24 +345,22 @@ export async function action({ request }: ActionFunctionArgs) {
         await prisma.submissionEvent.create({
             data: { submissionId, kind: 'PCG_UPLOAD_ERROR', message: e?.message?.toString?.() ?? 'Upload failed' },
         })
-
         // Audit: document upload failure
         try {
-            await prisma.auditLog.create({
-                data: {
-                    userId: user.id,
-                    userEmail: user.email ?? null,
-                    userName: user.name ?? null,
-                    rolesCsv: user.roles.map(r => r.name).join(','),
-                    customerId: submission?.customerId ?? null,
-                    action: 'SUBMISSION_UPLOAD_DOCUMENT',
-                    entityType: 'SUBMISSION',
-                    entityId: submissionId,
-                    route: '/customer/submissions/:id/upload',
-                    success: false,
-                    message: e?.message?.toString?.() ?? 'Upload failed',
-                    meta: { pcgSubmissionId: submission?.pcgSubmissionId ?? null },
-                },
+            await audit.submission({
+                action: 'DOCUMENT_UPLOAD_ERROR',
+                actorType: 'USER',
+                actorId: userId,
+                customerId: submission?.customerId ?? undefined,
+                entityType: 'SUBMISSION',
+                entityId: submissionId,
+                requestId: ctx.requestId,
+                traceId: ctx.traceId,
+                spanId: ctx.spanId,
+                status: 'FAILURE',
+                summary: 'Document upload failed',
+                message: e?.message?.toString?.() ?? 'Upload failed',
+                metadata: { pcgSubmissionId: submission?.pcgSubmissionId },
             })
         } catch {}
 
