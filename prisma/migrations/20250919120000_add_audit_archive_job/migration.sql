@@ -1,0 +1,3 @@
+-- No-op migration (placeholder for future automated audit archive job infrastructure)
+-- Added to satisfy Prisma migrate deploy (previously missing, caused P3015).
+-- Safe to keep; does not alter schema.
