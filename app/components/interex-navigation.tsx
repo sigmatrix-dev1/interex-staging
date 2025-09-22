@@ -60,7 +60,7 @@ export function InterexNavigation({ user, currentPath }: InterexNavigationProps)
                                         <Link
                                             key={link.name}
                                             to={link.href}
-                                            className={`inline-flex h-16 -mb-px items-center gap-2 px-3 border-b-2 text-sm font-medium transition-colors ${
+                                            className={`inline-flex h-16 -mb-px items-center gap-2 px-3 border-b-2 text-base font-medium transition-colors ${
                                                 isActive
                                                     ? 'border-blue-500 text-gray-900'
                                                     : 'border-transparent text-gray-600 hover:text-gray-800 hover:border-gray-300'
@@ -83,7 +83,7 @@ export function InterexNavigation({ user, currentPath }: InterexNavigationProps)
                                             onKeyDown={e => onKeyGroup(e, group.name)}
                                             aria-haspopup="menu"
                                             aria-expanded={open}
-                                            className={`inline-flex h-16 -mb-px items-center gap-2 px-3 border-b-2 text-sm font-medium transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:rounded ${
+                                            className={`inline-flex h-16 -mb-px items-center gap-2 px-3 border-b-2 text-base font-medium transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:rounded ${
                                                 active || open
                                                     ? 'border-blue-500 text-gray-900'
                                                     : 'border-transparent text-gray-600 hover:text-gray-800 hover:border-gray-300'
@@ -105,7 +105,7 @@ export function InterexNavigation({ user, currentPath }: InterexNavigationProps)
                                                             key={child.name}
                                                             to={child.href}
                                                             role="menuitem"
-                                                            className={`flex items-start gap-2 px-3 py-2 text-sm transition hover:bg-gray-50 focus:bg-gray-50 focus:outline-none ${
+                                                            className={`flex items-start gap-2 px-3 py-2 text-[15px] transition hover:bg-gray-50 focus:bg-gray-50 focus:outline-none ${
                                                                 childActive ? 'text-blue-600 font-medium' : 'text-gray-700'
                                                             }`}
                                                         >
@@ -165,7 +165,7 @@ export function InterexNavigation({ user, currentPath }: InterexNavigationProps)
                         const active = groupHasActive(group)
                         return (
                             <div key={group.name} className="border-t first:border-t-0">
-                                <button
+                                    <button
                                     type="button"
                                     onClick={() => setOpenGroup(g => (g === group.name ? null : group.name))}
                                     className={`w-full flex items-center gap-2 pl-3 pr-4 py-2 text-left text-base font-medium ${
@@ -184,7 +184,7 @@ export function InterexNavigation({ user, currentPath }: InterexNavigationProps)
                                                 <Link
                                                     key={child.name}
                                                     to={child.href}
-                                                    className={`block pr-4 py-1 text-sm ${
+                                                    className={`block pr-4 py-1 text-[15px] ${
                                                         childActive ? 'text-blue-600 font-medium' : 'text-gray-600 hover:text-gray-800'
                                                     }`}
                                                 >

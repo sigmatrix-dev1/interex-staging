@@ -51,6 +51,9 @@ const RAW_ICON_NAMES = [
 	'trash',
 	'update',
 	'plus',
+	'users',
+	'warning',
+	'check',
 ] as const
 
 // Common aliases so nav can use friendlier names.
