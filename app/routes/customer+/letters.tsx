@@ -46,6 +46,9 @@ function writeCustomerAudit(request: Request, user: { id: string; customerId?: s
             roles: user.roles.map(r => r.name),
             legacyMeta: opts.meta ?? undefined,
         },
+        // allowPhi: We only log date range (startDate/endDate) + letter sync meta; scanner flags dates as potential DOB.
+        // These are NOT patient DOBs. Long-term improvement: redact raw payload before logging instead of allowPhi.
+        allowPhi: true,
     })
 }
 

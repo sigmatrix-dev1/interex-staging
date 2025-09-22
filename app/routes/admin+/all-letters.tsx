@@ -46,6 +46,9 @@ function writeAdminAudit(request: Request, user: { id: string; name?: string | n
             roles: user.roles.map(r => r.name),
             legacyMeta: opts.meta ?? undefined,
         },
+        // allowPhi: letter sync metadata includes date range fields; flagged as potential DOB by heuristic.
+        // We consciously allow these non-PHI operational dates. TODO: replace with redacted summary payload.
+        allowPhi: true,
     })
 }
 

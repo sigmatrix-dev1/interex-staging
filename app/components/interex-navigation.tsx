@@ -67,7 +67,7 @@ export function InterexNavigation({ user, currentPath }: InterexNavigationProps)
                                             }`}
                                             title={link.description}
                                         >
-                                            <Icon name={link.icon as any} className="w-4 h-4" />
+                                            <Icon name={link.icon as any} className="w-5 h-5" />
                                             {link.name}
                                         </Link>
                                     )
@@ -89,9 +89,9 @@ export function InterexNavigation({ user, currentPath }: InterexNavigationProps)
                                                     : 'border-transparent text-gray-600 hover:text-gray-800 hover:border-gray-300'
                                             }`}
                                         >
-                                            <Icon name={group.icon as any} className="w-4 h-4" />
+                                            <Icon name={group.icon as any} className="w-5 h-5" />
                                             {group.name}
-                                            <Icon name={open ? 'hero:chevron-up' : 'hero:chevron-down'} className="w-4 h-4" />
+                                            <Icon name={open ? 'hero:chevron-up' : 'hero:chevron-down'} className="w-5 h-5" />
                                         </button>
                                         {open && (
                                             <div
@@ -109,7 +109,7 @@ export function InterexNavigation({ user, currentPath }: InterexNavigationProps)
                                                                 childActive ? 'text-blue-600 font-medium' : 'text-gray-700'
                                                             }`}
                                                         >
-                                                            <Icon name={child.icon as any} className="w-4 h-4 mt-0.5" />
+                                                            <Icon name={child.icon as any} className="w-5 h-5 mt-0.5" />
                                                             <div className="flex flex-col">
                                                                 <span>{child.name}</span>
                                                                 <span className="text-[11px] text-gray-500 leading-tight">{child.description}</span>
@@ -152,7 +152,7 @@ export function InterexNavigation({ user, currentPath }: InterexNavigationProps)
                                     }`}
                                 >
                                     <div className="flex items-center">
-                                        <Icon name={link.icon as any} className="w-4 h-4 mr-3" />
+                                        <Icon name={link.icon as any} className="w-5 h-5 mr-3" />
                                         <div>
                                             <div>{link.name}</div>
                                             <div className="text-xs text-gray-500">{link.description}</div>
@@ -172,9 +172,9 @@ export function InterexNavigation({ user, currentPath }: InterexNavigationProps)
                                         active ? 'bg-blue-50 text-blue-700' : 'text-gray-700 hover:bg-gray-50'
                                     }`}
                                 >
-                                    <Icon name={group.icon as any} className="w-4 h-4" />
+                                    <Icon name={group.icon as any} className="w-5 h-5" />
                                     <span className="flex-1">{group.name}</span>
-                                    <Icon name={openGroup === group.name ? 'hero:chevron-up' : 'hero:chevron-down'} className="w-4 h-4" />
+                                    <Icon name={openGroup === group.name ? 'hero:chevron-up' : 'hero:chevron-down'} className="w-5 h-5" />
                                 </button>
                                 {openGroup === group.name && (
                                     <div className="pl-6 pb-2 space-y-1">
