@@ -9,6 +9,12 @@ import {
 	UsersIcon as HeroUsersIcon,
 	ShieldCheckIcon as HeroShieldCheckIcon,
 	ArrowPathIcon as HeroArrowPathIcon,
+	ChevronDownIcon as HeroChevronDownIcon,
+	ChevronUpIcon as HeroChevronUpIcon,
+	PlusIcon as HeroPlusIcon,
+	UserPlusIcon as HeroUserPlusIcon,
+	UserGroupIcon as HeroUserGroupIcon,
+	DocumentPlusIcon as HeroDocumentPlusIcon,
 } from '@heroicons/react/24/outline'
 import { type SVGProps } from 'react'
 import { cn } from '#app/utils/misc.tsx'
@@ -44,6 +50,7 @@ const RAW_ICON_NAMES = [
 	'sun',
 	'trash',
 	'update',
+	'plus',
 ] as const
 
 // Common aliases so nav can use friendlier names.
@@ -69,9 +76,17 @@ const HERO_ICON_COMPONENTS = {
 	'hero:users': HeroUsersIcon,
 	'hero:security': HeroShieldCheckIcon,
 	'hero:refresh': HeroArrowPathIcon,
+	'hero:chevron-down': HeroChevronDownIcon,
+	'hero:chevron-up': HeroChevronUpIcon,
+	'hero:plus': HeroPlusIcon,
+	'hero:user-plus': HeroUserPlusIcon,
+	'hero:user-group': HeroUserGroupIcon,
+	'hero:document-plus': HeroDocumentPlusIcon,
 } as const
 
-export type IconName = typeof RAW_ICON_NAMES[number] | keyof typeof ALIASES | keyof typeof HERO_ICON_COMPONENTS
+// Bridge: allow plain "plus" usage even though it's not in sprite; map to hero:plus.
+// We do this by extending the union and resolving in runtime branch (hero components win first).
+export type IconName = typeof RAW_ICON_NAMES[number] | keyof typeof ALIASES | keyof typeof HERO_ICON_COMPONENTS | 'plus'
 export function listIconNames(): string[] {
 	return Array.from(new Set([...RAW_ICON_NAMES, ...Object.keys(ALIASES)])).sort()
 }

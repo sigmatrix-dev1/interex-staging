@@ -114,7 +114,7 @@ export function InterexHeader({
                                             >
                                                 <Icon name={group.icon as any} className="w-4 h-4" />
                                                 {group.name}
-                                                <Icon name="arrow-left" className={`w-4 h-4 transition-transform ${open ? 'rotate-90' : '-rotate-90'}`} />
+                                                <Icon name={open ? 'hero:chevron-up' : 'hero:chevron-down'} className="w-4 h-4" />
                                             </button>
                                             {open && (
                                                 <div
@@ -195,7 +195,7 @@ export function InterexHeader({
                                     >
                                         <Icon name={group.icon as any} className="w-4 h-4" />
                                         <span className="flex-1">{group.name}</span>
-                                        <Icon name="arrow-left" className={`w-4 h-4 transition-transform ${openGroup === group.name ? 'rotate-90' : '-rotate-90'}`} />
+                                        <Icon name={openGroup === group.name ? 'hero:chevron-up' : 'hero:chevron-down'} className="w-4 h-4" />
                                     </button>
                                     {openGroup === group.name && (
                                         <div className="pl-6 pb-2 space-y-1">
