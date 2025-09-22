@@ -144,6 +144,8 @@ Route: `/admin/audit-logs` (legacy `/admin/audit-events` now redirects) provides
 - Cursor pagination (Load More)
 - Expandable metadata/diff JSON
 - Status coloring & chainKey visibility
+- Columns are toggleable and persisted locally (`localStorage.auditCols`). Default set now includes: Time, Customer, Actor, Category, Action, Entity, Status, Summary/Message, Chain, Raw.
+- Timezone: All timestamps are rendered in EST (America/New_York) regardless of client browser locale for consistent operational review. Hover title clarifies timezone. Future enhancement may add a toggle for local time.
 
 ### Maintenance UI
 
@@ -262,5 +264,34 @@ Some admin/provider actions still use ad-hoc names (e.g. `ADMIN_FETCH_PCG_PROVID
 - [x] Audit tests (`npm test --silent --filter=audit`) green.
 - [x] Manual smoke: provider/admin actions appear in `/admin/audit-logs`.
 - [x] Shim deleted.
+
+---
+
+## Export UI (Temporarily Deferred)
+
+The previous Audit Logs UI included inline export buttons (CSV/JSON, page & full). These were removed temporarily due to inconsistent behavior in the dev environment (HTML document responses instead of attachment downloads) while underlying server routing was being stabilized.
+
+Current state:
+- Server export route still available at: `GET /admin/audit-logs/export?format=csv|json|csv-full|json-full` with existing filters as query params (search, action, category, etc.).
+- Response headers: `Content-Disposition: attachment; filename="audit-logs-<timestamp>[ -full].(csv|json)"`, plus diagnostic `X-Audit-Export: 1` header.
+- UI controls removed from `app/routes/admin+/audit-logs.tsx` (search for the comment `Export UI temporarily removed`).
+- Added Customer column (Sept 22 2025): loader performs single batched `customer` lookup for distinct `customerId` values in the current page of events, avoiding N+1 queries and exposing both customer name and ID (copy shortcut) for each row.
+
+Re‑enable plan (future):
+1. Reintroduce a single primary "Export CSV" button (page scope only) using a plain anchor link with `download` attribute.
+2. Add a dropdown or secondary action for "Full" export once large export performance validated.
+3. (Optional) Introduce background job + emailed link for exports >5000 rows.
+4. Log an audit event (`ADMIN_EXPORT_AUDIT_LOGS`) for each export trigger.
+
+Troubleshooting notes (historic):
+- Original issue surfaced when a resource route filename pattern prevented correct mounting; Remix served the layout HTML causing the client to flag an unexpected HTML response.
+- Switching to a flat dot route (`audit-logs.export.ts`) and using anchor navigation minimized complexity.
+- Remaining intermittent cases likely tied to auth/session cookie context during fetch; deferring until higher priority items complete.
+
+To test server route manually now:
+```
+curl -I "http://localhost:3000/admin/audit-logs/export?format=csv&take=10" --cookie "<dev-session-cookie>"
+```
+Expect `200`, `Content-Type: text/csv`, and `X-Audit-Export: 1`.
 
 ---

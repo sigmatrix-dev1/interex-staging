@@ -20,6 +20,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
   })
   if (!user) throw new Response('Unauthorized', { status: 401 })
   requireRoles(user, [INTEREX_ROLES.SYSTEM_ADMIN])
+  const isSystemAdmin = user.roles.some(r => r.name === INTEREX_ROLES.SYSTEM_ADMIN)
 
   const url = new URL(request.url)
   const search = url.searchParams.get('search')?.trim() || ''
@@ -30,7 +31,6 @@ export async function loader({ request }: LoaderFunctionArgs) {
   const chainKeys = url.searchParams.getAll('chainKey').filter(Boolean)
   const createdFrom = url.searchParams.get('createdFrom') || ''
   const createdTo = url.searchParams.get('createdTo') || ''
-  const exportType = url.searchParams.get('export') || ''
   const cursor = url.searchParams.get('cursor') || ''
   const take = Math.min(500, Number(url.searchParams.get('take') || 200))
 
@@ -70,12 +70,10 @@ export async function loader({ request }: LoaderFunctionArgs) {
     if (Object.keys(range).length) where.createdAt = range
   }
 
-  const fullExport = exportType === 'csv-full' || exportType === 'json-full'
-  const effectiveTake = fullExport ? 5000 : take
   const logs = await prisma.auditEvent.findMany({
     where,
     orderBy: { createdAt: 'desc' },
-    take: fullExport ? effectiveTake : effectiveTake + 1, // fetch one extra to know if there's another page (unless full export)
+    take: take + 1, // fetch one extra to know if there's another page
     cursor: cursor ? { id: cursor } : undefined,
     skip: cursor ? 1 : 0,
     select: {
@@ -106,6 +104,41 @@ export async function loader({ request }: LoaderFunctionArgs) {
     },
   })
 
+  // Some historical events may have null actorDisplay. Resolve a best-effort mapping from user table when possible.
+  const missingDisplayIds = Array.from(new Set(logs.filter(l => !l.actorDisplay && l.actorId && l.actorType === 'USER').map(l => l.actorId as string)))
+  let userNameMap: Record<string, string> = {}
+  if (missingDisplayIds.length) {
+    const users = await prisma.user.findMany({
+      where: { id: { in: missingDisplayIds } },
+      select: { id: true, name: true, email: true },
+    })
+    for (const u of users) {
+      userNameMap[u.id] = u.name || u.email || u.id
+    }
+  }
+  for (const l of logs) {
+    if (!l.actorDisplay && l.actorId && userNameMap[l.actorId]) {
+      // Mutate in-place for serialization; frontend prefers actorDisplay.
+      ;(l as any).actorDisplay = userNameMap[l.actorId]
+    }
+  }
+
+  // Customer name enrichment (single batched query) so UI can show tenant ownership.
+  const customerIds = Array.from(new Set(logs.map(l => l.customerId).filter(Boolean))) as string[]
+  let customerNameMap: Record<string, string> = {}
+  if (customerIds.length) {
+    const customers = await prisma.customer.findMany({
+      where: { id: { in: customerIds } },
+      select: { id: true, name: true },
+    })
+    for (const c of customers) customerNameMap[c.id] = c.name
+  }
+  for (const l of logs) {
+    if (l.customerId) {
+      ;(l as any).customerName = customerNameMap[l.customerId] || null
+    }
+  }
+
   // Distinct option sources (limited to recent period for performance if dataset grows)
   const [actionsDistinct, entityTypesDistinct, categoriesDistinct, statusesDistinct, chainKeysDistinct] = await Promise.all([
     prisma.auditEvent.findMany({ select: { action: true }, distinct: ['action'], orderBy: { action: 'asc' }, take: 400 }),
@@ -125,47 +158,6 @@ export async function loader({ request }: LoaderFunctionArgs) {
   if (logs.length > take) {
     const extra = pageLogs.pop()
     nextCursor = extra?.id || null
-  }
-
-  if (exportType === 'csv' || exportType === 'json' || exportType === 'csv-full' || exportType === 'json-full') {
-    const timestamp = new Date().toISOString().replace(/[:T]/g, '-').split('.')[0]
-    if (exportType === 'json' || exportType === 'json-full') {
-      const body = JSON.stringify({
-        generatedAt: new Date().toISOString(),
-        count: pageLogs.length,
-        fullExport,
-        filters: { search, actions, entityTypes, categories, statuses, chainKeys, take, cursor },
-        logs: pageLogs,
-      }, null, 2)
-      return new Response(body, {
-        headers: {
-          'Content-Type': 'application/json; charset=utf-8',
-          'Content-Disposition': `attachment; filename="audit-logs-${timestamp}${fullExport ? '-full' : ''}.json"`,
-        },
-      })
-    }
-    // CSV export
-    const header = [
-      'createdAt','category','action','status','actorDisplay','actorId','actorType','actorIp','entityType','entityId','requestId','traceId','spanId','summary','message','seq','chainKey','hashPrev','hashSelf','metadata','diff'
-    ]
-    const esc = (v: any) => {
-      if (v === null || v === undefined) return ''
-      const s = String(v)
-      if (/[",\n]/.test(s)) return '"' + s.replace(/"/g, '""') + '"'
-      return s
-    }
-    const rows = pageLogs.map(l => header.map(h => {
-      const val = (l as any)[h]
-      if (h === 'metadata' || h === 'diff') return esc(val)
-      return esc(val)
-    }).join(','))
-    const csv = [header.join(','), ...rows].join('\n')
-    return new Response(csv, {
-      headers: {
-        'Content-Type': 'text/csv; charset=utf-8',
-        'Content-Disposition': `attachment; filename="audit-logs-${timestamp}${fullExport ? '-full' : ''}.csv"`,
-      },
-    })
   }
 
   return data({
@@ -189,6 +181,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
     },
     createdFrom,
     createdTo,
+    isSystemAdmin,
   })
 }
 
@@ -206,7 +199,7 @@ function toLocalInputValue(iso: string) {
 }
 
 export default function AdminAuditLogsPage() {
-  const { user, logs, search, actions, entityTypes, categories, statuses, chainKeys, take, options, createdFrom, createdTo, nextCursor, cursor } = useLoaderData<typeof loader>()
+  const { user, logs, search, actions, entityTypes, categories, statuses, chainKeys, take, options, createdFrom, createdTo, nextCursor, cursor, isSystemAdmin } = useLoaderData<typeof loader>()
   const isPending = useIsPending()
   const [visibleCols, setVisibleCols] = React.useState<string[]>(() => {
     if (typeof window === 'undefined') return [] as string[]
@@ -216,8 +209,13 @@ export default function AdminAuditLogsPage() {
       return Array.isArray(parsed) ? parsed as string[] : []
     } catch { return [] as string[] }
   })
+  const [wideMode, setWideMode] = React.useState<boolean>(() => {
+    if (typeof window === 'undefined') return false
+    try { return localStorage.getItem('auditWide') === '1' } catch { return false }
+  })
 
   const allCols = React.useMemo(() => [
+    { key: 'customer', label: 'Customer' },
     { key: 'actor', label: 'Actor' },
     { key: 'category', label: 'Category' },
     { key: 'action', label: 'Action' },
@@ -231,7 +229,7 @@ export default function AdminAuditLogsPage() {
   React.useEffect(() => {
     if (visibleCols.length === 0) {
       // default set
-      const defaults = ['actor','category','action','entity','status','summary','chain','raw']
+      const defaults = ['customer','actor','category','action','entity','status','summary','chain','raw']
       setVisibleCols(defaults)
       try { localStorage.setItem('auditCols', JSON.stringify(defaults)) } catch {}
     }
@@ -267,7 +265,7 @@ export default function AdminAuditLogsPage() {
       currentPath="/admin/audit-logs"
     >
       <LoadingOverlay show={Boolean(isPending)} />
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-4">
+      <div className={`mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-4 ${wideMode ? 'max-w-[1800px]' : 'max-w-7xl'}`}>
         <div className="bg-white shadow rounded-md p-4">
           <Form method="get" className="flex flex-wrap items-end gap-3">
             <FilterField label="Search" name="search" defaultValue={search} placeholder="actor / entityId / summary / traceId" />
@@ -288,12 +286,9 @@ export default function AdminAuditLogsPage() {
               <label className="text-xs text-gray-500">Limit</label>
               <input name="take" type="number" min={1} max={500} defaultValue={take} className="border rounded px-2 py-1 text-sm w-24" />
             </div>
-            <div className="flex gap-2 items-end pb-1">
+            <div className="flex items-end pb-1 gap-2">
               <button className="bg-gray-800 text-white text-sm rounded px-3 py-1.5" type="submit">Apply</button>
-              <button className="bg-blue-600 text-white text-sm rounded px-3 py-1.5" type="submit" name="export" value="csv" title="CSV (current page)">CSV</button>
-              <button className="bg-emerald-600 text-white text-sm rounded px-3 py-1.5" type="submit" name="export" value="json" title="JSON (current page)">JSON</button>
-              <button className="bg-blue-900 text-white text-sm rounded px-3 py-1.5" type="submit" name="export" value="csv-full" title="CSV full (ignores pagination, up to 5000)">CSV Full</button>
-              <button className="bg-emerald-900 text-white text-sm rounded px-3 py-1.5" type="submit" name="export" value="json-full" title="JSON full (ignores pagination, up to 5000)">JSON Full</button>
+              {/* Export UI temporarily removed */}
             </div>
           </Form>
         </div>
@@ -307,12 +302,27 @@ export default function AdminAuditLogsPage() {
                   <span>{c.label}</span>
                 </label>
               ))}
+              <div className="ml-auto flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setWideMode(w => {
+                      const next = !w
+                      try { localStorage.setItem('auditWide', next ? '1' : '0') } catch {}
+                      return next
+                    })
+                  }}
+                  className="border rounded px-2 py-1 text-[10px] bg-gray-50 hover:bg-gray-100"
+                  title="Toggle wider layout for more horizontal space"
+                >{wideMode ? 'Normal Width' : 'Wide Width'}</button>
+              </div>
             </div>
           </details>
-          <table className="min-w-full divide-y divide-gray-200">
+          <table className="min-w-full divide-y divide-gray-200 table-auto">
             <thead className="bg-gray-50">
               <tr>
-                <Th>Time</Th>
+                <Th title="Times shown in EST (America/New_York)">Time (EST)</Th>
+                {visibleCols.includes('customer') && <Th>Customer</Th>}
                 {visibleCols.includes('actor') && <Th>Actor</Th>}
                 {visibleCols.includes('category') && <Th>Category</Th>}
                 {visibleCols.includes('action') && <Th>Action</Th>}
@@ -331,7 +341,21 @@ export default function AdminAuditLogsPage() {
                 const diff = safeParse(row.diff)
                 return (
                   <tr key={row.id} className="hover:bg-gray-50 align-top">
-                    <Td className="whitespace-nowrap">{new Date(row.createdAt).toLocaleString()}</Td>
+                    <Td className="whitespace-nowrap">
+                      {new Intl.DateTimeFormat('en-US', {
+                        timeZone: 'America/New_York',
+                        year: 'numeric', month: '2-digit', day: '2-digit',
+                        hour: '2-digit', minute: '2-digit', second: '2-digit',
+                        hour12: false,
+                      }).format(new Date(row.createdAt))}
+                      <span className="text-[10px] text-gray-500 ml-1">EST</span>
+                    </Td>
+                    {visibleCols.includes('customer') && (
+                      <Td>
+                        <div className="text-gray-900 text-[11px]">{row.customerName || '—'}</div>
+                        <div className="text-gray-500 text-[10px]">{row.customerId || ''} {row.customerId && <CopyBtn value={row.customerId} label="customerId" />}</div>
+                      </Td>
+                    )}
                     {visibleCols.includes('actor') && (
                       <Td>
                         <div className="text-gray-900 text-[11px]">{row.actorDisplay || row.actorId || '—'}</div>
@@ -373,7 +397,7 @@ export default function AdminAuditLogsPage() {
                     )}
                     {visibleCols.includes('raw') && (
                       <Td className="text-[11px]">
-                        <JsonViewer data={{ metadata, diff, hashes: { prev: row.hashPrev, self: row.hashSelf }, actor: { ua: row.actorUserAgent } }} />
+                        <JsonViewer data={{ metadata, diff, hashes: { prev: row.hashPrev, self: row.hashSelf }, actor: { ua: isSystemAdmin ? row.actorUserAgent : undefined } }} />
                       </Td>
                     )}
                   </tr>
@@ -433,6 +457,8 @@ function FilterField(props: { label: string; name: string; defaultValue: string;
   )
 }
 
+// ExportButtons component removed (deferred) – underlying route still exists for future reinstatement.
+
 // Compact multi-select dropdown with checkbox list & filtering
 function MultiSelectDropdown(props: { label: string; name: string; values: string[]; options: string[] }) {
   const { label, name } = props
@@ -440,6 +466,8 @@ function MultiSelectDropdown(props: { label: string; name: string; values: strin
   const [selected, setSelected] = React.useState<string[]>(props.values)
   const [filter, setFilter] = React.useState('')
   const wrapperRef = React.useRef<HTMLDivElement | null>(null)
+  const listRef = React.useRef<HTMLUListElement | null>(null)
+  const [highlight, setHighlight] = React.useState(0)
 
   const valuesKey = React.useMemo(() => props.values.slice().sort().join('|'), [props.values])
   React.useEffect(() => { setSelected(props.values) }, [valuesKey, props.values])
@@ -457,21 +485,55 @@ function MultiSelectDropdown(props: { label: string; name: string; values: strin
     setSelected(prev => prev.includes(val) ? prev.filter(v => v !== val) : [...prev, val])
   }
   const clear = () => setSelected([])
+  const selectAll = () => setSelected([...props.options])
+  const selectVisible = () => setSelected(Array.from(new Set([...selected, ...visibleOptions])))
   const visibleOptions = props.options.filter(o => !filter || o.toLowerCase().includes(filter.toLowerCase()))
   const summary = selected.length === 0 ? 'Any' : selected.length <= 2 ? selected.join(', ') : `${selected.length} selected`
+
+  React.useEffect(() => {
+    if (open && listRef.current) {
+      const el = listRef.current.querySelectorAll('li')[highlight] as HTMLElement | undefined
+      el?.scrollIntoView({ block: 'nearest' })
+    }
+  }, [open, highlight])
+
+  const onKeyDown = (e: React.KeyboardEvent) => {
+    if (!open) {
+      if (e.key === 'ArrowDown' || e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault(); setOpen(true)
+      }
+      return
+    }
+    if (e.key === 'Escape') { e.preventDefault(); setOpen(false); return }
+    if (e.key === 'ArrowDown') { e.preventDefault(); setHighlight(h => Math.min(visibleOptions.length - 1, h + 1)) }
+    if (e.key === 'ArrowUp') { e.preventDefault(); setHighlight(h => Math.max(0, h - 1)) }
+    if (e.key === 'Home') { e.preventDefault(); setHighlight(0) }
+    if (e.key === 'End') { e.preventDefault(); setHighlight(visibleOptions.length - 1) }
+    if (e.key === ' ' || e.key === 'Enter') {
+      e.preventDefault()
+      const val = visibleOptions[highlight]
+      if (val) toggle(val)
+    }
+  }
 
   return (
     <div className="flex flex-col min-w-[170px]" ref={wrapperRef}>
       <label className="text-xs text-gray-500 mb-0.5">{label}</label>
       <button
         type="button"
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        onKeyDown={onKeyDown}
         onClick={() => setOpen(o => !o)}
-        className={`border rounded px-2 py-1 text-xs text-left bg-white hover:border-gray-400 focus:outline-none focus:ring w-full ${selected.length ? 'text-gray-800' : 'text-gray-400'}`}
+        className={`border rounded px-2 py-1 text-xs text-left bg-white hover:border-gray-400 focus:outline-none focus:ring w-full flex items-center justify-between gap-1 ${selected.length ? 'text-gray-800' : 'text-gray-400'}`}
         title={summary}
-      >{summary}</button>
+      >
+        <span className="truncate flex-1" aria-label={`${label} filter`}>{summary}</span>
+        <svg className={`w-3 h-3 transition-transform ${open ? 'rotate-180' : ''} text-gray-400`} viewBox="0 0 20 20" fill="currentColor"><path d="M5.23 7.21a.75.75 0 011.06.02L10 11.175l3.71-3.944a.75.75 0 111.08 1.04l-4.24 4.51a.75.75 0 01-1.08 0l-4.24-4.51a.75.75 0 01.02-1.06z" /></svg>
+      </button>
       {selected.map(v => <input key={v} type="hidden" name={name} value={v} />)}
       {open && (
-        <div className="absolute z-30 mt-1 w-64 bg-white border rounded shadow-lg p-1 flex flex-col gap-1 max-h-72 overflow-hidden">
+        <div className="absolute z-30 mt-1 w-64 bg-white border rounded shadow-lg p-1 flex flex-col gap-1 max-h-72 overflow-hidden" role="dialog" aria-label={`${label} options`}>
           <input
             type="text"
             placeholder="Filter…"
@@ -479,15 +541,22 @@ function MultiSelectDropdown(props: { label: string; name: string; values: strin
             onChange={e => setFilter(e.target.value)}
             className="border rounded px-2 py-1 text-xs w-full"
           />
-          <ul className="overflow-auto flex-1 pr-1 text-xs">
+          <div className="flex gap-1 px-1">
+            <button type="button" onClick={selectVisible} className="text-[10px] text-blue-600 hover:underline">Visible</button>
+            <button type="button" onClick={selectAll} className="text-[10px] text-blue-600 hover:underline">All</button>
+            <button type="button" onClick={clear} className="text-[10px] text-gray-600 hover:underline ml-auto">None</button>
+          </div>
+          <ul ref={listRef} className="overflow-auto flex-1 pr-1 text-xs outline-none" role="listbox" aria-multiselectable="true" tabIndex={-1}>
             {visibleOptions.length === 0 && (
               <li className="px-2 py-2 text-gray-400">No matches</li>
             )}
-            {visibleOptions.map(o => {
+            {visibleOptions.map((o, idx) => {
               const checked = selected.includes(o)
               return (
-                <li key={o}>
-                  <label className="flex items-center gap-2 px-2 py-1 cursor-pointer hover:bg-gray-50 rounded">
+                <li key={o} role="option" aria-selected={checked}>
+                  <label className={`flex items-center gap-2 px-2 py-1 cursor-pointer rounded ${idx === highlight ? 'bg-gray-100' : 'hover:bg-gray-50'}`}
+                    onMouseEnter={() => setHighlight(idx)}
+                  >
                     <input
                       type="checkbox"
                       className="h-3 w-3"
@@ -501,7 +570,7 @@ function MultiSelectDropdown(props: { label: string; name: string; values: strin
             })}
           </ul>
           <div className="flex justify-between items-center gap-2 pt-1 border-t">
-            <button type="button" onClick={clear} className="text-[10px] text-gray-600 hover:text-gray-900">Clear</button>
+            <div className="text-[10px] text-gray-500">{selected.length} selected</div>
             <div className="flex gap-1">
               <button type="button" onClick={() => setOpen(false)} className="text-[10px] bg-gray-100 hover:bg-gray-200 rounded px-2 py-1">Close</button>
             </div>
@@ -512,8 +581,8 @@ function MultiSelectDropdown(props: { label: string; name: string; values: strin
   )
 }
 
-function Th({ children }: { children: React.ReactNode }) {
-  return <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">{children}</th>
+function Th({ children, title }: { children: React.ReactNode; title?: string }) {
+  return <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase" title={title}>{children}</th>
 }
 function Td({ children, className = '' }: { children: React.ReactNode; className?: string }) {
   return <td className={`px-3 py-2 text-[11px] align-top ${className}`}>{children}</td>
