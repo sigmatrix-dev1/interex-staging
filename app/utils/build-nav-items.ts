@@ -17,24 +17,24 @@ export function buildNavItems(user: User): NavItem[] {
 	const items: NavItem[] = []
 
 	// Dashboard
-	if (isSystem) items.push(makeLink('Dashboard', '/admin/dashboard', 'gear', 'System administration overview'))
-	else if (isCustomerAdmin) items.push(makeLink('Dashboard', '/customer', 'gear', 'Customer overview'))
-	else if (isProviderGroupAdmin) items.push(makeLink('Dashboard', '/provider', 'gear', 'Provider group overview'))
+	if (isSystem) items.push(makeLink('Dashboard', '/admin/dashboard', 'hero:dashboard', 'System administration overview'))
+	else if (isCustomerAdmin) items.push(makeLink('Dashboard', '/customer', 'hero:dashboard', 'Customer overview'))
+	else if (isProviderGroupAdmin) items.push(makeLink('Dashboard', '/provider', 'hero:dashboard', 'Provider group overview'))
 
 	// Organization
 	if (isSystem) {
-		items.push({ type: 'group', name: 'Organization', icon: 'avatar', items: [
-			makeLink('Audit Logs', '/admin/audit-logs', 'file-text', 'System audit trail'),
-			makeLink('Audit Maintenance', '/admin/audit-maintenance', 'gear', 'Verify chains & archive batches'),
+		items.push({ type: 'group', name: 'Organization', icon: 'hero:users', items: [
+			makeLink('Audit Logs', '/admin/audit-logs', 'hero:logs', 'System audit trail'),
+			makeLink('Audit Maintenance', '/admin/audit-maintenance', 'hero:refresh', 'Verify chains & archive batches'),
 		] })
 	} else if (isCustomerAdmin) {
-		items.push({ type: 'group', name: 'Organization', icon: 'avatar', items: [
-			makeLink('Provider Groups', '/customer/provider-groups', 'gear', 'Manage provider groups'),
-			makeLink('User Management', '/customer/users', 'avatar', 'Manage organization users'),
+		items.push({ type: 'group', name: 'Organization', icon: 'hero:users', items: [
+			makeLink('Provider Groups', '/customer/provider-groups', 'hero:users', 'Manage provider groups'),
+			makeLink('User Management', '/customer/users', 'hero:users', 'Manage organization users'),
 		] })
 	} else if (isProviderGroupAdmin) {
-		items.push({ type: 'group', name: 'Organization', icon: 'avatar', items: [
-			makeLink('Group Users', '/customer/users', 'avatar', 'Manage group users'),
+		items.push({ type: 'group', name: 'Organization', icon: 'hero:users', items: [
+			makeLink('Group Users', '/customer/users', 'hero:users', 'Manage group users'),
 		] })
 	}
 
@@ -53,12 +53,12 @@ export function buildNavItems(user: User): NavItem[] {
 
 	// Submissions
 	if (isCustomerAdmin || isProviderGroupAdmin || isBasic) {
-		items.push(makeLink('Submissions', '/customer/submissions', 'envelope-closed', 'Manage HIH submissions'))
+		items.push(makeLink('Submissions', '/customer/submissions', 'hero:submissions', 'Manage HIH submissions'))
 	}
 
 	// Letters
-	if (isSystem) items.push(makeLink('Letters', '/admin/all-letters', 'file-text', 'All letters for your NPIs'))
-	else if (isCustomerAdmin || isProviderGroupAdmin || isBasic) items.push(makeLink('Letters', '/customer/letters', 'file-text', 'All letters for your NPIs'))
+	if (isSystem) items.push(makeLink('Letters', '/admin/all-letters', 'hero:letters', 'All letters for your NPIs'))
+	else if (isCustomerAdmin || isProviderGroupAdmin || isBasic) items.push(makeLink('Letters', '/customer/letters', 'hero:letters', 'All letters for your NPIs'))
 
 	return items
 }

@@ -1,3 +1,15 @@
+// Heroicons outline set imports (placed before react per lint rule)
+import {
+	ChartBarIcon as HeroChartBarIcon,
+	HomeIcon as HeroHomeIcon,
+	Cog6ToothIcon as HeroCogIcon,
+	DocumentTextIcon as HeroDocumentTextIcon,
+	InboxStackIcon as HeroInboxStackIcon,
+	FolderOpenIcon as HeroFolderOpenIcon,
+	UsersIcon as HeroUsersIcon,
+	ShieldCheckIcon as HeroShieldCheckIcon,
+	ArrowPathIcon as HeroArrowPathIcon,
+} from '@heroicons/react/24/outline'
 import { type SVGProps } from 'react'
 import { cn } from '#app/utils/misc.tsx'
 import href from './icons/sprite.svg'
@@ -46,7 +58,20 @@ const ALIASES: Record<string, (typeof RAW_ICON_NAMES)[number]> = {
   passkey: 'lock-closed',
 }
 
-export type IconName = typeof RAW_ICON_NAMES[number] | keyof typeof ALIASES
+// Heroicon names (prefix hero: to avoid collisions with sprite ids)
+const HERO_ICON_COMPONENTS = {
+	'hero:dashboard': HeroHomeIcon,
+	'hero:chart': HeroChartBarIcon,
+	'hero:logs': HeroDocumentTextIcon,
+	'hero:settings': HeroCogIcon,
+	'hero:submissions': HeroInboxStackIcon,
+	'hero:letters': HeroFolderOpenIcon,
+	'hero:users': HeroUsersIcon,
+	'hero:security': HeroShieldCheckIcon,
+	'hero:refresh': HeroArrowPathIcon,
+} as const
+
+export type IconName = typeof RAW_ICON_NAMES[number] | keyof typeof ALIASES | keyof typeof HERO_ICON_COMPONENTS
 export function listIconNames(): string[] {
 	return Array.from(new Set([...RAW_ICON_NAMES, ...Object.keys(ALIASES)])).sort()
 }
@@ -96,6 +121,17 @@ export function Icon({
   size?: Size
   title?: string
 }) {
+	// If heroicon
+	if (name in HERO_ICON_COMPONENTS) {
+		const HeroComp = HERO_ICON_COMPONENTS[name as keyof typeof HERO_ICON_COMPONENTS]
+		return (
+			<HeroComp
+				{...props}
+				className={cn(sizeClassName[size], 'inline self-center', className)}
+				aria-hidden={title ? undefined : 'true'}
+			/>
+		)
+	}
 	const resolved: string = (name in ALIASES ? ALIASES[name] : name) as string
 	const isKnown = RAW_ICON_NAMES.includes(resolved as any)
 
