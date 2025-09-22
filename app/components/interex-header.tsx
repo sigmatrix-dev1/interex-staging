@@ -1,7 +1,8 @@
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { Link } from 'react-router'
 import { Icon } from '#app/components/ui/icon.tsx'
 import { UserDropdown } from '#app/components/user-dropdown.tsx'
-import { INTEREX_ROLES } from '#app/utils/interex-roles.ts'
+import { buildNavItems, type NavGroup, type NavLink } from '#app/utils/build-nav-items.ts'
 import { type User } from '#app/utils/role-redirect.server.ts'
 
 interface InterexHeaderProps {
@@ -25,158 +26,34 @@ export function InterexHeader({
                                   actions,
                                   hideBrandBar = false,
                               }: InterexHeaderProps) {
-    const userRoles = user.roles.map(r => r.name)
+    const items = buildNavItems(user)
+    const [openGroup, setOpenGroup] = useState<string | null>(null)
+    const menuRef = useRef<HTMLDivElement | null>(null)
 
-    const navItems: Array<{ name: string; href: string; icon: string; description: string }> = []
+    const isLinkActive = (link: NavLink) => currentPath === link.href
+    const groupHasActive = (group: NavGroup) => group.items.some(isLinkActive)
 
-    // System Admin navigation (MOVED: Provider & eMDR Management lives here now)
-    if (userRoles.includes(INTEREX_ROLES.SYSTEM_ADMIN)) {
-        navItems.push(
-            {
-                name: 'Admin Dashboard',
-                href: '/admin/dashboard',
-                icon: 'settings',
-                description: 'System administration',
-            },
-            {
-                name: 'Audit Logs',
-                href: '/admin/audit-logs',
-                icon: 'file-text',
-                description: 'System audit trail',
-            },
-            {
-                name: 'Provider & eMDR Management',
-                href: '/admin/providers-emdr-management',
-                icon: 'id-card',
-                description: 'Manage providers (all customers)',
-            },
-            {
-                name: 'Letters',
-                href: '/admin/all-letters',
-                icon: 'file-text',
-                description: 'All letters for your NPIs',
-            },
-        )
-    }
+    const handleOutside = useCallback((e: MouseEvent) => {
+        if (!menuRef.current) return
+        if (!menuRef.current.contains(e.target as Node)) setOpenGroup(null)
+    }, [])
 
-    // Customer Admin navigation (REMOVED Provider & eMDR Management from here)
-    if (userRoles.includes(INTEREX_ROLES.CUSTOMER_ADMIN)) {
-        navItems.push(
-            {
-                name: 'Customer Dashboard',
-                href: '/customer',
-                icon: 'file-text',
-                description: 'Manage your organization',
-            },
-            {
-                name: 'Submissions',
-                href: '/customer/submissions',
-                icon: 'file-text',
-                description: 'Manage HIH submissions',
-            },
-            {
-                name: 'Provider Groups',
-                href: '/customer/provider-groups',
-                icon: 'file-text',
-                description: 'Manage provider groups',
-            },
-            {
-                name: 'User Management',
-                href: '/customer/users',
-                icon: 'avatar',
-                description: 'Manage organization users',
-            },
-            {
-                name: 'Provider NPIs',
-                href: '/customer/provider-npis',
-                icon: 'id-card',
-                description: 'Manage provider NPIs',
-            },
-            {
-                name: 'Provider & eMDR Management',
-                href: '/providers-emdr',
-                icon: 'id-card',
-                description: 'Provider Management & eMDR Registration/deRegistration',
-            },
-            {
-                name: 'Letters',
-                href: '/customer/letters',
-                icon: 'file-text',
-                description: 'All letters for your NPIs',
-            },
-        )
-    }
+    useEffect(() => {
+        document.addEventListener('mousedown', handleOutside)
+        return () => document.removeEventListener('mousedown', handleOutside)
+    }, [handleOutside])
 
-    // Provider Group Admin navigation
-    if (userRoles.includes(INTEREX_ROLES.PROVIDER_GROUP_ADMIN)) {
-        navItems.push(
-            {
-                name: 'Provider Dashboard',
-                href: '/provider',
-                icon: 'file-text',
-                description: 'Manage your provider group',
-            },
-            {
-                name: 'Submissions',
-                href: '/customer/submissions',
-                icon: 'file-text',
-                description: 'Manage HIH submissions',
-            },
-            {
-                name: 'Group Users',
-                href: '/customer/users',
-                icon: 'avatar',
-                description: 'Manage group users',
-            },
-            {
-                name: 'Provider NPIs',
-                href: '/customer/provider-npis',
-                icon: 'id-card',
-                description: 'Manage provider NPIs',
-            },
-            {
-                name: 'Provider & eMDR Management',
-                href: '/providers-emdr',
-                icon: 'id-card',
-                description: 'Provider Management & eMDR Registration/deRegistration',
-            },
-            {
-                name: 'Letters',
-                href: '/customer/letters',
-                icon: 'file-text',
-                description: 'All letters for your NPIs',
-            },
-        )
-    }
+    useEffect(() => {
+        setOpenGroup(null)
+    }, [currentPath])
 
-    // Basic User navigation
-    if (userRoles.includes(INTEREX_ROLES.BASIC_USER)) {
-        navItems.push(
-            {
-                name: 'Submissions',
-                href: '/customer/submissions',
-                icon: 'file-text',
-                description: 'Submit HIH documentation',
-            },
-            {
-                name: 'My NPIs',
-                href: '/my-npis',
-                icon: 'passkey',
-                description: 'View assigned NPIs',
-            },
-            {
-                name: 'Provider & eMDR Management',
-                href: '/providers-emdr',
-                icon: 'id-card',
-                description: 'Provider Management & eMDR Registration/deRegistration',
-            },
-            {
-                name: 'Letters',
-                href: '/customer/letters',
-                icon: 'file-text',
-                description: 'All letters for your NPIs',
-            },
-        )
+    const onKeyGroup = (e: React.KeyboardEvent, name: string) => {
+        if (['Enter', ' ', 'ArrowDown'].includes(e.key)) {
+            e.preventDefault()
+            setOpenGroup(g => (g === name ? null : name))
+        } else if (e.key === 'Escape') {
+            setOpenGroup(null)
+        }
     }
 
     return (
@@ -198,22 +75,74 @@ export function InterexHeader({
                                 </Link>
                             </div>
                             <div className="hidden sm:ml-6 sm:flex sm:space-x-8">
-                                {navItems.map(item => {
-                                    const isActive = currentPath === item.href
+                                {items.map(item => {
+                                    if (item.type === 'link') {
+                                        const link = item as NavLink
+                                        const active = isLinkActive(link)
+                                        return (
+                                            <Link
+                                                key={link.name}
+                                                to={link.href}
+                                                className={`inline-flex h-16 -mb-px items-center gap-2 px-3 border-b-2 text-sm font-medium transition-colors ${
+                                                    active
+                                                        ? 'border-blue-500 text-gray-900'
+                                                        : 'border-transparent text-gray-600 hover:text-gray-800 hover:border-gray-300'
+                                                }`}
+                                                title={link.description}
+                                            >
+                                                <Icon name={link.icon as any} className="w-4 h-4" />
+                                                {link.name}
+                                            </Link>
+                                        )
+                                    }
+                                    const group = item as NavGroup
+                                    const active = groupHasActive(group)
+                                    const open = openGroup === group.name
                                     return (
-                                        <Link
-                                            key={item.name}
-                                            to={item.href}
-                                            className={`inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium ${
-                                                isActive
-                                                    ? 'border-blue-500 text-gray-900'
-                                                    : 'border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700'
-                                            }`}
-                                            title={item.description}
-                                        >
-                                            <Icon name={item.icon as any} className="w-4 h-4 mr-2" />
-                                            {item.name}
-                                        </Link>
+                                        <div key={group.name} className="relative" ref={open ? menuRef : undefined}>
+                                            <button
+                                                type="button"
+                                                onClick={() => setOpenGroup(g => (g === group.name ? null : group.name))}
+                                                onKeyDown={e => onKeyGroup(e, group.name)}
+                                                aria-haspopup="menu"
+                                                aria-expanded={open}
+                                                className={`inline-flex h-16 -mb-px items-center gap-2 px-3 border-b-2 text-sm font-medium transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:rounded ${
+                                                    active || open
+                                                        ? 'border-blue-500 text-gray-900'
+                                                        : 'border-transparent text-gray-600 hover:text-gray-800 hover:border-gray-300'
+                                                }`}
+                                            >
+                                                <Icon name={group.icon as any} className="w-4 h-4" />
+                                                {group.name}
+                                                <Icon name="arrow-left" className={`w-4 h-4 transition-transform ${open ? 'rotate-90' : '-rotate-90'}`} />
+                                            </button>
+                                            {open && (
+                                                <div
+                                                    role="menu"
+                                                    className="absolute left-0 top-full min-w-[14rem] translate-y-px rounded-md border border-gray-200 bg-white shadow-lg z-30 py-1"
+                                                >
+                                                    {group.items.map(child => {
+                                                        const childActive = isLinkActive(child)
+                                                        return (
+                                                            <Link
+                                                                key={child.name}
+                                                                to={child.href}
+                                                                role="menuitem"
+                                                                className={`flex items-start gap-2 px-3 py-2 text-sm transition hover:bg-gray-50 focus:bg-gray-50 focus:outline-none ${
+                                                                    childActive ? 'text-blue-600 font-medium' : 'text-gray-700'
+                                                                }`}
+                                                            >
+                                                                <Icon name={child.icon as any} className="w-4 h-4 mt-0.5" />
+                                                                <div className="flex flex-col">
+                                                                    <span>{child.name}</span>
+                                                                    <span className="text-[11px] text-gray-500 leading-tight">{child.description}</span>
+                                                                </div>
+                                                            </Link>
+                                                        )
+                                                    })}
+                                                </div>
+                                            )}
+                                        </div>
                                     )
                                 })}
                             </div>
@@ -229,26 +158,64 @@ export function InterexHeader({
                 {/* Mobile menu */}
                 <div className="sm:hidden">
                     <div className="pt-2 pb-3 space-y-1">
-                        {navItems.map(item => {
-                            const isActive = currentPath === item.href
-                            return (
-                                <Link
-                                    key={item.name}
-                                    to={item.href}
-                                    className={`block pl-3 pr-4 py-2 border-l-4 text-base font-medium ${
-                                        isActive
-                                            ? 'bg-blue-50 border-blue-500 text-blue-700'
-                                            : 'border-transparent text-gray-600 hover:bg-gray-50 hover:border-gray-300 hover:text-gray-800'
-                                    }`}
-                                >
-                                    <div className="flex items-center">
-                                        <Icon name={item.icon as any} className="w-4 h-4 mr-3" />
-                                        <div>
-                                            <div>{item.name}</div>
-                                            <div className="text-xs text-gray-500">{item.description}</div>
+                        {items.map(item => {
+                            if (item.type === 'link') {
+                                const link = item as NavLink
+                                const active = isLinkActive(link)
+                                return (
+                                    <Link
+                                        key={link.name}
+                                        to={link.href}
+                                        className={`block pl-3 pr-4 py-2 border-l-4 text-base font-medium ${
+                                            active
+                                                ? 'bg-blue-50 border-blue-500 text-blue-700'
+                                                : 'border-transparent text-gray-600 hover:bg-gray-50 hover:border-gray-300 hover:text-gray-800'
+                                        }`}
+                                    >
+                                        <div className="flex items-center">
+                                            <Icon name={link.icon as any} className="w-4 h-4 mr-3" />
+                                            <div>
+                                                <div>{link.name}</div>
+                                                <div className="text-xs text-gray-500">{link.description}</div>
+                                            </div>
                                         </div>
-                                    </div>
-                                </Link>
+                                    </Link>
+                                )
+                            }
+                            const group = item as NavGroup
+                            const active = groupHasActive(group)
+                            return (
+                                <div key={group.name} className="border-t first:border-t-0">
+                                    <button
+                                        type="button"
+                                        onClick={() => setOpenGroup(g => (g === group.name ? null : group.name))}
+                                        className={`w-full flex items-center gap-2 pl-3 pr-4 py-2 text-left text-base font-medium ${
+                                            active ? 'bg-blue-50 text-blue-700' : 'text-gray-700 hover:bg-gray-50'
+                                        }`}
+                                    >
+                                        <Icon name={group.icon as any} className="w-4 h-4" />
+                                        <span className="flex-1">{group.name}</span>
+                                        <Icon name="arrow-left" className={`w-4 h-4 transition-transform ${openGroup === group.name ? 'rotate-90' : '-rotate-90'}`} />
+                                    </button>
+                                    {openGroup === group.name && (
+                                        <div className="pl-6 pb-2 space-y-1">
+                                            {group.items.map(child => {
+                                                const childActive = isLinkActive(child)
+                                                return (
+                                                    <Link
+                                                        key={child.name}
+                                                        to={child.href}
+                                                        className={`block pr-4 py-1 text-sm ${
+                                                            childActive ? 'text-blue-600 font-medium' : 'text-gray-600 hover:text-gray-800'
+                                                        }`}
+                                                    >
+                                                        {child.name}
+                                                    </Link>
+                                                )
+                                            })}
+                                        </div>
+                                    )}
+                                </div>
                             )
                         })}
                     </div>

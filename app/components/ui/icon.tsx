@@ -1,10 +1,57 @@
 import { type SVGProps } from 'react'
 import { cn } from '#app/utils/misc.tsx'
 import href from './icons/sprite.svg'
-import { type IconName } from '@/icon-name'
+
+// NOTE: build step should overwrite types/icon-name.d.ts with a union.
+// Until then we maintain a runtime list + aliases for safety.
+const RAW_ICON_NAMES = [
+	'arrow-left',
+	'arrow-right',
+	'avatar',
+	'camera',
+	'clock',
+	'cross-1',
+	'download',
+	'dots-horizontal',
+	'envelope-closed',
+	'exit',
+	'file-text',
+	'gear',
+	'github-logo',
+	'id-card',
+	'laptop',
+	'link-2',
+	'lock-closed',
+	'lock-open-1',
+	'magnifying-glass',
+	'moon',
+	'pencil-1',
+	'pencil-2',
+	'question-mark-circled',
+	'reset',
+	'sun',
+	'trash',
+	'update',
+] as const
+
+// Common aliases so nav can use friendlier names.
+const ALIASES: Record<string, (typeof RAW_ICON_NAMES)[number]> = {
+  users: 'avatar',
+  gauge: 'gear',
+  settings: 'gear',
+  inbox: 'envelope-closed',
+  mail: 'envelope-closed',
+  wrench: 'gear',
+  'layer-group': 'gear',
+  passkey: 'lock-closed',
+}
+
+export type IconName = typeof RAW_ICON_NAMES[number] | keyof typeof ALIASES
+export function listIconNames(): string[] {
+	return Array.from(new Set([...RAW_ICON_NAMES, ...Object.keys(ALIASES)])).sort()
+}
 
 export { href }
-export { IconName }
 
 const sizeClassName = {
 	font: 'size-[1em]',
@@ -45,17 +92,20 @@ export function Icon({
 	children,
 	...props
 }: SVGProps<SVGSVGElement> & {
-	name: IconName
-	size?: Size
-	title?: string
+  name: IconName
+  size?: Size
+  title?: string
 }) {
+	const resolved: string = (name in ALIASES ? ALIASES[name] : name) as string
+	const isKnown = RAW_ICON_NAMES.includes(resolved as any)
+
 	if (children) {
 		return (
 			<span
 				className={`inline-flex items-center ${childrenSizeClassName[size]}`}
 			>
 				<Icon
-					name={name}
+					name={resolved as IconName}
 					size={size}
 					className={className}
 					title={title}
@@ -65,13 +115,31 @@ export function Icon({
 			</span>
 		)
 	}
+	if (!isKnown) {
+		if (process.env.NODE_ENV !== 'production') {
+			console.warn(`[Icon] Unknown icon "${name}" (resolved to "${resolved}"). Available: ${listIconNames().join(', ')}`)
+		}
+		// Avoid passing SVG-only props to span: pick only className & title
+		return (
+			<span
+				className={cn(
+					sizeClassName[size],
+					'inline-flex items-center justify-center rounded bg-red-50 text-red-600 text-[10px] font-medium',
+					className,
+				)}
+				title={title || `Unknown icon: ${name}`}
+			>
+				?
+			</span>
+		)
+	}
 	return (
 		<svg
 			{...props}
 			className={cn(sizeClassName[size], 'inline self-center', className)}
 		>
 			{title ? <title>{title}</title> : null}
-			<use href={`${href}#${name}`} />
+			<use href={`${href}#${resolved}`} />
 		</svg>
 	)
 }
