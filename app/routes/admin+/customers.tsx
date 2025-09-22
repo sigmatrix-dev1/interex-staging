@@ -13,13 +13,13 @@ import { Icon } from '#app/components/ui/icon.tsx'
 import { StatusButton } from '#app/components/ui/status-button.tsx'
 import { requireUserId } from '#app/utils/auth.server.ts'
 import { prisma } from '#app/utils/db.server.ts'
+import { sendTemporaryPasswordEmail } from '#app/utils/emails/send-temporary-password.server.ts'
 import { INTEREX_ROLES } from '#app/utils/interex-roles.ts'
-import { requireRoles } from '#app/utils/role-redirect.server.ts'
+import { useIsPending } from '#app/utils/misc.tsx'
 import { generateTemporaryPassword, hashPassword } from '#app/utils/password.server.ts'
+import { requireRoles } from '#app/utils/role-redirect.server.ts'
 import { redirectWithToast, getToast } from '#app/utils/toast.server.ts'
 import { UsernameSchema, EmailSchema } from '#app/utils/user-validation.ts'
-import { useIsPending } from '#app/utils/misc.tsx'
-import { sendTemporaryPasswordEmail } from '#app/utils/emails/send-temporary-password.server.ts'
 
 const CreateCustomerSchema = z.object({
   intent: z.literal('create'),

@@ -7,6 +7,7 @@ import { Field, ErrorList } from '#app/components/forms.tsx'
 import { StatusButton } from '#app/components/ui/status-button.tsx'
 import { requireUserId } from '#app/utils/auth.server.ts'
 import { prisma } from '#app/utils/db.server.ts'
+import { useIsPending } from '#app/utils/misc.tsx'
 import { 
 	generateTwoFactorSecret, 
 	verifyTwoFactorToken, 
@@ -14,7 +15,6 @@ import {
 	disableTwoFactorForUser,
 	getUserTwoFactorStatus 
 } from '#app/utils/twofa.server.ts'
-import { useIsPending } from '#app/utils/misc.tsx'
 
 const TwoFAVerifySchema = z.object({
 	code: z.string().min(6, 'Verification code must be 6 digits').max(6),

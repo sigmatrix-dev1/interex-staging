@@ -64,7 +64,7 @@ export function getEnv() {
 type ENV = ReturnType<typeof getEnv>
 
 declare global {
-    // eslint-disable-next-line no-var
+     
     var ENV: ENV
     interface Window {
         ENV: ENV
@@ -85,7 +85,7 @@ export const PCG_ENV = {
 
 // (Optional) tiny boot log to confirm which host you're hitting
 try {
-    // eslint-disable-next-line no-console
+     
     console.info(
         'PCG hardcoded env in use',
         JSON.stringify({ tokenUrlHost: new URL(PCG_ENV.TOKEN_URL).host, scope: PCG_ENV.SCOPE }),

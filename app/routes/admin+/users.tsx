@@ -19,19 +19,19 @@ import { InterexLayout } from '#app/components/interex-layout.tsx'
 import { Button } from '#app/components/ui/button.tsx'
 import { Drawer } from '#app/components/ui/drawer.tsx'
 import { Icon } from '#app/components/ui/icon.tsx'
+import { StatusButton } from '#app/components/ui/status-button.tsx'
+import { prepareVerification } from '#app/routes/_auth+/verify.server.ts'
 import { requireUserId } from '#app/utils/auth.server.ts'
 import { prisma } from '#app/utils/db.server.ts'
+import { sendAdminPasswordManualResetEmail } from '#app/utils/emails/send-admin-password-manual-reset.server.ts'
+import { sendAdminPasswordResetLinkEmail } from '#app/utils/emails/send-admin-password-reset-link.server.ts'
 import { INTEREX_ROLES } from '#app/utils/interex-roles.ts'
+import { useIsPending } from '#app/utils/misc.tsx'
+import { generateTemporaryPassword, hashPassword } from '#app/utils/password.server.ts'
 import { requireRoles } from '#app/utils/role-redirect.server.ts'
 import { redirectWithToast } from '#app/utils/toast.server.ts'
-import { StatusButton } from '#app/components/ui/status-button.tsx'
-import { useIsPending } from '#app/utils/misc.tsx'
 
 // NEW: password helpers + email senders + verification prep
-import { generateTemporaryPassword, hashPassword } from '#app/utils/password.server.ts'
-import { sendAdminPasswordResetLinkEmail } from '#app/utils/emails/send-admin-password-reset-link.server.ts'
-import { sendAdminPasswordManualResetEmail } from '#app/utils/emails/send-admin-password-manual-reset.server.ts'
-import { prepareVerification } from '#app/routes/_auth+/verify.server.ts'
 
 const CreateUserSchema = z.object({
     email: z.string().email('Invalid email address'),

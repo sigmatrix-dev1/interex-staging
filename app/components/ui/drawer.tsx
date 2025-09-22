@@ -19,11 +19,7 @@ export function Drawer({ isOpen, onClose, title, children, size = 'md' }: Drawer
 
   if (!isOpen) return null
 
-  const wrapperPad = size === 'fullscreen' ? 'pl-0 sm:pl-0' : 'pl-10 sm:pl-16'
-  const panelDims =
-      size === 'fullscreen'
-          ? 'w-screen h-screen rounded-none' // full viewport, no rounded corners
-          : 'w-screen'
+  // Removed unused wrapperPad and panelDims (previous layout refactor left them unused)
 
   return (
     <Fragment>
