@@ -69,6 +69,7 @@ async function writeAudit(input: {
         | 'PROVIDER_TOGGLE_ACTIVE'
         | 'PCG_ADD_PROVIDER_NPI'
         | 'PROVIDER_FETCH_REMOTE_NPIS'
+        | 'PROVIDER_ASSIGN_USER_ATTEMPT'
     entityId?: string | null
     success: boolean
     message?: string | null
@@ -137,6 +138,13 @@ const ToggleActiveSchema = z.object({
         }),
 })
 
+// Lightweight schema for inline provider group assignment/unassignment
+const UpdateGroupSchema = z.object({
+    intent: z.literal('update-group'),
+    providerId: z.string().min(1, 'Provider ID is required'),
+    providerGroupId: z.string().optional(), // empty or missing => unassign
+})
+
 export async function loader({ request }: LoaderFunctionArgs) {
     const [{ requireUserId }, { prisma }, { requireRoles }, { getToast }] = await Promise.all([
         import('#app/utils/auth.server.ts'),
@@ -167,7 +175,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
     const userRoles = user.roles.map(r => r.name)
     const isCustomerAdmin = userRoles.includes(INTEREX_ROLES.CUSTOMER_ADMIN)
     const isProviderGroupAdmin = userRoles.includes(INTEREX_ROLES.PROVIDER_GROUP_ADMIN)
-    const /* unused (logic retained for possible future scope checks) */ isBasicUser = userRoles.includes(INTEREX_ROLES.BASIC_USER)
+    const isBasicUser = userRoles.includes(INTEREX_ROLES.BASIC_USER)
 
     if (isProviderGroupAdmin && !isCustomerAdmin && !user.providerGroupId) {
         throw new Response('Provider group admin must be assigned to a provider group', { status: 400 })
@@ -201,6 +209,9 @@ export async function loader({ request }: LoaderFunctionArgs) {
                 where: whereConditions,
                 include: {
                     providerGroup: true,
+                    userNpis: {
+                        include: { user: { select: { id: true, name: true, email: true, providerGroupId: true } } },
+                    },
                     _count: { select: { userNpis: true } },
                     // Include authoritative names from PCG-synced tables (if available)
                     listDetail: { select: { providerName: true } },
@@ -226,9 +237,113 @@ export async function loader({ request }: LoaderFunctionArgs) {
         take: 500,
     })
 
+    // For assignment list: all active users within same customer (scoped for provider group admin)
+    const assignableUsers = await prisma.user.findMany({
+        where: {
+            customerId: user.customerId,
+            active: true,
+            roles: {
+                none: {
+                    name: { in: [INTEREX_ROLES.CUSTOMER_ADMIN, INTEREX_ROLES.PROVIDER_GROUP_ADMIN] },
+                },
+            },
+            ...(isProviderGroupAdmin && !isCustomerAdmin
+                ? { providerGroupId: user.providerGroupId }
+                : {}),
+        },
+        select: { id: true, name: true, email: true, providerGroupId: true },
+        orderBy: { name: 'asc' },
+    })
+
     const { toast, headers } = await getToast(request)
+    // Guard rail eligibility metadata per provider row
+    // Rules to encode:
+    // 1. If provider has NO group -> may only assign users with no group (eligibleUserGroupScope = 'UNGROUPED_ONLY')
+    // 2. If provider HAS a group -> may only assign users in that group (eligibleUserGroupScope = 'SPECIFIC_GROUP')
+    // 3. If provider has one/more assigned users that are UNGROUPED while provider currently NO group, we allow continuing ungrouped assignments but BLOCK adding a group unless all existing users join that group.
+    // 4. If provider has ungrouped users AND a group (should already be blocked by existing assignment logic) we flag mismatch.
+    // Additional metadata will drive disabling UI actions & surfacing tooltips.
+    const providerEligibility = customer.providers.map(p => {
+        const assignedUsers = p.userNpis.map(l => l.user)
+        const providerGroupId = p.providerGroupId || null
+        const hasProviderGroup = Boolean(providerGroupId)
+        const anyAssignedUngrouped = assignedUsers.some(u => !u.providerGroupId)
+        const anyAssignedGrouped = assignedUsers.some(u => u.providerGroupId)
+        const assignedGroupIds = Array.from(new Set(assignedUsers.map(u => u.providerGroupId).filter(Boolean))) as string[]
+
+        let eligibleUserGroupScope: 'UNGROUPED_ONLY' | 'SPECIFIC_GROUP' = hasProviderGroup ? 'SPECIFIC_GROUP' : 'UNGROUPED_ONLY'
+        let groupChangeBlocked = false
+        let groupChangeBlockReason: string | null = null
+        let userAssignReason: string | null = null
+
+        if (!hasProviderGroup) {
+            // Provider currently ungrouped
+            if (anyAssignedUngrouped) {
+                // Cannot add a provider group until all current ungrouped users are moved into that group (business rule #2)
+                groupChangeBlocked = true
+                groupChangeBlockReason = 'NPI has assigned user/s who are not part of a Provider Group. Unassign them first and then assign a Provider Group.'
+            }
+            if (anyAssignedGrouped) {
+                // Mismatch: provider ungrouped but has grouped users (existing mismatch detection covers) – treat like allow only ungrouped new users? Actually we should disallow further grouped assignments.
+                userAssignReason = 'Provider ungrouped: only users without a group can be assigned.'
+            }
+        } else {
+            // Provider grouped – only users in this group are eligible
+            if (anyAssignedUngrouped) {
+                // This is an inconsistent state; highlight for remediation
+                userAssignReason = 'Provider is in a group but has ungrouped users assigned (remove or add them to the group).'
+            }
+        }
+
+        return {
+            id: p.id,
+            providerGroupId,
+            eligibleUserGroupScope,
+            groupChangeBlocked,
+            groupChangeBlockReason,
+            userAssignReason,
+            assignedGroupIds,
+            anyAssignedUngrouped,
+        }
+    })
+    // Detect providers where an assigned user has a providerGroupId different from provider.providerGroupId
+    // Rule: if any user on a provider has a group and provider has none OR different group -> mismatch
+    const providerGroupMismatches = customer.providers
+        .filter(p =>
+            p.userNpis.some(link => {
+                const userGroup = link.user.providerGroupId
+                if (!userGroup) return false
+                return p.providerGroupId !== userGroup
+            }),
+        )
+        .map(p => ({
+            id: p.id,
+            npi: p.npi,
+            name: p.name,
+            providerGroupId: p.providerGroupId,
+            userGroups: Array.from(
+                new Set(
+                    p.userNpis
+                        .map(l => l.user.providerGroupId)
+                        .filter((g): g is string => Boolean(g) && g !== p.providerGroupId),
+                ),
+            ),
+        }))
+
     return data(
-        { user, customer, searchParams, toast, events, isCustomerAdmin, isProviderGroupAdmin },
+        {
+            user,
+            customer,
+            searchParams,
+            toast,
+            events,
+            isCustomerAdmin,
+            isProviderGroupAdmin,
+            isBasicUser,
+            assignableUsers,
+            providerGroupMismatches,
+            providerEligibility,
+        },
         { headers: headers ?? undefined },
     )
 }
@@ -268,6 +383,7 @@ export async function action({ request }: ActionFunctionArgs) {
     const rolesCsv = userRoles.join(',')
     const isCustomerAdmin = userRoles.includes(INTEREX_ROLES.CUSTOMER_ADMIN)
     const isProviderGroupAdmin = userRoles.includes(INTEREX_ROLES.PROVIDER_GROUP_ADMIN)
+    const isBasicUser = userRoles.includes(INTEREX_ROLES.BASIC_USER)
     if (isProviderGroupAdmin && !isCustomerAdmin && !user.providerGroupId) {
         throw new Response('Provider group admin must be assigned to a provider group', { status: 400 })
     }
@@ -314,14 +430,7 @@ export async function action({ request }: ActionFunctionArgs) {
     }
 
     if (intent === 'create') {
-        // Only Customer Admin and Provider Group Admin may create
-        if (!isCustomerAdmin && !isProviderGroupAdmin) {
-            return redirectWithToast('/customer/provider-npis', {
-                type: 'error',
-                title: 'Access denied',
-                description: 'You do not have permission to add provider NPIs.',
-            })
-        }
+        // Customer Admin, Provider Group Admin, and Basic User may create
 
         const submission = parseWithZod(formData, { schema: CreateProviderSchema })
         if (submission.status !== 'success') {
@@ -330,7 +439,11 @@ export async function action({ request }: ActionFunctionArgs) {
 
         const { npi, name } = submission.value
         const providerGroupIdRaw = submission.value.providerGroupId
-        const providerGroupId = providerGroupIdRaw && providerGroupIdRaw.length > 0 ? providerGroupIdRaw : null
+        let providerGroupId = providerGroupIdRaw && providerGroupIdRaw.length > 0 ? providerGroupIdRaw : null
+        // Force group for provider group admin / basic user (if they have one)
+        if (!isCustomerAdmin && (isProviderGroupAdmin || isBasicUser)) {
+            providerGroupId = user.providerGroupId ?? null
+        }
 
         // Only block if the NPI already exists for THIS customer
         const existingProvider = await prisma.provider.findFirst({
@@ -430,6 +543,13 @@ export async function action({ request }: ActionFunctionArgs) {
                 data: { npi, name, customerId: user.customerId, providerGroupId, active: true },
             })
 
+            // Auto assign creator if basic user
+            if (isBasicUser && !isCustomerAdmin && !isProviderGroupAdmin) {
+                try {
+                    await prisma.userNpi.create({ data: { userId: userId, providerId: created.id } })
+                } catch {}
+            }
+
             await logProviderEvent({
                 providerId: created.id,
                 customerId: user.customerId,
@@ -492,7 +612,7 @@ export async function action({ request }: ActionFunctionArgs) {
         return redirectWithToast('/customer/provider-npis', {
             type: 'success',
             title: 'Provider NPI created',
-            description: `NPI ${npi} (${name}) has been added (synced or already present in PCG).`,
+            description: `NPI ${npi} (${name}) has been added${isBasicUser && !isCustomerAdmin && !isProviderGroupAdmin ? ' and assigned to you' : ''}.`,
         })
     }
 
@@ -690,11 +810,464 @@ export async function action({ request }: ActionFunctionArgs) {
         })
     }
 
+    if (intent === 'update-group') {
+        // Only Customer Admin and Provider Group Admin may change groups
+        if (!isCustomerAdmin && !isProviderGroupAdmin) {
+            return redirectWithToast('/customer/provider-npis', {
+                type: 'error',
+                title: 'Access denied',
+                description: 'You do not have permission to modify provider groups.',
+            })
+        }
+
+        const submission = parseWithZod(formData, { schema: UpdateGroupSchema })
+        if (submission.status !== 'success') {
+            return data({ result: submission.reply() }, { status: submission.status === 'error' ? 400 : 200 })
+        }
+        const { providerId, providerGroupId } = submission.value
+        const newGroupId = providerGroupId && providerGroupId.length > 0 ? providerGroupId : null
+
+        const provider = await prisma.provider.findFirst({
+            where: { id: providerId, customerId: user.customerId },
+            select: { id: true, npi: true, providerGroupId: true, userNpis: { select: { id: true, user: { select: { providerGroupId: true } } } } },
+        })
+        if (!provider) {
+            return redirectWithToast('/customer/provider-npis', {
+                type: 'error',
+                title: 'Provider not found',
+                description: 'Provider not found or not authorized.',
+            })
+        }
+
+        // Provider group admin scope: can only assign/unassign within their own group
+        if (isProviderGroupAdmin && !isCustomerAdmin) {
+            if (provider.providerGroupId && provider.providerGroupId !== user.providerGroupId) {
+                return redirectWithToast('/customer/provider-npis', {
+                    type: 'error',
+                    title: 'Wrong scope',
+                    description: 'You can only modify providers in your group.',
+                })
+            }
+            if (newGroupId && newGroupId !== user.providerGroupId) {
+                return redirectWithToast('/customer/provider-npis', {
+                    type: 'error',
+                    title: 'Wrong group',
+                    description: 'You can only assign your own provider group.',
+                })
+            }
+        }
+
+        if (newGroupId) {
+            const groupOk = await prisma.providerGroup.findFirst({
+                where: { id: newGroupId, customerId: user.customerId },
+                select: { id: true },
+            })
+            if (!groupOk) {
+                return redirectWithToast('/customer/provider-npis', {
+                    type: 'error',
+                    title: 'Invalid group',
+                    description: 'Selected provider group is invalid.',
+                })
+            }
+            // Guard Rail #2: If provider has any assigned users that are UNGROUPED, block adding a group until they join a group.
+            const anyUngroupedUsers = provider.userNpis.some(l => !l.user.providerGroupId)
+            if (anyUngroupedUsers && !provider.providerGroupId) {
+                try {
+                    await writeAudit({
+                        userId,
+                        rolesCsv,
+                        customerId: user.customerId,
+                        action: 'PROVIDER_UPDATE',
+                        entityId: provider.id,
+                        success: false,
+                        message: 'Blocked group assignment: ungrouped users exist',
+                        payload: { providerId: provider.id, attemptedGroupId: newGroupId, reason: 'UNGROUPED_USER_BLOCK' },
+                    })
+                } catch {}
+                return redirectWithToast('/customer/provider-npis', {
+                    type: 'error',
+                    title: 'Group assignment blocked',
+                    description: 'Cannot assign a group while ungrouped users are assigned. Move users into a group first.',
+                })
+            }
+        }
+
+        const oldGroupId = provider.providerGroupId
+        if (oldGroupId === newGroupId) {
+            return redirectWithToast('/customer/provider-npis', {
+                type: 'success',
+                title: 'No changes',
+                description: 'Provider group unchanged.',
+            })
+        }
+
+        await prisma.provider.update({
+            where: { id: provider.id },
+            data: { providerGroupId: newGroupId },
+        })
+
+        await logProviderEvent({
+            providerId: provider.id,
+            customerId: user.customerId,
+            actorId: userId,
+            kind: newGroupId ? 'GROUP_ASSIGNED' : 'GROUP_UNASSIGNED',
+            message: newGroupId ? `Assigned to group ${newGroupId}` : 'Unassigned from provider group',
+            payload: { field: 'providerGroupId', from: oldGroupId, to: newGroupId },
+        })
+
+        try {
+            await writeAudit({
+                userId,
+                rolesCsv,
+                customerId: user.customerId,
+                action: 'PROVIDER_UPDATE',
+                entityId: provider.id,
+                success: true,
+                message: newGroupId ? 'Provider group assigned' : 'Provider group unassigned',
+                payload: { providerGroupId: newGroupId },
+                meta: { changed: ['providerGroupId'] },
+            })
+        } catch {}
+
+        return redirectWithToast('/customer/provider-npis', {
+            type: 'success',
+            title: newGroupId ? 'Group assigned' : 'Group removed',
+            description: `NPI ${provider.npi} ${newGroupId ? 'assigned to group' : 'unassigned from group'}.`,
+        })
+    }
+
+    if (intent === 'update-user-assignment') {
+        // Only admins may modify user assignments
+        if (!isCustomerAdmin && !isProviderGroupAdmin) {
+            return redirectWithToast('/customer/provider-npis', {
+                type: 'error',
+                title: 'Access denied',
+                description: 'You do not have permission to modify user assignment.',
+            })
+        }
+        const providerId = String(formData.get('providerId') || '')
+        const userAssignId = String(formData.get('userId') || '')
+        const unassign = formData.get('unassign') === 'true'
+
+        if (!providerId) {
+            return redirectWithToast('/customer/provider-npis', {
+                type: 'error',
+                title: 'Missing provider',
+                description: 'Provider id is required.',
+            })
+        }
+        const provider = await prisma.provider.findFirst({
+            where: { id: providerId, customerId: user.customerId },
+            select: { id: true, providerGroupId: true, npi: true, userNpis: { select: { id: true, user: { select: { providerGroupId: true } } } } },
+        })
+        if (!provider) {
+            return redirectWithToast('/customer/provider-npis', {
+                type: 'error',
+                title: 'Provider not found',
+                description: 'Provider not found or not authorized.',
+            })
+        }
+
+        // Provider group admin scope: only providers in own group (or ungrouped)
+        if (isProviderGroupAdmin && !isCustomerAdmin) {
+            if (provider.providerGroupId && provider.providerGroupId !== user.providerGroupId) {
+                return redirectWithToast('/customer/provider-npis', {
+                    type: 'error',
+                    title: 'Wrong scope',
+                    description: 'You can only modify providers in your group.',
+                })
+            }
+        }
+
+        if (unassign) {
+            const linkId = String(formData.get('linkId') || '')
+            if (!linkId) {
+                return redirectWithToast('/customer/provider-npis', {
+                    type: 'error',
+                    title: 'Missing assignment',
+                    description: 'Assignment link id required to unassign.',
+                })
+            }
+            await prisma.userNpi.delete({ where: { id: linkId } })
+            return redirectWithToast('/customer/provider-npis', {
+                type: 'success',
+                title: 'User unassigned',
+                description: `User removed from NPI ${provider.npi}.`,
+            })
+        }
+
+        if (!userAssignId) {
+            return redirectWithToast('/customer/provider-npis', {
+                type: 'error',
+                title: 'Missing user',
+                description: 'Please select a user to assign.',
+            })
+        }
+
+        const targetUser = await prisma.user.findFirst({
+            where: { id: userAssignId, customerId: user.customerId },
+            select: { id: true, providerGroupId: true, name: true, email: true, roles: { select: { name: true } } },
+        })
+        if (!targetUser) {
+            return redirectWithToast('/customer/provider-npis', {
+                type: 'error',
+                title: 'User not found',
+                description: 'User not found or not authorized.',
+            })
+        }
+        // Cannot assign admins (customer or provider group)
+        if (targetUser.roles?.some(r => [INTEREX_ROLES.CUSTOMER_ADMIN, INTEREX_ROLES.PROVIDER_GROUP_ADMIN].includes(r.name))) {
+            try {
+                await writeAudit({
+                    userId,
+                    rolesCsv,
+                    customerId: user.customerId,
+                    action: 'PROVIDER_ASSIGN_USER_ATTEMPT',
+                    entityId: provider.id,
+                    success: false,
+                    message: 'Blocked admin assignment attempt',
+                    payload: { providerId: provider.id, targetUserId: targetUser.id, reason: 'ADMIN_ROLE' },
+                })
+            } catch {}
+            return redirectWithToast('/customer/provider-npis', {
+                type: 'error',
+                title: 'Invalid assignment',
+                description: 'Administrators cannot be directly assigned to NPIs.',
+            })
+        }
+        // Guard Rail logic:
+        // 1. Provider without group -> only assign users without group.
+        if (!provider.providerGroupId && targetUser.providerGroupId) {
+            try {
+                await writeAudit({
+                    userId,
+                    rolesCsv,
+                    customerId: user.customerId,
+                    action: 'PROVIDER_ASSIGN_USER_ATTEMPT',
+                    entityId: provider.id,
+                    success: false,
+                    message: 'Blocked assignment: provider ungrouped, user grouped',
+                    payload: { providerId: provider.id, targetUserId: targetUser.id, reason: 'PROVIDER_UNGROUPED_USER_GROUPED' },
+                })
+            } catch {}
+            return redirectWithToast('/customer/provider-npis', {
+                type: 'error',
+                title: 'Invalid assignment',
+                description: 'This NPI has no group. You can only assign users who are not in a group.',
+            })
+        }
+        // 2. Provider with group -> only assign users in the same group.
+        if (provider.providerGroupId && provider.providerGroupId !== targetUser.providerGroupId) {
+            try {
+                await writeAudit({
+                    userId,
+                    rolesCsv,
+                    customerId: user.customerId,
+                    action: 'PROVIDER_ASSIGN_USER_ATTEMPT',
+                    entityId: provider.id,
+                    success: false,
+                    message: 'Blocked assignment: provider grouped, user different or ungrouped',
+                    payload: { providerId: provider.id, targetUserId: targetUser.id, providerGroupId: provider.providerGroupId, userGroupId: targetUser.providerGroupId, reason: 'GROUP_MISMATCH' },
+                })
+            } catch {}
+            return redirectWithToast('/customer/provider-npis', {
+                type: 'error',
+                title: 'Group mismatch',
+                description: 'User must belong to the same provider group as the NPI.',
+            })
+        }
+        if (isProviderGroupAdmin && !isCustomerAdmin) {
+            if (targetUser.providerGroupId !== user.providerGroupId) {
+                return redirectWithToast('/customer/provider-npis', {
+                    type: 'error',
+                    title: 'Wrong group',
+                    description: 'You can only assign users from your group.',
+                })
+            }
+        }
+
+        // Ensure not already assigned
+        const existing = await prisma.userNpi.findFirst({ where: { userId: targetUser.id, providerId: provider.id } })
+        if (existing) {
+            return redirectWithToast('/customer/provider-npis', {
+                type: 'message',
+                title: 'Already assigned',
+                description: 'Selected user is already assigned to this NPI.',
+            })
+        }
+
+        await prisma.userNpi.create({ data: { userId: targetUser.id, providerId: provider.id } })
+        try {
+            await writeAudit({
+                userId,
+                rolesCsv,
+                customerId: user.customerId,
+                action: 'PROVIDER_ASSIGN_USER_ATTEMPT',
+                entityId: provider.id,
+                success: true,
+                message: 'User assigned to provider',
+                payload: { providerId: provider.id, targetUserId: targetUser.id },
+            })
+        } catch {}
+        return redirectWithToast('/customer/provider-npis', {
+            type: 'success',
+            title: 'User assigned',
+            description: `Assigned ${targetUser.name || targetUser.email} to NPI ${provider.npi}.`,
+        })
+    }
+
+    if (intent === 'bulk-update-user-assignments') {
+        // Only admins may modify user assignments
+        if (!isCustomerAdmin && !isProviderGroupAdmin) {
+            return redirectWithToast('/customer/provider-npis', {
+                type: 'error',
+                title: 'Access denied',
+                description: 'You do not have permission to modify user assignment.',
+            })
+        }
+        const providerId = String(formData.get('providerId') || '')
+        if (!providerId) {
+            return redirectWithToast('/customer/provider-npis', {
+                type: 'error',
+                title: 'Missing provider',
+                description: 'Provider id is required.',
+            })
+        }
+        const provider = await prisma.provider.findFirst({
+            where: { id: providerId, customerId: user.customerId },
+            select: { id: true, providerGroupId: true, npi: true, userNpis: { select: { id: true, user: { select: { providerGroupId: true, roles: { select: { name: true } } } } } } },
+        })
+        if (!provider) {
+            return redirectWithToast('/customer/provider-npis', {
+                type: 'error',
+                title: 'Provider not found',
+                description: 'Provider not found or not authorized.',
+            })
+        }
+        if (isProviderGroupAdmin && !isCustomerAdmin) {
+            if (provider.providerGroupId && provider.providerGroupId !== user.providerGroupId) {
+                return redirectWithToast('/customer/provider-npis', {
+                    type: 'error',
+                    title: 'Wrong scope',
+                    description: 'You can only modify providers in your group.',
+                })
+            }
+        }
+
+        const assignUserIds = formData.getAll('assignUserIds').map(v => String(v)).filter(Boolean)
+        const unassignLinkIds = formData.getAll('unassignLinkIds').map(v => String(v)).filter(Boolean)
+
+        if (assignUserIds.length === 0 && unassignLinkIds.length === 0) {
+            return redirectWithToast('/customer/provider-npis', {
+                type: 'message',
+                title: 'No changes',
+                description: 'You did not select any users to assign or unassign.',
+            })
+        }
+
+        const assignedSummary: string[] = []
+        const unassignedSummary: string[] = []
+        const failedSummary: string[] = []
+
+        // Helper to log audit per attempt (best effort)
+        const auditCustomerId = user.customerId // user guaranteed in scope
+        const auditProviderId = provider.id
+        async function auditAttempt(success: boolean, payload: any, message: string) {
+            try {
+                await writeAudit({
+                    userId,
+                    rolesCsv,
+                    customerId: auditCustomerId,
+                    action: 'PROVIDER_ASSIGN_USER_ATTEMPT',
+                    entityId: auditProviderId,
+                    success,
+                    message,
+                    payload,
+                })
+            } catch {}
+        }
+
+        // Assign new users
+        for (const uid of assignUserIds) {
+            const existing = await prisma.userNpi.findFirst({ where: { userId: uid, providerId: provider.id } })
+            if (existing) {
+                failedSummary.push('Already assigned user skipped')
+                continue
+            }
+            const targetUser = await prisma.user.findFirst({
+                where: { id: uid, customerId: user.customerId },
+                select: { id: true, name: true, email: true, providerGroupId: true, roles: { select: { name: true } } },
+            })
+            if (!targetUser) {
+                failedSummary.push('User not found')
+                continue
+            }
+            if (targetUser.roles?.some(r => [INTEREX_ROLES.CUSTOMER_ADMIN, INTEREX_ROLES.PROVIDER_GROUP_ADMIN].includes(r.name))) {
+                failedSummary.push(`${targetUser.name || targetUser.email}: admin blocked`)
+                await auditAttempt(false, { providerId: provider.id, targetUserId: targetUser.id, reason: 'ADMIN_ROLE' }, 'Blocked admin assignment attempt')
+                continue
+            }
+            if (!provider.providerGroupId && targetUser.providerGroupId) {
+                failedSummary.push(`${targetUser.name || targetUser.email}: grouped user into ungrouped provider`)
+                await auditAttempt(false, { providerId: provider.id, targetUserId: targetUser.id, reason: 'PROVIDER_UNGROUPED_USER_GROUPED' }, 'Blocked assignment: provider ungrouped, user grouped')
+                continue
+            }
+            if (provider.providerGroupId && provider.providerGroupId !== targetUser.providerGroupId) {
+                failedSummary.push(`${targetUser.name || targetUser.email}: group mismatch`)
+                await auditAttempt(false, { providerId: provider.id, targetUserId: targetUser.id, providerGroupId: provider.providerGroupId, userGroupId: targetUser.providerGroupId, reason: 'GROUP_MISMATCH' }, 'Blocked assignment: provider grouped, user different or ungrouped')
+                continue
+            }
+            if (isProviderGroupAdmin && !isCustomerAdmin) {
+                if (targetUser.providerGroupId !== user.providerGroupId) {
+                    failedSummary.push(`${targetUser.name || targetUser.email}: outside admin group`)
+                    continue
+                }
+            }
+            try {
+                await prisma.userNpi.create({ data: { userId: targetUser.id, providerId: provider.id } })
+                assignedSummary.push(targetUser.name || targetUser.email || targetUser.id)
+                await auditAttempt(true, { providerId: provider.id, targetUserId: targetUser.id }, 'User assigned to provider (bulk)')
+            } catch {
+                failedSummary.push(`${targetUser.name || targetUser.email || targetUser.id}: error`)
+            }
+        }
+
+        // Unassign selected links
+        if (unassignLinkIds.length > 0) {
+            const links = await prisma.userNpi.findMany({ where: { id: { in: unassignLinkIds }, providerId: provider.id }, select: { id: true, user: { select: { name: true, email: true } } } })
+            for (const link of links) {
+                try {
+                    await prisma.userNpi.delete({ where: { id: link.id } })
+                    unassignedSummary.push(link.user.name || link.user.email || link.id)
+                } catch {
+                    failedSummary.push(`${link.user.name || link.user.email || link.id}: unassign error`)
+                }
+            }
+        }
+
+        const parts: string[] = []
+        if (assignedSummary.length) parts.push(`Assigned ${assignedSummary.length}`)
+        if (unassignedSummary.length) parts.push(`Unassigned ${unassignedSummary.length}`)
+        if (failedSummary.length) parts.push(`Failed ${failedSummary.length}`)
+        const title = parts.join(' • ') || 'No changes'
+        const description = [
+            assignedSummary.length ? `Assigned: ${assignedSummary.slice(0, 5).join(', ')}${assignedSummary.length > 5 ? '…' : ''}` : null,
+            unassignedSummary.length ? `Unassigned: ${unassignedSummary.slice(0, 5).join(', ')}${unassignedSummary.length > 5 ? '…' : ''}` : null,
+            failedSummary.length ? `Skipped: ${failedSummary.slice(0, 5).join('; ')}${failedSummary.length > 5 ? '…' : ''}` : null,
+        ].filter(Boolean).join(' | ')
+
+        return redirectWithToast('/customer/provider-npis', {
+            type: failedSummary.length && !assignedSummary.length && !unassignedSummary.length ? 'message' : 'success',
+            title: title || 'User assignments',
+            description: description || 'Bulk user assignment operation completed.',
+        })
+    }
+
     return data({ error: 'Invalid action' }, { status: 400 })
 }
 
 export default function CustomerProviderNpiPage() {
-    const { user, customer, searchParams, toast, events, isCustomerAdmin, isProviderGroupAdmin } =
+    const { user, customer, searchParams, toast, events, isCustomerAdmin, isProviderGroupAdmin, isBasicUser, assignableUsers, providerGroupMismatches, providerEligibility } =
         useLoaderData<typeof loader>()
     const [urlSearchParams, setUrlSearchParams] = useSearchParams()
     const isPending = useIsPending()
@@ -710,6 +1283,9 @@ export default function CustomerProviderNpiPage() {
         mode: 'create' | 'edit'
         providerId?: string
     }>({ isOpen: false, mode: 'create' })
+    // Inline group edit state (tracks which provider row's group editor is open)
+    const [openGroupProviderId, setOpenGroupProviderId] = useState<string | null>(null)
+    const [openUserProviderId, setOpenUserProviderId] = useState<string | null>(null)
 
     // keep drawer in sync with *live* URLSearchParams
     useEffect(() => {
@@ -759,7 +1335,10 @@ export default function CustomerProviderNpiPage() {
         },
     })
 
-    const canCreateOrEdit = isCustomerAdmin || isProviderGroupAdmin
+    const canAssignUsers = isCustomerAdmin || isProviderGroupAdmin
+    const canToggleActive = isCustomerAdmin || isProviderGroupAdmin
+    const canEditProviders = isCustomerAdmin || isProviderGroupAdmin
+    const canCreateProviders = isCustomerAdmin || isProviderGroupAdmin || isBasicUser
 
     return (
         <>
@@ -810,6 +1389,79 @@ export default function CustomerProviderNpiPage() {
                                 </Form>
                             </div>
 
+                            {/* Provider Group mismatch banner */}
+                            {(isCustomerAdmin || isProviderGroupAdmin) && providerGroupMismatches?.length > 0 && (
+                                <div className="border border-amber-300 bg-amber-50 rounded-md p-4 space-y-3">
+                                    <div className="flex items-start gap-2">
+                                        <Icon name="warning" className="h-5 w-5 text-amber-600 mt-0.5" />
+                                        <div className="flex-1">
+                                            <p className="text-sm font-medium text-amber-800">Provider Group Alignment Needed</p>
+                                            <p className="text-xs text-amber-700 mt-1">
+                                                The following NPIs have assigned users whose provider group differs from (or is missing on) the NPI. Assign the NPI to the appropriate provider group for consistency.
+                                            </p>
+                                        </div>
+                                    </div>
+                                    <div className="max-h-60 overflow-y-auto">
+                                        <table className="min-w-full text-xs">
+                                            <thead>
+                                            <tr className="text-left text-amber-700">
+                                                <th className="py-1 pr-4 font-semibold">NPI</th>
+                                                <th className="py-1 pr-4 font-semibold">Name</th>
+                                                <th className="py-1 pr-4 font-semibold">Current Group</th>
+                                                <th className="py-1 pr-4 font-semibold">User Groups</th>
+                                                <th className="py-1 font-semibold">Action</th>
+                                            </tr>
+                                            </thead>
+                                            <tbody>
+                                            {providerGroupMismatches.map(m => {
+                                                // candidate group: if single differing userGroup just propose that
+                                                const singleCandidate = m.userGroups.length === 1 ? m.userGroups[0] : ''
+                                                return (
+                                                    <tr key={m.id} className="border-t border-amber-200">
+                                                        <td className="py-1 pr-4 font-mono text-amber-900">{m.npi}</td>
+                                                        <td className="py-1 pr-4 text-amber-900 truncate max-w-[160px]">{m.name || '—'}</td>
+                                                        <td className="py-1 pr-4 text-amber-900">{m.providerGroupId ? (customer.providerGroups.find(g => g.id === m.providerGroupId)?.name || 'Unknown') : '— None —'}</td>
+                                                        <td className="py-1 pr-4">
+                                                            <div className="flex flex-col gap-0.5">
+                                                                {m.userGroups.map(gid => {
+                                                                    const gName = customer.providerGroups.find(g => g.id === gid)?.name || gid
+                                                                    return (
+                                                                        <span key={gid} className="inline-block bg-white border border-amber-300 rounded px-1.5 py-0.5 text-[10px] text-amber-800">
+                                                                            {gName}
+                                                                        </span>
+                                                                    )
+                                                                })}
+                                                            </div>
+                                                        </td>
+                                                        <td className="py-1">
+                                                            <Form method="post" className="flex items-center gap-2">
+                                                                <input type="hidden" name="intent" value="update-group" />
+                                                                <input type="hidden" name="providerId" value={m.id} />
+                                                                <select
+                                                                    name="providerGroupId"
+                                                                    defaultValue={singleCandidate}
+                                                                    className="border border-amber-300 bg-white rounded px-1.5 py-0.5 text-[11px] focus:outline-none focus:ring-1 focus:ring-amber-500"
+                                                                >
+                                                                    <option value="">Select group…</option>
+                                                                    {customer.providerGroups.map(g => (
+                                                                        <option key={g.id} value={g.id}>{g.name}</option>
+                                                                    ))}
+                                                                </select>
+                                                                <button
+                                                                    type="submit"
+                                                                    className="px-2 py-0.5 rounded bg-amber-600 text-white text-[11px] hover:bg-amber-700"
+                                                                >Apply</button>
+                                                            </Form>
+                                                        </td>
+                                                    </tr>
+                                                )
+                                            })}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                            )}
+
                             {/* Provider NPIs List */}
                             <div className="bg-white shadow rounded-lg">
                                 <div className="px-6 py-4 border-b border-gray-200">
@@ -819,7 +1471,7 @@ export default function CustomerProviderNpiPage() {
                                             <p className="text-sm text-gray-500">{customer.providers.length} total providers</p>
                                         </div>
                                         <div className="flex space-x-3">
-                                            {canCreateOrEdit ? (
+                                            {canCreateProviders ? (
                                                 <button
                                                     onClick={() => openDrawer('create')}
                                                     className="inline-flex items-center px-4 py-2 border border-transparent shadow-sm text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
@@ -841,7 +1493,7 @@ export default function CustomerProviderNpiPage() {
                                                 ? `No providers match your search criteria "${searchParams.search}".`
                                                 : 'Get started by adding your first provider NPI.'}
                                         </p>
-                                        {canCreateOrEdit ? (
+                                        {canCreateProviders ? (
                                             <button
                                                 onClick={() => openDrawer('create')}
                                                 className="inline-flex items-center px-4 py-2 border border-transparent shadow-sm text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700"
@@ -852,8 +1504,10 @@ export default function CustomerProviderNpiPage() {
                                         ) : null}
                                     </div>
                                 ) : (
-                                    <div className="overflow-hidden">
-                                        <table className="min-w-full divide-y divide-gray-200">
+                                    <div className="overflow-x-auto">
+                                        {/* Constrain vertical height with scroll while allowing full-width responsive table */}
+                                        <div className="max-h-[600px] overflow-y-auto">
+                                            <table className="w-full divide-y divide-gray-200 table-auto">
                                             <thead className="bg-gray-50">
                                             <tr>
                                                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">NPI</th>
@@ -863,19 +1517,17 @@ export default function CustomerProviderNpiPage() {
                                                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                                                     Provider Group
                                                 </th>
-                                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                                                    Assigned Users
-                                                </th>
-                                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                                                    Status
-                                                </th>
-                                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                                                    Actions
-                                                </th>
+                                                <th className="px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider">User</th>
+                                                <th className="px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider">Assign User</th>
+                                                <th className="px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
+                                                <th className="px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider">Edit</th>
+                                                <th className="px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider">Provider Group</th>
+                                                <th className="px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider">Activate / Deactivate NPI</th>
                                             </tr>
                                             </thead>
                                             <tbody className="bg-white divide-y divide-gray-200">
                                             {customer.providers.map(provider => {
+                                                const eligibility = providerEligibility.find(pe => pe.id === provider.id)
                                                 // Prefer authoritative PCG-synced names if present
                                                 const displayName =
                                                     provider.listDetail?.providerName ||
@@ -893,6 +1545,21 @@ export default function CustomerProviderNpiPage() {
                                                     (isProviderGroupAdmin &&
                                                         (provider.providerGroupId === null || provider.providerGroupId === user.providerGroupId))
 
+                                                // Determine if there is at least one eligible user to add (group alignment rule)
+                                                // Filter users using new guard rail metadata
+                                                const eligibleUsers = assignableUsers.filter(u => {
+                                                    // Rule: if provider grouped -> only users in that group
+                                                    if (provider.providerGroupId) {
+                                                        if (u.providerGroupId !== provider.providerGroupId) return false
+                                                    } else {
+                                                        // provider ungrouped -> only users with no group
+                                                        if (u.providerGroupId) return false
+                                                    }
+                                                    // not already assigned
+                                                    return !provider.userNpis.some(l => l.userId === u.id)
+                                                })
+                                                const hasEligibleNewUser = eligibleUsers.length > 0
+
                                                 return (
                                                     <tr key={provider.id} className="hover:bg-gray-50">
                                                         <td className="px-6 py-4 whitespace-nowrap">
@@ -905,12 +1572,173 @@ export default function CustomerProviderNpiPage() {
                                                             ) : null}
                                                         </td>
                                                         <td className="px-6 py-4 whitespace-nowrap">
-                                                            <div className="text-sm text-gray-900">{provider.providerGroup?.name || 'No group'}</div>
+                                                            <div className="text-sm text-gray-900">{provider.providerGroup?.name || '-'}</div>
                                                         </td>
-                                                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                                                            {provider._count.userNpis}
+                                                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 text-center">
+                                                            {provider.userNpis.length === 0 ? (
+                                                                <span className="text-gray-400 text-xs">None</span>
+                                                            ) : (
+                                                                <div className="flex flex-col items-center gap-1">
+                                                                    {provider.userNpis.map(link => (
+                                                                        <span key={link.id} className="text-xs text-gray-700">
+                                                                            {link.user.name || link.user.email}
+                                                                        </span>
+                                                                    ))}
+                                                                </div>
+                                                            )}
                                                         </td>
-                                                        <td className="px-6 py-4 whitespace-nowrap">
+                                                        <td className="px-6 py-4 whitespace-nowrap text-sm text-center">
+                                                            {canAssignUsers ? (
+                                                                <div className="relative">
+                                                                    {openUserProviderId === provider.id ? (
+                                                                        <div className="absolute z-20 -left-2 top-0 bg-white border rounded-lg shadow p-3 w-[300px]">
+                                                                            <div className="flex items-center justify-between mb-2">
+                                                                                <span className="text-xs font-medium text-gray-700 flex items-center gap-1">
+                                                                                    <Icon name="avatar" className="h-4 w-4 text-blue-600" />
+                                                                                    Manage Assignment
+                                                                                </span>
+                                                                                <button
+                                                                                    type="button"
+                                                                                    onClick={() => setOpenUserProviderId(null)}
+                                                                                    className="text-gray-400 hover:text-gray-600"
+                                                                                    title="Close"
+                                                                                >
+                                                                                    <Icon name="cross-1" className="h-3 w-3" />
+                                                                                </button>
+                                                                            </div>
+                                                                            {/* Conditional: single assigned user & no eligibles -> direct unassign UX */}
+                                                                            {eligibleUsers.length === 0 && provider.userNpis.length === 1 ? (
+                                                                                (() => {
+                                                                                    const singleLink = provider.userNpis[0]
+                                                                                    return (
+                                                                                    <div className="space-y-3">
+                                                                                        <div className="max-h-32 overflow-y-auto border rounded-md p-1.5 space-y-1 bg-gray-50">
+                                                                                                {eligibleUsers.length > 0 ? (
+                                                                                                    eligibleUsers.map(u => (
+                                                                                                        <label key={u.id} className="flex items-center gap-1 text-[11px] text-gray-700 px-1 py-0.5 rounded hover:bg-white">
+                                                                                                            <input type="checkbox" name="assignUserIds" value={u.id} className="h-3 w-3" />
+                                                                                                            <span className="truncate" title={u.name || u.email}>{u.name || u.email}</span>
+                                                                                                        </label>
+                                                                                                    ))
+                                                                                                ) : (
+                                                                                                    <div className="text-[10px] text-amber-600 px-1 py-0.5">No eligible users (group alignment)</div>
+                                                                                                )}
+                                                                                            </div>
+                                                                                    <Form method="post" onSubmit={() => setTimeout(() => setOpenUserProviderId(null), 0)} className="flex flex-col gap-2">
+                                                                                        <input type="hidden" name="intent" value="bulk-update-user-assignments" />
+                                                                                        <input type="hidden" name="providerId" value={provider.id} />
+                                                                                        <input type="hidden" name="unassignLinkIds" value={singleLink?.id || ''} />
+                                                                                        <div className="text-[11px] bg-gray-50 border rounded px-2 py-1 flex flex-col gap-1 max-w-full overflow-hidden">
+                                                                                            <span className="whitespace-normal break-words leading-snug break-all hyphens-auto" style={{wordBreak:'break-word'}} title={singleLink?.user.name || singleLink?.user.email}>{singleLink?.user.name || singleLink?.user.email}</span>
+                                                                                            <span className="text-red-500 text-[10px] font-medium">Will be unassigned</span>
+                                                                                        </div>
+                                                                                        <div className="flex justify-between pt-1 border-t">
+                                                                                            <button
+                                                                                                type="button"
+                                                                                                onClick={() => setOpenUserProviderId(null)}
+                                                                                                className="px-2 py-1 rounded-md border border-gray-300 bg-white text-gray-600 text-[11px] hover:bg-gray-50"
+                                                                                            >Cancel</button>
+                                                                                            <button
+                                                                                                type="submit"
+                                                                                                className="px-3 py-1 rounded-md bg-red-600 text-white text-[11px] hover:bg-red-700"
+                                                                                            >Unassign User</button>
+                                                                                        </div>
+                                                                                    </Form>
+                                                                                </div>
+                                                                                    )
+                                                                                })()
+                                                                            ) : (
+                                                                                <Form
+                                                                                    method="post"
+                                                                                    className="space-y-3"
+                                                                                    onSubmit={() => setTimeout(() => setOpenUserProviderId(null), 0)}
+                                                                                >
+                                                                                    <input type="hidden" name="intent" value="bulk-update-user-assignments" />
+                                                                                    <input type="hidden" name="providerId" value={provider.id} />
+                                                                                    <div className="space-y-1">
+                                                                                        <div className="flex items-center justify-between">
+                                                                                            <label className="text-[11px] font-medium text-gray-600 flex items-center gap-1">Assign Users <span className="inline-block px-1.5 py-0.5 bg-emerald-100 text-emerald-700 rounded text-[9px]">ADD</span></label>
+                                                                                            <span
+                                                                                                className="text-[10px] text-gray-400 cursor-help inline-flex items-center gap-0.5"
+                                                                                                title={eligibility?.userAssignReason ? eligibility.userAssignReason : (provider.providerGroupId ? 'Only users in this provider group are eligible.' : 'Only users without a provider group are eligible.')}
+                                                                                            >
+                                                                                                <Icon name="info" className="h-3 w-3" />
+                                                                                                {eligibleUsers.length === 0 && <span className="text-[9px]">None</span>}
+                                                                                            </span>
+                                                                                        </div>
+                                                                                        <div className="max-h-32 overflow-y-auto border rounded-md p-1.5 space-y-1 bg-gray-50">
+                                                                                            {eligibleUsers.length > 0 ? (
+                                                                                                eligibleUsers.map(u => (
+                                                                                                    <label key={u.id} className="flex items-center gap-1 text-[11px] text-gray-700 px-1 py-0.5 rounded hover:bg-white">
+                                                                                                        <input type="checkbox" name="assignUserIds" value={u.id} className="h-3 w-3" />
+                                                                                                        <span className="truncate" title={u.name || u.email}>{u.name || u.email}</span>
+                                                                                                    </label>
+                                                                                                ))
+                                                                                            ) : (
+                                                                                                <div className="text-[10px] text-amber-600 px-1 py-0.5">No eligible users (group alignment)</div>
+                                                                                            )}
+                                                                                        </div>
+                                                                                    </div>
+                                                                                    <div className="space-y-1">
+                                                                                        <div className="flex items-center justify-between">
+                                                                                            <label className="text-[11px] font-medium text-gray-600 flex items-center gap-1">Currently Assigned <span className="inline-block px-1.5 py-0.5 bg-indigo-100 text-indigo-700 rounded text-[9px]">REMOVE</span></label>
+                                                                                            {provider.userNpis.length > 0 && (
+                                                                                                <span className="text-[10px] text-gray-400">{provider.userNpis.length}</span>
+                                                                                            )}
+                                                                                        </div>
+                                                                                        <div className="max-h-32 overflow-y-auto border rounded-md p-1.5 space-y-1 bg-gray-50">
+                                                                                            {provider.userNpis.length > 0 ? (
+                                                                                                provider.userNpis.map(link => (
+                                                                                                    <label key={link.id} className="flex items-center gap-1 text-[11px] text-gray-700 px-1 py-0.5 rounded hover:bg-white">
+                                                                                                        <input type="checkbox" name="unassignLinkIds" value={link.id} className="h-3 w-3" />
+                                                                                                        <span className="truncate" title={link.user.name || link.user.email}>{link.user.name || link.user.email}</span>
+                                                                                                    </label>
+                                                                                                ))
+                                                                                            ) : (
+                                                                                                <div className="text-[10px] text-gray-400 px-1 py-0.5">None</div>
+                                                                                            )}
+                                                                                        </div>
+                                                                                    </div>
+                                                                                    <div className="flex justify-between items-center pt-1 border-t">
+                                                                                        <button
+                                                                                            type="button"
+                                                                                            onClick={() => setOpenUserProviderId(null)}
+                                                                                            className="px-2 py-1 rounded-md border border-gray-300 bg-white text-gray-600 text-[11px] hover:bg-gray-50"
+                                                                                        >Cancel</button>
+                                                                                        <button
+                                                                                            type="submit"
+                                                                                            className="px-3 py-1 rounded-md bg-blue-600 text-white text-[11px] hover:bg-blue-700"
+                                                                                        >Apply Changes</button>
+                                                                                    </div>
+                                                                                </Form>
+                                                                            )}
+                                                                        </div>
+                                                                    ) : (
+                                                                        <button
+                                                                            type="button"
+                                                                            disabled={!hasEligibleNewUser && provider.userNpis.length === 0}
+                                                                            onClick={() => (hasEligibleNewUser || provider.userNpis.length > 0) ? setOpenUserProviderId(provider.id) : undefined}
+                                                                            className={`inline-flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium border transition-colors focus:outline-none focus:ring-2 focus:ring-offset-1 focus:ring-blue-500 ${
+                                                                                provider.userNpis.length
+                                                                                    ? 'bg-blue-50 text-blue-700 border-blue-200 hover:bg-blue-100'
+                                                                                    : 'bg-emerald-50 text-emerald-700 border-emerald-200 ' + (hasEligibleNewUser ? 'hover:bg-emerald-100' : 'opacity-50 cursor-not-allowed')
+                                                                            }`}
+                                                                            title={
+                                                                                !hasEligibleNewUser && provider.userNpis.length === 0
+                                                                                    ? (provider.providerGroupId
+                                                                                        ? 'No users in this provider group available to assign.'
+                                                                                        : 'No ungrouped users available to assign.')
+                                                                                    : undefined
+                                                                            }
+                                                                        >
+                                                                            <Icon name="avatar" className="h-4 w-4" />
+                                                                            {provider.userNpis.length ? 'Manage' : 'Assign'}
+                                                                        </button>
+                                                                    )}
+                                                                </div>
+                                                            ) : <span className="text-gray-300">—</span>}
+                                                        </td>
+                                                        <td className="px-6 py-4 whitespace-nowrap text-center">
                                 <span
                                     className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
                                         provider.active ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-800'
@@ -919,49 +1747,122 @@ export default function CustomerProviderNpiPage() {
                                   {provider.active ? 'Active' : 'Inactive'}
                                 </span>
                                                         </td>
-                                                        <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
-                                                            <div className="flex items-center space-x-2">
-                                                                {canCreateOrEdit && canEditRow ? (
-                                                                    <button
-                                                                        onClick={() => openDrawer('edit', provider.id)}
-                                                                        className="text-blue-600 hover:text-blue-800 p-1"
-                                                                        title="Edit provider"
-                                                                    >
-                                                                        <Icon name="pencil-1" className="h-4 w-4" />
-                                                                    </button>
-                                                                ) : null}
-
-                                                                {/* Activate / Inactivate */}
-                                                                <Form method="post" className="inline">
-                                                                    <input type="hidden" name="intent" value="toggle-active" />
-                                                                    <input type="hidden" name="providerId" value={provider.id} />
-                                                                    <input type="hidden" name="active" value={(!provider.active).toString()} />
-                                                                    <button
-                                                                        type="submit"
-                                                                        disabled={!canToggle}
-                                                                        className={`p-1 ${
-                                                                            provider.active
-                                                                                ? 'text-amber-600 hover:text-amber-800'
-                                                                                : 'text-green-600 hover:text-green-800'
-                                                                        } ${!canToggle ? 'opacity-40 cursor-not-allowed' : ''}`}
-                                                                        title={
-                                                                            canToggle
-                                                                                ? provider.active
-                                                                                    ? 'Mark Inactive'
-                                                                                    : 'Activate'
-                                                                                : 'You do not have permission to change this provider'
-                                                                        }
-                                                                    >
-                                                                        <Icon name={provider.active ? 'lock-closed' : 'lock-open-1'} className="h-4 w-4" />
-                                                                    </button>
-                                                                </Form>
-                                                            </div>
+                                                        {/* Edit column */}
+                                                        <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-center">
+                                                            {canEditProviders && canEditRow ? (
+                                                                <button
+                                                                    onClick={() => openDrawer('edit', provider.id)}
+                                                                    className="text-blue-600 hover:text-blue-800 p-1"
+                                                                    title="Edit provider"
+                                                                >
+                                                                    <Icon name="pencil-1" className="h-4 w-4" />
+                                                                </button>
+                                                            ) : <span className="text-gray-300">—</span>}
+                                                        </td>
+                                                        {/* Group assignment column */}
+                                                        <td className="px-6 py-4 whitespace-nowrap text-sm text-center">
+                                                            {canEditProviders && canEditRow ? (
+                                                                <div className="relative">
+                                                                    {openGroupProviderId === provider.id ? (
+                                                                        <div className="absolute z-20 -left-2 top-0 bg-white border rounded-lg shadow p-3 w-64">
+                                                                            <div className="flex items-center justify-between mb-2">
+                                                                                <span className="text-xs font-medium text-gray-700 flex items-center gap-1">
+                                                                                    <Icon name="hero:user-group" className="h-4 w-4 text-indigo-600" />
+                                                                                    {provider.providerGroup?.name ? 'Change Group' : 'Assign Group'}
+                                                                                </span>
+                                                                                <button
+                                                                                    type="button"
+                                                                                    onClick={() => setOpenGroupProviderId(null)}
+                                                                                    className="text-gray-400 hover:text-gray-600"
+                                                                                    title="Close"
+                                                                                >
+                                                                                    <Icon name="cross-1" className="h-3 w-3" />
+                                                                                </button>
+                                                                            </div>
+                                                                            <Form method="post" className="space-y-2">
+                                                                                <input type="hidden" name="intent" value="update-group" />
+                                                                                <input type="hidden" name="providerId" value={provider.id} />
+                                                                                <select
+                                                                                    name="providerGroupId"
+                                                                                    defaultValue={provider.providerGroupId || ''}
+                                                                                    className="w-full border rounded-md px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                                                                                >
+                                                                                    <option value="">— No group —</option>
+                                                                                    {customer.providerGroups.map(g => (
+                                                                                        <option key={g.id} value={g.id}>{g.name}</option>
+                                                                                    ))}
+                                                                                </select>
+                                                                                <div className="flex justify-end gap-2 pt-1">
+                                                                                    <button
+                                                                                        type="button"
+                                                                                        onClick={() => setOpenGroupProviderId(null)}
+                                                                                        className="px-2 py-1 rounded-md border border-gray-300 bg-white text-gray-600 text-[11px] hover:bg-gray-50"
+                                                                                    >Cancel</button>
+                                                                                    <button
+                                                                                        type="submit"
+                                                                                        className="px-2 py-1 rounded-md bg-indigo-600 text-white text-[11px] hover:bg-indigo-700"
+                                                                                    >Save</button>
+                                                                                </div>
+                                                                            </Form>
+                                                                        </div>
+                                                                    ) : (
+                                                                        <button
+                                                                            type="button"
+                                                                            disabled={Boolean(!provider.providerGroupId && eligibility?.groupChangeBlocked)}
+                                                                            onClick={() => !eligibility?.groupChangeBlocked ? setOpenGroupProviderId(provider.id) : undefined}
+                                                                            className={`inline-flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium border transition-colors focus:outline-none focus:ring-2 focus:ring-offset-1 focus:ring-indigo-500 ${
+                                                                                provider.providerGroup
+                                                                                    ? 'bg-indigo-50 text-indigo-700 border-indigo-200 hover:bg-indigo-100'
+                                                                                    : 'bg-emerald-50 text-emerald-700 border-emerald-200 ' + (eligibility?.groupChangeBlocked ? 'opacity-50 cursor-not-allowed' : 'hover:bg-emerald-100')
+                                                                            }`}
+                                                                            title={
+                                                                                eligibility?.groupChangeBlocked
+                                                                                    ? eligibility.groupChangeBlockReason || 'Cannot assign group due to guard rails.'
+                                                                                    : (provider.providerGroup ? 'Change provider group' : 'Assign provider group')
+                                                                            }
+                                                                        >
+                                                                            <Icon
+                                                                                name={provider.providerGroup ? 'hero:user-group' : 'hero:user-group'}
+                                                                                className="h-4 w-4"
+                                                                            />
+                                                                            {provider.providerGroup?.name ? 'Manage' : 'Assign'}
+                                                                        </button>
+                                                                    )}
+                                                                </div>
+                                                            ) : <span className="text-gray-300">—</span>}
+                                                        </td>
+                                                        {/* Activate column */}
+                                                        <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-center">
+                                                            <Form method="post" className="inline">
+                                                                <input type="hidden" name="intent" value="toggle-active" />
+                                                                <input type="hidden" name="providerId" value={provider.id} />
+                                                                <input type="hidden" name="active" value={(!provider.active).toString()} />
+                                                                <button
+                                                                    type="submit"
+                                                                    disabled={!canToggleActive}
+                                                                    className={`p-1 ${
+                                                                        provider.active
+                                                                            ? 'text-amber-600 hover:text-amber-800'
+                                                                            : 'text-green-600 hover:text-green-800'
+                                                                    } ${!canToggle ? 'opacity-40 cursor-not-allowed' : ''}`}
+                                                                    title={
+                                                                        canToggle
+                                                                            ? provider.active
+                                                                                ? 'Mark Inactive'
+                                                                                : 'Activate'
+                                                                            : 'You do not have permission to change this provider'
+                                                                    }
+                                                                >
+                                                                    <Icon name={provider.active ? 'lock-closed' : 'lock-open-1'} className="h-4 w-4" />
+                                                                </button>
+                                                            </Form>
                                                         </td>
                                                     </tr>
                                                 )
                                             })}
                                             </tbody>
-                                        </table>
+                                            </table>
+                                        </div>
                                     </div>
                                 )}
                             </div>
@@ -1083,21 +1984,32 @@ export default function CustomerProviderNpiPage() {
                             errors={createFields.name?.errors}
                         />
 
-                        <SelectField
-                            labelProps={{ children: 'Provider Group (Optional)' }}
-                            selectProps={{
-                                ...getInputProps(createFields.providerGroupId!, { type: 'text' }),
-                                defaultValue: '',
-                            }}
-                            errors={createFields.providerGroupId?.errors}
-                        >
-                            <option value="">— No group —</option>
-                            {customer.providerGroups.map(group => (
-                                <option key={group.id} value={group.id}>
-                                    🏥 {group.name}
-                                </option>
-                            ))}
-                        </SelectField>
+                        {isCustomerAdmin ? (
+                            <SelectField
+                                labelProps={{ children: 'Provider Group (Optional)' }}
+                                selectProps={{
+                                    ...getInputProps(createFields.providerGroupId!, { type: 'text' }),
+                                    defaultValue: '',
+                                }}
+                                errors={createFields.providerGroupId?.errors}
+                            >
+                                <option value="">— No group —</option>
+                                {customer.providerGroups.map(group => (
+                                    <option key={group.id} value={group.id}>
+                                        🏥 {group.name}
+                                    </option>
+                                ))}
+                            </SelectField>
+                        ) : user.providerGroupId ? (
+                            <div className="text-sm text-gray-700 border rounded-md p-3 bg-gray-50">
+                                <p className="font-medium text-gray-800 mb-1">Provider Group</p>
+                                <p className="text-gray-700 text-sm">Auto-assigned to your group.</p>
+                            </div>
+                        ) : (
+                            <div className="text-xs text-amber-600 bg-amber-50 border border-amber-200 rounded p-2">
+                                No provider group assigned to your account; provider will be created without a group.
+                            </div>
+                        )}
 
                         {/* hidden native submit to ensure requestSubmit() finds one */}
                         <button type="submit" className="hidden" aria-hidden />
@@ -1161,21 +2073,28 @@ export default function CustomerProviderNpiPage() {
                                 </div>
                             )}
 
-                            <SelectField
-                                labelProps={{ children: 'Provider Group (Optional)' }}
-                                selectProps={{
-                                    ...getInputProps(editFields.providerGroupId!, { type: 'text' }),
-                                    defaultValue: selectedProvider.providerGroupId || '',
-                                }}
-                                errors={editFields.providerGroupId?.errors}
-                            >
-                                <option value="">— No group —</option>
-                                {customer.providerGroups.map(group => (
-                                    <option key={group.id} value={group.id}>
-                                        🏥 {group.name}
-                                    </option>
-                                ))}
-                            </SelectField>
+                            {isCustomerAdmin ? (
+                                <SelectField
+                                    labelProps={{ children: 'Provider Group (Optional)' }}
+                                    selectProps={{
+                                        ...getInputProps(editFields.providerGroupId!, { type: 'text' }),
+                                        defaultValue: selectedProvider.providerGroupId || '',
+                                    }}
+                                    errors={editFields.providerGroupId?.errors}
+                                >
+                                    <option value="">— No group —</option>
+                                    {customer.providerGroups.map(group => (
+                                        <option key={group.id} value={group.id}>
+                                            🏥 {group.name}
+                                        </option>
+                                    ))}
+                                </SelectField>
+                            ) : (
+                                <div className="text-sm text-gray-700 border rounded-md p-3 bg-gray-50">
+                                    <p className="font-medium text-gray-800 mb-1">Provider Group</p>
+                                    <p className="text-gray-700 text-sm">{selectedProvider.providerGroup?.name || '— (none)'} (read only)</p>
+                                </div>
+                            )}
 
                             <div>
                                 <label className="flex items-center">

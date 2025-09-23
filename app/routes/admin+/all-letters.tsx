@@ -15,6 +15,7 @@ import { LoadingOverlay } from '#app/components/ui/loading-overlay.tsx'
 import { audit } from '#app/services/audit.server.ts'
 import { syncLetters, downloadLetterPdf } from '#app/services/letters.server.ts'
 import { pcgDownloadEmdrLetterFile } from '#app/services/pcg-hih.server.ts'
+import { sanitizeLetterSyncMeta } from '#app/utils/audit-sanitize.ts'
 import { requireUserId } from '#app/utils/auth.server.ts'
 import { prisma } from '#app/utils/db.server.ts'
 import { INTEREX_ROLES } from '#app/utils/interex-roles.ts'
@@ -29,9 +30,20 @@ function writeAdminAudit(request: Request, user: { id: string; name?: string | n
     message?: string | null
     entityType?: string | null
     entityId?: string | null
-    meta?: unknown
+    meta?: any
 }) {
     const route = new URL(request.url).pathname
+    let safeMeta: any = undefined
+    if (opts.meta && Array.isArray(opts.meta?.types)) {
+        try {
+            safeMeta = sanitizeLetterSyncMeta({
+                types: opts.meta.types,
+                startDate: opts.meta.startDate,
+                endDate: opts.meta.endDate,
+                rawCountByType: opts.meta.counts,
+            })
+        } catch {}
+    }
     return audit.admin({
         action: opts.action,
         actorType: 'USER',
@@ -44,11 +56,8 @@ function writeAdminAudit(request: Request, user: { id: string; name?: string | n
         metadata: {
             route,
             roles: user.roles.map(r => r.name),
-            legacyMeta: opts.meta ?? undefined,
+            letterSync: safeMeta ?? undefined,
         },
-        // allowPhi: letter sync metadata includes date range fields; flagged as potential DOB by heuristic.
-        // We consciously allow these non-PHI operational dates. TODO: replace with redacted summary payload.
-        allowPhi: true,
     })
 }
 

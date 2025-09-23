@@ -454,18 +454,30 @@ export async function action({ request }: ActionFunctionArgs) {
             }
         }
 
-        const whereConditions: any = { id: { in: providerIds }, customerId: user.customerId, active: true }
-        if (targetUser.providerGroupId) {
-            whereConditions.providerGroupId = targetUser.providerGroupId
-        } else if (isProviderGroupAdmin && !isCustomerAdmin) {
-            whereConditions.providerGroupId = user.providerGroupId
+        // Fetch providers for validation (guard rails)
+        const providersForValidation = await prisma.provider.findMany({
+            where: { id: { in: providerIds }, customerId: user.customerId, active: true },
+            select: { id: true, providerGroupId: true },
+        })
+        const fetchedIds = providersForValidation.map(p => p.id)
+        const missingIds = providerIds.filter(pid => !fetchedIds.includes(pid))
+        if (missingIds.length > 0) {
+            return data({ error: 'Some selected NPIs are not active or do not belong to this customer' }, { status: 400 })
         }
 
-        const validProviders = await prisma.provider.findMany({ where: whereConditions, select: { id: true } })
-        const validProviderIds = validProviders.map(p => p.id)
-        const invalidProviderIds = providerIds.filter(id => !validProviderIds.includes(id))
-        if (invalidProviderIds.length > 0) {
-            return data({ error: 'Some selected NPIs are not valid for this user' }, { status: 400 })
+        // Guard Rail: If user has NO provider group, they may only be assigned NPIs with NO provider group
+        if (!targetUser.providerGroupId) {
+            const groupedPicked = providersForValidation.filter(p => p.providerGroupId)
+            if (groupedPicked.length > 0) {
+                return data({ error: 'Cannot assign grouped NPIs to a user without a provider group' }, { status: 400 })
+            }
+        }
+        // Guard Rail: If user HAS a provider group, all NPIs must be in that same group
+        if (targetUser.providerGroupId) {
+            const mismatched = providersForValidation.filter(p => p.providerGroupId !== targetUser.providerGroupId)
+            if (mismatched.length > 0) {
+                return data({ error: 'All NPIs must belong to the user\'s provider group' }, { status: 400 })
+            }
         }
 
         await prisma.userNpi.deleteMany({ where: { userId: targetUserId } })
@@ -560,7 +572,7 @@ export async function action({ request }: ActionFunctionArgs) {
 
         const targetUser = await prisma.user.findFirst({
             where: { id: targetUserId, customerId: user.customerId },
-            include: { roles: { select: { name: true } } },
+            include: { roles: { select: { name: true } }, userNpis: { select: { providerId: true } } },
         })
         if (!targetUser) {
             return redirectWithToast('/customer/users', {
@@ -600,6 +612,15 @@ export async function action({ request }: ActionFunctionArgs) {
         }
 
         const makeActive = status === 'active'
+
+        // Guard: cannot deactivate while NPIs assigned
+        if (!makeActive && targetUser.userNpis.length > 0) {
+            return redirectWithToast('/customer/users', {
+                type: 'error',
+                title: 'Unassign NPIs first',
+                description: `${targetUser.name ?? targetUser.username} still has ${targetUser.userNpis.length} assigned NPI${targetUser.userNpis.length === 1 ? '' : 's'}. Remove all assignments before deactivation.`,
+            })
+        }
 
         await prisma.user.update({
             where: { id: targetUserId },
@@ -823,34 +844,38 @@ export default function CustomerUsersPage() {
     const [selectedNpis, setSelectedNpis] = useState<string[]>([])
     const [npiSearchTerm, setNpiSearchTerm] = useState('')
 
+    // Keep original assigned NPI ids for change detection
+    const [originalNpis, setOriginalNpis] = useState<string[]>([])
     // Initialize NPI assignments when user changes
     useEffect(() => {
         if (drawerState.mode === 'assign-npis' && selectedUser) {
             const currentNpis = selectedUser.userNpis?.map(un => un.provider.id) || []
             setSelectedNpis(currentNpis)
+            setOriginalNpis(currentNpis)
         }
     }, [drawerState.mode, selectedUser])
 
     // Get available NPIs for assignment based on user's provider group
     const getAvailableNpis = () => {
         if (!selectedUser) return []
-        if (selectedUser.providerGroupId) {
-            return customer.providers.filter(
-                p =>
-                    p.providerGroupId === selectedUser.providerGroupId &&
-                    p.active &&
-                    (npiSearchTerm === '' ||
-                        p.npi.includes(npiSearchTerm) ||
-                        (p.name && p.name.toLowerCase().includes(npiSearchTerm.toLowerCase()))),
-            )
-        }
-        return customer.providers.filter(
-            p =>
-                p.active &&
-                (npiSearchTerm === '' ||
-                    p.npi.includes(npiSearchTerm) ||
-                    (p.name && p.name.toLowerCase().includes(npiSearchTerm.toLowerCase()))),
-        )
+        return customer.providers.filter(p => {
+            if (!p.active) return false
+            // If user has group -> provider must be in same group
+            if (selectedUser.providerGroupId) {
+                if (p.providerGroupId !== selectedUser.providerGroupId) return false
+            } else {
+                // User ungrouped -> only ungrouped providers
+                if (p.providerGroupId) return false
+            }
+            if (
+                npiSearchTerm &&
+                !p.npi.includes(npiSearchTerm) &&
+                !(p.name && p.name.toLowerCase().includes(npiSearchTerm.toLowerCase()))
+            ) {
+                return false
+            }
+            return true
+        })
     }
 
     const toggleNpiSelection = (providerId: string) => {
@@ -871,15 +896,17 @@ export default function CustomerUsersPage() {
         userName?: string | null
         nextStatus: 'active' | 'inactive'
         acknowledged: boolean
-    }>({ isOpen: false, nextStatus: 'inactive', acknowledged: false })
+        npiCount: number
+    }>({ isOpen: false, nextStatus: 'inactive', acknowledged: false, npiCount: 0 })
 
-    function openStatusModal(u: { id: string; name: string | null; active: boolean }) {
+    function openStatusModal(u: { id: string; name: string | null; active: boolean; userNpis?: any[] }) {
         setStatusModal({
             isOpen: true,
             userId: u.id,
             userName: u.name ?? 'User',
             nextStatus: u.active ? 'inactive' : 'active',
             acknowledged: false,
+            npiCount: u.userNpis ? u.userNpis.length : 0,
         })
     }
     function closeStatusModal() {
@@ -1057,7 +1084,7 @@ export default function CustomerUsersPage() {
                                                                 <div className="text-sm text-gray-900">{customer.name}</div>
                                                             </td>
                                                             <td className="px-6 py-4 whitespace-nowrap">
-                                                                <div className="text-sm text-gray-900">{userItem.providerGroup?.name ?? 'No provider group'}</div>
+                                                                <div className="text-sm text-gray-900">{userItem.providerGroup?.name ?? '-'}</div>
                                                             </td>
 
                                                             <td className="px-6 py-4 whitespace-nowrap">
@@ -1143,7 +1170,7 @@ export default function CustomerUsersPage() {
                                                             <td className="px-6 py-4 whitespace-nowrap text-sm">
                                                                 {canToggle && userItem.id !== user.id ? (
                                                                     <button
-                                                                        onClick={() => openStatusModal(userItem)}
+                                                                        onClick={() => openStatusModal(userItem as any)}
                                                                         className={`inline-flex items-center px-2.5 py-1 rounded-md ${
                                                                             userItem.active
                                                                                 ? 'text-red-700 hover:text-red-900 hover:bg-red-50'
@@ -1574,11 +1601,22 @@ export default function CustomerUsersPage() {
 
                             {/* Available NPIs */}
                             <div>
-                                <label className="block text-sm font-medium text-gray-700 mb-2">
-                                    Available NPIs
-                                    {selectedUser.providerGroupId && (
-                                        <span className="text-gray-500 font-normal"> (from {selectedUser.providerGroup?.name})</span>
-                                    )}
+                                <label className="block text-sm font-medium text-gray-700 mb-2 flex items-center gap-2">
+                                    <span>
+                                        Available NPIs
+                                        {selectedUser.providerGroupId && (
+                                            <span className="text-gray-500 font-normal"> (from {selectedUser.providerGroup?.name})</span>
+                                        )}
+                                    </span>
+                                    <span
+                                        className="text-xs text-gray-400 cursor-help inline-flex items-center gap-1"
+                                        title={selectedUser.providerGroupId
+                                            ? 'Only NPIs in the user\'s provider group are eligible.'
+                                            : 'User has no provider group: only ungrouped NPIs are eligible.'}
+                                    >
+                                        <Icon name="gear" className="h-3 w-3" />
+                                        <span className="hidden sm:inline">Rules</span>
+                                    </span>
                                 </label>
                                 <div className="border border-gray-300 rounded-lg max-h-64 overflow-y-auto">
                                     {getAvailableNpis().length === 0 ? (
@@ -1619,7 +1657,40 @@ export default function CustomerUsersPage() {
                                 </div>
                             </div>
 
+                            {/** Unsaved changes indicator & actions */}
+                            {drawerState.mode === 'assign-npis' && (
+                                <div className="text-xs text-gray-500 flex items-center gap-2 px-1">
+                                    {(() => {
+                                        const orig = new Set(originalNpis)
+                                        const curr = new Set(selectedNpis)
+                                        const added = [...curr].filter(id => !orig.has(id))
+                                        const removed = [...orig].filter(id => !curr.has(id))
+                                        if (added.length === 0 && removed.length === 0) return <span>No changes</span>
+                                        return (
+                                            <span>
+                                                Pending changes: {added.length > 0 && <><span className="text-green-600 font-medium">+{added.length}</span> added</>} {added.length > 0 && removed.length > 0 && ' / '} {removed.length > 0 && <><span className="text-red-600 font-medium">-{removed.length}</span> removed</>}
+                                            </span>
+                                        )
+                                    })()}
+                                </div>
+                            )}
+
                             <div className="flex justify-end gap-3 pt-4 border-t border-gray-200">
+                                <button
+                                    type="button"
+                                    onClick={() => {
+                                        setSelectedNpis(originalNpis)
+                                    }}
+                                    disabled={(() => {
+                                        const orig = originalNpis
+                                        if (orig.length !== selectedNpis.length) return false
+                                        const s = new Set(selectedNpis)
+                                        return orig.every(id => s.has(id))
+                                    })()}
+                                    className="inline-flex justify-center py-2 px-4 border border-gray-300 shadow-sm text-sm font-medium rounded-md text-gray-600 bg-white hover:bg-gray-50 disabled:opacity-40"
+                                >
+                                    Reset
+                                </button>
                                 <button
                                     type="button"
                                     onClick={closeDrawer}
@@ -1629,11 +1700,26 @@ export default function CustomerUsersPage() {
                                 </button>
                                 <StatusButton
                                     type="submit"
-                                    disabled={isPending}
+                                    disabled={(() => {
+                                        if (isPending) return true
+                                        const orig = originalNpis
+                                        if (orig.length !== selectedNpis.length) return false
+                                        const s = new Set(selectedNpis)
+                                        return orig.every(id => s.has(id)) // no changes
+                                    })()}
                                     status={isPending ? 'pending' : 'idle'}
-                                    className="inline-flex justify-center py-2 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500"
+                                    className="inline-flex justify-center py-2 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500 disabled:opacity-50"
                                 >
-                                    Assign NPIs
+                                    {(() => {
+                                        const orig = new Set(originalNpis)
+                                        const curr = new Set(selectedNpis)
+                                        const added = [...curr].filter(id => !orig.has(id)).length
+                                        const removed = [...orig].filter(id => !curr.has(id)).length
+                                        if (added === 0 && removed === 0) return 'No Changes'
+                                        if (added > 0 && removed === 0) return added === 1 ? 'Assign 1 NPI' : `Assign ${added} NPIs`
+                                        if (removed > 0 && added === 0) return removed === 1 ? 'Unassign 1 NPI' : `Unassign ${removed} NPIs`
+                                        return 'Save NPI Changes'
+                                    })()}
                                 </StatusButton>
                             </div>
                         </div>
@@ -1741,38 +1827,68 @@ export default function CustomerUsersPage() {
                     <div className="absolute inset-0 flex items-center justify-center p-4">
                         <div className="w-full max-w-md rounded-lg bg-white shadow-xl">
                             <div className="px-5 py-4 border-b border-gray-200">
-                                <h3 className="text-sm font-semibold text-gray-900">
-                                    {statusModal.nextStatus === 'inactive' ? 'Deactivate User' : 'Activate User'}
-                                </h3>
+                                {statusModal.nextStatus === 'inactive' && statusModal.npiCount > 0 ? (
+                                    <h3 className="text-sm font-semibold text-yellow-800 flex items-center gap-2">
+                                        <Icon name="alert-triangle" className="h-4 w-4 text-yellow-500" /> Cannot Deactivate User
+                                    </h3>
+                                ) : (
+                                    <h3 className="text-sm font-semibold text-gray-900">
+                                        {statusModal.nextStatus === 'inactive' ? 'Deactivate User' : 'Activate User'}
+                                    </h3>
+                                )}
                             </div>
 
                             <div className="px-5 py-4 space-y-3 text-sm text-gray-700">
-                                <p>
-                                    You are about to <strong>{statusModal.nextStatus === 'inactive' ? 'deactivate' : 'activate'}</strong>{' '}
-                                    <span className="font-medium">{statusModal.userName}</span>.
-                                </p>
+                                {statusModal.nextStatus === 'inactive' && statusModal.npiCount > 0 ? (
+                                    <p>
+                                        <strong>{statusModal.userName}</strong> cannot be deactivated while they still have assigned NPIs.
+                                    </p>
+                                ) : (
+                                    <p>
+                                        You are about to <strong>{statusModal.nextStatus === 'inactive' ? 'deactivate' : 'activate'}</strong>{' '}
+                                        <span className="font-medium">{statusModal.userName}</span>.
+                                    </p>
+                                )}
 
                                 {statusModal.nextStatus === 'inactive' ? (
-                                    <ul className="list-disc pl-5 space-y-1">
-                                        <li>The user will be signed out from all devices immediately.</li>
-                                        <li>The user will not be able to log in until reactivated.</li>
-                                        <li>No data will be deleted; you can reactivate at any time.</li>
-                                    </ul>
+                                    statusModal.npiCount > 0 ? (
+                                        <div className="space-y-3">
+                                            <div className="p-3 border border-yellow-300 bg-yellow-50 rounded-md text-yellow-800 text-xs">
+                                                <strong>Action required:</strong> This user still has <span className="font-semibold">{statusModal.npiCount}</span> assigned NPI{statusModal.npiCount === 1 ? '' : 's'}. You must unassign all NPIs before deactivation is allowed.
+                                            </div>
+                                            <ul className="list-disc pl-5 space-y-1">
+                                                <li>Unassign all NPIs using the Assign NPIs action.</li>
+                                                <li>Return here to deactivate once assignments are cleared.</li>
+                                            </ul>
+                                        </div>
+                                    ) : (
+                                        <ul className="list-disc pl-5 space-y-1">
+                                            <li>The user will be signed out from all devices immediately.</li>
+                                            <li>The user will not be able to log in until reactivated.</li>
+                                            <li>No data will be deleted; you can reactivate at any time.</li>
+                                        </ul>
+                                    )
                                 ) : (
                                     <ul className="list-disc pl-5 space-y-1">
                                         <li>The user will be able to log in again.</li>
                                     </ul>
                                 )}
 
-                                <label className="mt-2 inline-flex items-start gap-2">
-                                    <input
-                                        type="checkbox"
-                                        className="mt-1 h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
-                                        checked={statusModal.acknowledged}
-                                        onChange={e => setStatusModal(s => ({ ...s, acknowledged: e.currentTarget.checked }))}
-                                    />
-                                    <span>I understand the impact of this action.</span>
-                                </label>
+                                {!(statusModal.nextStatus === 'inactive' && statusModal.npiCount > 0) && (
+                                    <label className="mt-2 inline-flex items-start gap-2">
+                                        <input
+                                            type="checkbox"
+                                            className="mt-1 h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                                            checked={statusModal.acknowledged}
+                                            onChange={e => setStatusModal(s => ({ ...s, acknowledged: e.currentTarget.checked }))}
+                                        />
+                                        <span>
+                                            {statusModal.nextStatus === 'inactive' && statusModal.npiCount > 0
+                                                ? 'Unassign all NPIs first — deactivation is currently blocked.'
+                                                : 'I understand the impact of this action.'}
+                                        </span>
+                                    </label>
+                                )}
                             </div>
 
                             <div className="px-5 py-3 border-t border-gray-200 flex justify-end gap-3">
@@ -1781,27 +1897,39 @@ export default function CustomerUsersPage() {
                                     onClick={closeStatusModal}
                                     className="inline-flex justify-center py-2 px-3 rounded-md border border-gray-300 text-sm text-gray-700 bg-white hover:bg-gray-50"
                                 >
-                                    Cancel
+                                    Close
                                 </button>
-
-                                <Form method="post">
-                                    <input type="hidden" name="intent" value="set-active" />
-                                    <input type="hidden" name="userId" value={statusModal.userId} />
-                                    <input type="hidden" name="status" value={statusModal.nextStatus} />
-                                    <StatusButton
-                                        type="submit"
-                                        disabled={!statusModal.acknowledged || isPending}
-                                        status={isPending ? 'pending' : 'idle'}
-                                        className={`inline-flex justify-center py-2 px-3 rounded-md text-sm text-white ${
-                                            statusModal.nextStatus === 'inactive'
-                                                ? 'bg-red-600 hover:bg-red-700'
-                                                : 'bg-green-600 hover:bg-green-700'
-                                        }`}
-                                        onClick={() => setTimeout(closeStatusModal, 0)}
+                                {statusModal.nextStatus === 'inactive' && statusModal.npiCount > 0 ? (
+                                    <button
+                                        type="button"
+                                        onClick={() => {
+                                            closeStatusModal();
+                                            openDrawer('assign-npis', statusModal.userId);
+                                        }}
+                                        className="inline-flex justify-center py-2 px-3 rounded-md border border-blue-200 text-sm text-blue-700 bg-blue-50 hover:bg-blue-100"
                                     >
-                                        {statusModal.nextStatus === 'inactive' ? 'Deactivate User' : 'Activate User'}
-                                    </StatusButton>
-                                </Form>
+                                        Manage NPI Assignments
+                                    </button>
+                                ) : (
+                                    <Form method="post">
+                                        <input type="hidden" name="intent" value="set-active" />
+                                        <input type="hidden" name="userId" value={statusModal.userId} />
+                                        <input type="hidden" name="status" value={statusModal.nextStatus} />
+                                        <StatusButton
+                                            type="submit"
+                                            disabled={!statusModal.acknowledged || isPending}
+                                            status={isPending ? 'pending' : 'idle'}
+                                            className={`inline-flex justify-center py-2 px-3 rounded-md text-sm text-white ${
+                                                statusModal.nextStatus === 'inactive'
+                                                    ? 'bg-red-600 hover:bg-red-700'
+                                                    : 'bg-green-600 hover:bg-green-700'
+                                            }`}
+                                            onClick={() => setTimeout(closeStatusModal, 0)}
+                                        >
+                                            {statusModal.nextStatus === 'inactive' ? 'Deactivate User' : 'Activate User'}
+                                        </StatusButton>
+                                    </Form>
+                                )}
                             </div>
                         </div>
                     </div>

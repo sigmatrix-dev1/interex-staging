@@ -318,19 +318,32 @@ export default function AdminAuditLogsPage() {
               </div>
             </div>
           </details>
-          <table className="min-w-full divide-y divide-gray-200 table-auto">
+          {/* Fixed layout with explicit column widths for consistent, seamless sizing */}
+          <table className="min-w-full divide-y divide-gray-200 table-fixed">
+            <colgroup>
+              <col className="w-[120px]" /> {/* Time */}
+              {visibleCols.includes('customer') && <col className="w-[140px]" />}
+              {visibleCols.includes('actor') && <col className="w-[180px]" />}
+              {visibleCols.includes('category') && <col className="w-[90px]" />}
+              {visibleCols.includes('action') && <col className="w-[150px]" />}
+              {visibleCols.includes('entity') && <col className="w-[150px]" />}
+              {visibleCols.includes('status') && <col className="w-[90px]" />}
+              {visibleCols.includes('summary') && <col className="min-w-[320px] w-[420px]" />}
+              {visibleCols.includes('chain') && <col className="w-[180px]" />}
+              {visibleCols.includes('raw') && <col className="w-[320px]" />}
+            </colgroup>
             <thead className="bg-gray-50">
               <tr>
-                <Th title="Times shown in EST (America/New_York)">Time (EST)</Th>
-                {visibleCols.includes('customer') && <Th>Customer</Th>}
-                {visibleCols.includes('actor') && <Th>Actor</Th>}
-                {visibleCols.includes('category') && <Th>Category</Th>}
-                {visibleCols.includes('action') && <Th>Action</Th>}
-                {visibleCols.includes('entity') && <Th>Entity</Th>}
-                {visibleCols.includes('status') && <Th>Status</Th>}
-                {visibleCols.includes('summary') && <Th>Summary / Message</Th>}
-                {visibleCols.includes('chain') && <Th>Chain</Th>}
-                {visibleCols.includes('raw') && <Th>Raw</Th>}
+                <Th className="w-[120px]" title="Times shown in EST (America/New_York)">Time (EST)</Th>
+                {visibleCols.includes('customer') && <Th className="w-[140px]">Customer</Th>}
+                {visibleCols.includes('actor') && <Th className="w-[180px]">Actor</Th>}
+                {visibleCols.includes('category') && <Th className="w-[90px]">Category</Th>}
+                {visibleCols.includes('action') && <Th className="w-[150px]">Action</Th>}
+                {visibleCols.includes('entity') && <Th className="w-[150px]">Entity</Th>}
+                {visibleCols.includes('status') && <Th className="w-[90px]">Status</Th>}
+                {visibleCols.includes('summary') && <Th className="min-w-[320px] w-[420px]">Summary / Message</Th>}
+                {visibleCols.includes('chain') && <Th className="w-[180px]">Chain</Th>}
+                {visibleCols.includes('raw') && <Th className="w-[320px]">Raw</Th>}
               </tr>
             </thead>
             <tbody className="bg-white divide-y divide-gray-200">
@@ -341,7 +354,7 @@ export default function AdminAuditLogsPage() {
                 const diff = safeParse(row.diff)
                 return (
                   <tr key={row.id} className="hover:bg-gray-50 align-top">
-                    <Td className="whitespace-nowrap">
+                    <Td className="whitespace-nowrap w-[120px]">
                       {new Intl.DateTimeFormat('en-US', {
                         timeZone: 'America/New_York',
                         year: 'numeric', month: '2-digit', day: '2-digit',
@@ -351,33 +364,37 @@ export default function AdminAuditLogsPage() {
                       <span className="text-[10px] text-gray-500 ml-1">EST</span>
                     </Td>
                     {visibleCols.includes('customer') && (
-                      <Td>
+                      <Td className="w-[140px]">
                         <div className="text-gray-900 text-[11px]">{row.customerName || '—'}</div>
                         <div className="text-gray-500 text-[10px]">{row.customerId || ''} {row.customerId && <CopyBtn value={row.customerId} label="customerId" />}</div>
                       </Td>
                     )}
                     {visibleCols.includes('actor') && (
-                      <Td>
+                      <Td className="w-[180px]">
                         <div className="text-gray-900 text-[11px]">{row.actorDisplay || row.actorId || '—'}</div>
                         <div className="text-gray-500 text-[10px]">{row.actorType}</div>
                         {row.actorIp && <div className="text-gray-400 text-[10px]">{row.actorIp}</div>}
                       </Td>
                     )}
-                    {visibleCols.includes('category') && <Td>{row.category}</Td>}
-                    {visibleCols.includes('action') && <Td className="font-mono">{row.action}</Td>}
+                    {visibleCols.includes('category') && <Td className="w-[90px]">{row.category}</Td>}
+                    {visibleCols.includes('action') && (
+                      <Td className="font-mono w-[150px] truncate">
+                        <div className="truncate" title={row.action}>{row.action}</div>
+                      </Td>
+                    )}
                     {visibleCols.includes('entity') && (
-                      <Td>
-                        <div>{row.entityType || '—'}</div>
-                        <div className="text-gray-500 text-[10px]">{row.entityId || '—'} <CopyBtn value={row.entityId} label="entityId" /></div>
+                      <Td className="w-[150px]">
+                        <div className="truncate" title={row.entityType || ''}>{row.entityType || '—'}</div>
+                        <div className="text-gray-500 text-[10px] truncate" title={row.entityId || ''}>{row.entityId || '—'} <CopyBtn value={row.entityId} label="entityId" /></div>
                       </Td>
                     )}
                     {visibleCols.includes('status') && (
-                      <Td>
+                      <Td className="w-[90px]">
                         <span className={`inline-flex items-center px-2 py-0.5 rounded text-[10px] font-medium border ${row.status === 'SUCCESS' ? 'bg-green-50 text-green-700 border-green-200' : row.status === 'FAILURE' ? 'bg-rose-50 text-rose-700 border-rose-200' : 'bg-gray-50 text-gray-700 border-gray-200'}`}>{row.status}</span>
                       </Td>
                     )}
                     {visibleCols.includes('summary') && (
-                      <Td className="max-w-xs">
+                      <Td className="min-w-[320px] w-[420px] overflow-hidden">
                         <div className="text-gray-900 truncate" title={row.summary || row.message || ''}>{row.summary || '—'}</div>
                         {row.message && <div className="text-gray-500 truncate text-[11px]" title={row.message}>{row.message}</div>}
                         {(row.requestId || row.traceId) && (
@@ -389,15 +406,17 @@ export default function AdminAuditLogsPage() {
                       </Td>
                     )}
                     {visibleCols.includes('chain') && (
-                      <Td className="font-mono break-all max-w-[180px] text-[10px]">
+                      <Td className="font-mono break-all w-[180px] text-[10px]">
                         <div className="text-gray-600">{row.chainKey} <CopyBtn value={row.chainKey} label="chainKey" /></div>
                         <div className="text-gray-400">seq #{row.seq}</div>
                         <div className="text-gray-400" title={row.hashSelf}>hash {row.hashSelf.slice(0, 12)}… <CopyBtn value={row.hashSelf} label="hashSelf" /></div>
                       </Td>
                     )}
                     {visibleCols.includes('raw') && (
-                      <Td className="text-[11px]">
-                        <JsonViewer data={{ metadata, diff, hashes: { prev: row.hashPrev, self: row.hashSelf }, actor: { ua: isSystemAdmin ? row.actorUserAgent : undefined } }} />
+                      <Td className="text-[11px] w-[320px] overflow-hidden">
+                        <div className="max-h-[200px] overflow-auto rounded border border-gray-100 bg-gray-50 p-1">
+                          <JsonViewer data={{ metadata, diff, hashes: { prev: row.hashPrev, self: row.hashSelf }, actor: { ua: isSystemAdmin ? row.actorUserAgent : undefined } }} />
+                        </div>
                       </Td>
                     )}
                   </tr>
@@ -581,8 +600,8 @@ function MultiSelectDropdown(props: { label: string; name: string; values: strin
   )
 }
 
-function Th({ children, title }: { children: React.ReactNode; title?: string }) {
-  return <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase" title={title}>{children}</th>
+function Th({ children, title, className = '' }: { children: React.ReactNode; title?: string; className?: string }) {
+  return <th className={`px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase ${className}`} title={title}>{children}</th>
 }
 function Td({ children, className = '' }: { children: React.ReactNode; className?: string }) {
   return <td className={`px-3 py-2 text-[11px] align-top ${className}`}>{children}</td>
