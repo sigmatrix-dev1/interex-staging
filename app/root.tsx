@@ -15,13 +15,13 @@ import { type Route } from './+types/root.ts'
 import appleTouchIconAssetUrl from './assets/favicons/apple-touch-icon.png'
 import faviconAssetUrl from './assets/favicons/favicon.svg'
 import { GeneralErrorBoundary } from './components/error-boundary.tsx'
+import { NotificationProvider } from './components/notifications/notifications.tsx'
 import { EpicProgress } from './components/progress-bar.tsx'
 import { SearchBar } from './components/search-bar.tsx'
 import { useToast } from './components/toaster.tsx'
 // Removed unused imports (Button, UserDropdown, ThemeSwitch). Keep iconsHref & EpicToaster as used.
 import { href as iconsHref } from './components/ui/icon.tsx'
-import { EpicToaster } from './components/ui/sonner.tsx'
-import { useOptionalTheme, useTheme } from './routes/resources+/theme-switch.tsx'
+import { useOptionalTheme } from './routes/resources+/theme-switch.tsx'
 import tailwindStyleSheetUrl from './styles/tailwind.css?url'
 import { getUserId, logout } from './utils/auth.server.ts'
 import { ClientHintCheck, getHints } from './utils/client-hints.tsx'
@@ -35,6 +35,7 @@ import { type Theme, getTheme } from './utils/theme.server.ts'
 import { makeTimings, time } from './utils/timing.server.ts'
 import { getToast } from './utils/toast.server.ts'
 import { useOptionalUser } from './utils/user.ts'
+import { listUserNotifications, serializeForClient } from './services/notifications.server.ts'
 
 export const links: Route.LinksFunction = () => {
 	return [
@@ -101,11 +102,23 @@ export async function loader({ request }: Route.LoaderArgs) {
 		await logout({ request, redirectTo: '/' })
 	}
 	const { toast, headers: toastHeaders } = await getToast(request)
+
+	// Load persisted notifications (best-effort, ignore errors)
+	let notifications: any[] = []
+	if (userId) {
+		try {
+			const rows = await listUserNotifications({ userId, limit: 50 })
+			notifications = rows.map(serializeForClient)
+		} catch (e) {
+			console.error('Failed to load notifications', e)
+		}
+	}
 	const honeyProps = await honeypot.getInputProps()
 
 	return data(
 		{
 			user,
+			notifications,
 			requestInfo: {
 				hints: getHints(request),
 				origin: getDomainUrl(request),
@@ -183,7 +196,6 @@ export function Layout({ children }: { children: React.ReactNode }) {
 function App() {
 	const data = useLoaderData<typeof loader>()
 	useOptionalUser() // invoked for potential downstream usage; result unused so no binding
-	const theme = useTheme()
 	const matches = useMatches()
 	const isOnSearchPage = matches.find((m) => m.id === 'routes/users+/index')
 	const searchBar = isOnSearchPage ? null : <SearchBar status="idle" />
@@ -222,7 +234,6 @@ function App() {
 
 
 			</div>
-			<EpicToaster closeButton position="top-right" theme={theme} />
 			<EpicProgress />
 		</OpenImgContextProvider>
 	)
@@ -242,12 +253,14 @@ function Logo() {
 }
 
 function AppWithProviders() {
-	const data = useLoaderData<typeof loader>()
-	return (
-		<HoneypotProvider {...data.honeyProps}>
-			<App />
-		</HoneypotProvider>
-	)
+  const data = useLoaderData<typeof loader>()
+  return (
+    <HoneypotProvider {...data.honeyProps}>
+      <NotificationProvider initialNotifications={data.notifications}>
+        <App />
+      </NotificationProvider>
+    </HoneypotProvider>
+  )
 }
 
 export default AppWithProviders

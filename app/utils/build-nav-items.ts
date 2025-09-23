@@ -26,6 +26,7 @@ export function buildNavItems(user: User): NavItem[] {
 		items.push({ type: 'group', name: 'Organization', icon: 'hero:users', items: [
 			makeLink('Audit Logs', '/admin/audit-logs', 'hero:logs', 'System audit trail'),
 			makeLink('Audit Maintenance', '/admin/audit-maintenance', 'hero:refresh', 'Verify chains & archive batches'),
+			makeLink('Notifications', '/admin/notifications', 'hero:bell', 'Purge & manage notifications'),
 		] })
 	} else if (isCustomerAdmin) {
 		items.push({ type: 'group', name: 'Organization', icon: 'hero:users', items: [

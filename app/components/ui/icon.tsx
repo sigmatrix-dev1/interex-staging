@@ -11,10 +11,12 @@ import {
 	ArrowPathIcon as HeroArrowPathIcon,
 	ChevronDownIcon as HeroChevronDownIcon,
 	ChevronUpIcon as HeroChevronUpIcon,
+	BellIcon as HeroBellIcon,
 	PlusIcon as HeroPlusIcon,
 	UserPlusIcon as HeroUserPlusIcon,
 	UserGroupIcon as HeroUserGroupIcon,
 	DocumentPlusIcon as HeroDocumentPlusIcon,
+	TrashIcon as HeroTrashIcon,
 } from '@heroicons/react/24/outline'
 import { type SVGProps } from 'react'
 import { cn } from '#app/utils/misc.tsx'
@@ -72,6 +74,7 @@ const RAW_ICON_NAMES = [
 	'tags',
 	'upload',
 	'info',
+	'bell',
 ] as const
 
 // Common aliases so nav can use friendlier names.
@@ -103,6 +106,8 @@ const HERO_ICON_COMPONENTS = {
 	'hero:user-plus': HeroUserPlusIcon,
 	'hero:user-group': HeroUserGroupIcon,
 	'hero:document-plus': HeroDocumentPlusIcon,
+	'hero:bell': HeroBellIcon,
+	'hero:trash': HeroTrashIcon,
 } as const
 
 // Bridge: allow plain "plus" usage even though it's not in sprite; map to hero:plus.

@@ -11,6 +11,7 @@ import { useToast } from '#app/components/toaster.tsx'
 import { Drawer } from '#app/components/ui/drawer.tsx'
 import { Icon } from '#app/components/ui/icon.tsx'
 import { StatusButton } from '#app/components/ui/status-button.tsx'
+import { audit as auditEvent } from '#app/services/audit.server.ts'
 import { requireUserId } from '#app/utils/auth.server.ts'
 import { prisma } from '#app/utils/db.server.ts'
 import { INTEREX_ROLES } from '#app/utils/interex-roles.ts'
@@ -44,9 +45,7 @@ const DeleteProviderGroupSchema = z.object({
   providerGroupId: z.string().min(1, 'Provider group ID is required'),
 })
 
-const SearchSchema = z.object({
-  search: z.string().optional(),
-})
+// (SearchSchema removed – search handled inline)
 
 export async function loader({ request }: LoaderFunctionArgs) {
   const userId = await requireUserId(request)
@@ -99,13 +98,13 @@ export async function loader({ request }: LoaderFunctionArgs) {
       providerGroups: {
         where: whereConditions.OR ? { OR: whereConditions.OR } : {},
         include: {
-          _count: {
-            select: { users: true, providers: true }
-          }
+          users: { select: { id: true, name: true, email: true } },
+          providers: { select: { id: true, npi: true, name: true } },
+          _count: { select: { users: true, providers: true } },
         },
-        orderBy: { name: 'asc' }
-      }
-    }
+        orderBy: { name: 'asc' },
+      },
+    },
   })
 
   if (!customer) {
@@ -121,9 +120,9 @@ export async function loader({ request }: LoaderFunctionArgs) {
         customerId: user.customerId,
       },
       include: {
-        _count: {
-          select: { users: true, providers: true }
-        }
+        users: { select: { id: true, name: true, email: true } },
+        providers: { select: { id: true, npi: true, name: true } },
+        _count: { select: { users: true, providers: true } }
       }
     })
   }
@@ -160,11 +159,53 @@ export async function action({ request }: ActionFunctionArgs) {
   const formData = await request.formData()
   const intent = formData.get('intent')
 
+  // Small helper mirroring pattern from provider-npis route for consistency.
+  async function writeAudit(input: {
+    action:
+      | 'PROVIDER_GROUP_CREATE'
+      | 'PROVIDER_GROUP_CREATE_ATTEMPT'
+      | 'PROVIDER_GROUP_UPDATE'
+      | 'PROVIDER_GROUP_UPDATE_ATTEMPT'
+      | 'PROVIDER_GROUP_DELETE'
+      | 'PROVIDER_GROUP_DELETE_ATTEMPT'
+      | 'PROVIDER_GROUP_DELETE_BLOCKED'
+      | 'PROVIDER_GROUP_NAME_CONFLICT'
+      | 'PROVIDER_GROUP_NOT_FOUND'
+    providerGroupId?: string | null
+    success: boolean
+    message?: string | null
+    metadata?: Record<string, any> | null
+  }) {
+    try {
+      if (!user) return
+      await auditEvent.admin({
+        action: input.action,
+        status: input.success ? 'SUCCESS' : 'FAILURE',
+        actorType: 'USER',
+        actorId: user.id ?? null,
+        actorDisplay: user.id ?? null,
+        customerId: user.customerId ?? null,
+        entityType: 'PROVIDER_GROUP',
+        entityId: input.providerGroupId ?? null,
+        summary: input.message ?? null,
+        metadata: input.metadata ?? undefined,
+      })
+    } catch {
+      // swallow – do not block user flow on audit failure
+    }
+  }
+
   // Handle create provider group
   if (intent === 'create') {
     const submission = parseWithZod(formData, { schema: CreateProviderGroupSchema })
 
     if (submission.status !== 'success') {
+      await writeAudit({
+        action: 'PROVIDER_GROUP_CREATE_ATTEMPT',
+        success: false,
+        message: 'Validation failed creating provider group',
+        metadata: { issues: submission.error?.issues ?? undefined },
+      })
       return data(
         { result: submission.reply() },
         { status: submission.status === 'error' ? 400 : 200 }
@@ -182,6 +223,13 @@ export async function action({ request }: ActionFunctionArgs) {
     })
 
     if (existingProviderGroup) {
+      await writeAudit({
+        action: 'PROVIDER_GROUP_NAME_CONFLICT',
+        success: false,
+        providerGroupId: existingProviderGroup.id,
+        message: 'Name already exists when creating provider group',
+        metadata: { name },
+      })
       return data(
         { result: submission.reply({ fieldErrors: { name: ['Provider group name already exists'] } }) },
         { status: 400 }
@@ -189,13 +237,21 @@ export async function action({ request }: ActionFunctionArgs) {
     }
 
     // Create the provider group
-    await prisma.providerGroup.create({
+    const created = await prisma.providerGroup.create({
       data: {
         name,
         description: description || '',
         customerId: user.customerId,
         active: true,
       },
+    })
+
+    await writeAudit({
+      action: 'PROVIDER_GROUP_CREATE',
+      success: true,
+      providerGroupId: created.id,
+      message: 'Provider group created',
+      metadata: { name, description },
     })
 
     return redirectWithToast('/customer/provider-groups', {
@@ -210,6 +266,12 @@ export async function action({ request }: ActionFunctionArgs) {
     const submission = parseWithZod(formData, { schema: UpdateProviderGroupSchema })
 
     if (submission.status !== 'success') {
+      await writeAudit({
+        action: 'PROVIDER_GROUP_UPDATE_ATTEMPT',
+        success: false,
+        message: 'Validation failed updating provider group',
+        metadata: { issues: submission.error?.issues ?? undefined },
+      })
       return data(
         { result: submission.reply() },
         { status: submission.status === 'error' ? 400 : 200 }
@@ -227,6 +289,13 @@ export async function action({ request }: ActionFunctionArgs) {
     })
 
     if (!existingProviderGroup) {
+      await writeAudit({
+        action: 'PROVIDER_GROUP_NOT_FOUND',
+        success: false,
+        providerGroupId: providerGroupId,
+        message: 'Provider group not found for update',
+        metadata: { providerGroupId },
+      })
       return data(
         { error: 'Provider group not found or not authorized to edit this provider group' },
         { status: 404 }
@@ -244,6 +313,13 @@ export async function action({ request }: ActionFunctionArgs) {
       })
 
       if (nameConflict) {
+        await writeAudit({
+          action: 'PROVIDER_GROUP_NAME_CONFLICT',
+          success: false,
+          providerGroupId: providerGroupId,
+          message: 'Name conflict updating provider group',
+          metadata: { providerGroupId, attemptedName: name },
+        })
         return data(
           { 
             result: submission.reply({
@@ -258,12 +334,31 @@ export async function action({ request }: ActionFunctionArgs) {
     }
 
     // Update the provider group
-    await prisma.providerGroup.update({
+    const updated = await prisma.providerGroup.update({
       where: { id: providerGroupId },
       data: {
         name,
         description: description || '',
         active: active ?? true,
+      },
+    })
+
+    await writeAudit({
+      action: 'PROVIDER_GROUP_UPDATE',
+      success: true,
+      providerGroupId: providerGroupId,
+      message: 'Provider group updated',
+      metadata: {
+        before: {
+          name: existingProviderGroup.name,
+          description: existingProviderGroup.description,
+          active: existingProviderGroup.active,
+        },
+        after: {
+          name: updated.name,
+          description: updated.description,
+          active: updated.active,
+        },
       },
     })
 
@@ -279,6 +374,12 @@ export async function action({ request }: ActionFunctionArgs) {
     const submission = parseWithZod(formData, { schema: DeleteProviderGroupSchema })
 
     if (submission.status !== 'success') {
+      await writeAudit({
+        action: 'PROVIDER_GROUP_DELETE_ATTEMPT',
+        success: false,
+        message: 'Validation failed deleting provider group',
+        metadata: { issues: submission.error?.issues ?? undefined },
+      })
       return data(
         { result: submission.reply() },
         { status: submission.status === 'error' ? 400 : 200 }
@@ -301,6 +402,13 @@ export async function action({ request }: ActionFunctionArgs) {
     })
 
     if (!providerGroup) {
+      await writeAudit({
+        action: 'PROVIDER_GROUP_NOT_FOUND',
+        success: false,
+        providerGroupId: providerGroupId,
+        message: 'Provider group not found for delete',
+        metadata: { providerGroupId },
+      })
       return data(
         { error: 'Provider group not found or not authorized to delete this provider group' },
         { status: 404 }
@@ -309,6 +417,13 @@ export async function action({ request }: ActionFunctionArgs) {
 
     // Prevent deleting provider groups with users or providers
     if (providerGroup._count.users > 0) {
+      await writeAudit({
+        action: 'PROVIDER_GROUP_DELETE_BLOCKED',
+        success: false,
+        providerGroupId: providerGroupId,
+        message: 'Delete blocked: users still assigned',
+        metadata: { counts: providerGroup._count },
+      })
       return redirectWithToast('/customer/provider-groups', {
         type: 'error',
         title: 'Cannot delete provider group',
@@ -317,6 +432,13 @@ export async function action({ request }: ActionFunctionArgs) {
     }
 
     if (providerGroup._count.providers > 0) {
+      await writeAudit({
+        action: 'PROVIDER_GROUP_DELETE_BLOCKED',
+        success: false,
+        providerGroupId: providerGroupId,
+        message: 'Delete blocked: providers still assigned',
+        metadata: { counts: providerGroup._count },
+      })
       return redirectWithToast('/customer/provider-groups', {
         type: 'error',
         title: 'Cannot delete provider group',
@@ -330,6 +452,14 @@ export async function action({ request }: ActionFunctionArgs) {
       where: { id: providerGroupId }
     })
 
+    await writeAudit({
+      action: 'PROVIDER_GROUP_DELETE',
+      success: true,
+      providerGroupId: providerGroupId,
+      message: 'Provider group deleted',
+      metadata: { name: providerGroupName },
+    })
+
     return redirectWithToast('/customer/provider-groups', {
       type: 'success',
       title: 'Provider group deleted',
@@ -341,7 +471,7 @@ export async function action({ request }: ActionFunctionArgs) {
 }
 
 export default function CustomerProviderGroupsPage() {
-  const { user, customer, searchParams, editingProviderGroup, toast } = useLoaderData<typeof loader>()
+  const { user, customer, searchParams, toast } = useLoaderData<typeof loader>()
   const [urlSearchParams, setUrlSearchParams] = useSearchParams()
   const actionData = useActionData<typeof action>()
   const isPending = useIsPending()
@@ -500,15 +630,10 @@ export default function CustomerProviderGroupsPage() {
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                         Description
                       </th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                        Users
-                      </th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                        Providers
-                      </th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                        Actions
-                      </th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Users</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">NPIs</th>
+                      <th className="px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider">Edit</th>
+                      <th className="px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider">Delete</th>
                     </tr>
                   </thead>
                   <tbody className="bg-white divide-y divide-gray-200">
@@ -522,49 +647,66 @@ export default function CustomerProviderGroupsPage() {
                             {providerGroup.description || 'No description'}
                           </div>
                         </td>
-                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                          {providerGroup._count.users}
-                        </td>
-                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                          {providerGroup._count.providers}
-                        </td>
-                        <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
-                          <div className="flex items-center space-x-2">
-                            <button
-                              onClick={() => openDrawer('edit', providerGroup.id)}
-                              className="text-blue-600 hover:text-blue-800 p-1"
-                              title="Edit provider group"
-                            >
-                              <Icon name="pencil-1" className="h-4 w-4" />
-                            </button>
-
-                            {/* Only show delete button if no users or providers */}
-                            {providerGroup._count.users === 0 && providerGroup._count.providers === 0 && (
-                              <Form method="post" className="inline">
-                                <input type="hidden" name="intent" value="delete" />
-                                <input type="hidden" name="providerGroupId" value={providerGroup.id} />
-                                <button
-                                  type="submit"
-                                  className="text-red-600 hover:text-red-800 p-1"
-                                  title="Delete provider group"
-                                  onClick={(e) => {
-                                    if (!confirm(`Are you sure you want to delete "${providerGroup.name}"? This action cannot be undone.`)) {
-                                      e.preventDefault()
-                                    }
-                                  }}
-                                >
-                                  <Icon name="trash" className="h-4 w-4" />
-                                </button>
-                              </Form>
-                            )}
-                            
-                            {/* Show warning if provider group cannot be deleted */}
-                            {(providerGroup._count.users > 0 || providerGroup._count.providers > 0) && (
-                              <span className="text-gray-400" title="Cannot delete: has assigned users or providers">
-                                <Icon name="lock-closed" className="h-4 w-4" />
-                              </span>
+                        <td className="px-6 py-4 align-top text-sm text-gray-900">
+                          {/* Users list */}
+                          <div className="space-y-1 max-h-40 overflow-y-auto pr-1">
+                            {providerGroup.users && providerGroup.users.length > 0 ? (
+                              providerGroup.users.map(u => (
+                                <div key={u.id} className="text-xs text-gray-700">
+                                  {u.name || u.email}
+                                </div>
+                              ))
+                            ) : (
+                              <span className="text-xs text-gray-400">None</span>
                             )}
                           </div>
+                        </td>
+                        <td className="px-6 py-4 align-top text-sm text-gray-900">
+                          {/* Providers list */}
+                          <div className="space-y-1 max-h-40 overflow-y-auto pr-1">
+                            {providerGroup.providers && providerGroup.providers.length > 0 ? (
+                              providerGroup.providers.map(p => (
+                                <div key={p.id} className="text-xs text-gray-700 font-mono">
+                                  {p.npi}
+                                </div>
+                              ))
+                            ) : (
+                              <span className="text-xs text-gray-400">None</span>
+                            )}
+                          </div>
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap text-center text-sm font-medium">
+                          <button
+                            onClick={() => openDrawer('edit', providerGroup.id)}
+                            className="text-blue-600 hover:text-blue-800 p-1"
+                            title="Edit provider group"
+                          >
+                            <Icon name="pencil-1" className="h-4 w-4" />
+                          </button>
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap text-center text-sm font-medium">
+                          {providerGroup._count.users === 0 && providerGroup._count.providers === 0 ? (
+                            <Form method="post" className="inline">
+                              <input type="hidden" name="intent" value="delete" />
+                              <input type="hidden" name="providerGroupId" value={providerGroup.id} />
+                              <button
+                                type="submit"
+                                className="text-red-600 hover:text-red-800 p-1"
+                                title="Delete provider group"
+                                onClick={(e) => {
+                                  if (!confirm(`Are you sure you want to delete "${providerGroup.name}"? This action cannot be undone.`)) {
+                                    e.preventDefault()
+                                  }
+                                }}
+                              >
+                                <Icon name="trash" className="h-4 w-4" />
+                              </button>
+                            </Form>
+                          ) : (
+                            <span className="text-gray-400" title="Cannot delete: has assigned users or providers">
+                              <Icon name="trash" className="h-4 w-4" />
+                            </span>
+                          )}
                         </td>
                       </tr>
                     ))}

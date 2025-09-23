@@ -49,6 +49,9 @@ model User {
 
   providerEventsAuthored ProviderEvent[] @relation("ProviderEventActor")
 
+  // Notifications (back-reference)
+  notifications UserNotification[]
+
   @@index([customerId])
   @@index([providerGroupId])
 }
@@ -239,6 +242,40 @@ model ProviderGroup {
 
   @@unique([customerId, name])
   @@index([customerId])
+}
+
+// =============================================
+// User Notifications (in-app bell center)
+// =============================================
+// We persist notifications per user so they survive reloads and multi-device sessions.
+// Expiration + read/dismiss state are managed here; pruning handled by periodic job or manual cleanup.
+// For now we keep payload minimal; can extend with actionUrl, icon, groupKey later.
+model UserNotification {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId String
+
+  kind        String   // 'success' | 'error' | 'info' | 'warning'
+  title       String
+  description String?  // optional longer text
+
+  // read & lifecycle
+  readAt     DateTime? // null => unread
+  dismissedAt DateTime? // manual dismissal (soft delete)
+  expiresAt  DateTime? // optional auto-expiration
+
+  // reserved for future features (deep link, grouping, etc.)
+  actionUrl  String?
+  groupKey   String?
+  metadata   Json?
+
+  @@index([userId, createdAt])
+  @@index([userId, readAt])
+  @@index([userId, dismissedAt])
+  @@index([userId, expiresAt])
 }
 
 // =============================================

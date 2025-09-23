@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { Link } from 'react-router'
+import { NotificationBell } from '#app/components/notifications/notification-bell.tsx'
 import { Icon } from '#app/components/ui/icon.tsx'
 import { UserDropdown } from '#app/components/user-dropdown.tsx'
 import { buildNavItems, type NavGroup, type NavLink } from '#app/utils/build-nav-items.ts'
@@ -147,7 +148,8 @@ export function InterexHeader({
                                 })}
                             </div>
                         </div>
-                        <div className="flex items-center">
+                        <div className="flex items-center gap-2">
+                            <NotificationBell />
                             <div className="flex-shrink-0">
                                 <UserDropdown />
                             </div>
