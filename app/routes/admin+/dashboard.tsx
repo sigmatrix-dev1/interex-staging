@@ -74,9 +74,19 @@ export default function AdminDashboard() {
       subtitle={`Welcome, ${user.name}`}
       currentPath="/admin/dashboard"
       actions={
-        <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-800">
-          System Admin
-        </span>
+        <div className="flex items-center gap-2">
+          <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-800">
+            System Admin
+          </span>
+          <Link
+            to="/admin/reports"
+            className="inline-flex items-center gap-2.5 px-5 py-3 rounded-full text-base font-semibold text-white bg-blue-600 hover:bg-blue-700 shadow-lg ring-1 ring-blue-500/20"
+            title="Open Reports"
+          >
+            <Icon name="hero:chart" size="lg" className="-ml-0.5" />
+            Reports
+          </Link>
+        </div>
       }
     >
 

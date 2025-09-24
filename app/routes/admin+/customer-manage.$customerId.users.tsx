@@ -10,6 +10,7 @@ import { Drawer } from '#app/components/ui/drawer.tsx'
 import { Icon } from '#app/components/ui/icon.tsx'
 import { StatusButton } from '#app/components/ui/status-button.tsx'
 import { ManualPasswordSection } from '#app/components/user-management/manual-password-section.tsx'
+import { audit as auditEvent } from '#app/services/audit.server.ts'
 import { requireUserId } from '#app/utils/auth.server.ts'
 import { prisma } from '#app/utils/db.server.ts'
 import { sendUserRegistrationEmail } from '#app/utils/emails/send-user-registration.server.ts'
@@ -227,7 +228,37 @@ export async function action({ request, params }: ActionFunctionArgs) {
   const formData = await request.formData()
   const submission = parseWithZod(formData, { schema: ActionSchema })
 
+  // Small helper to write audit events consistently for this page
+  async function writeAudit(input: {
+    action:
+      | 'USER_CREATE' | 'USER_CREATE_ATTEMPT'
+      | 'USER_UPDATE' | 'USER_UPDATE_ATTEMPT'
+      | 'USER_DELETE' | 'USER_DELETE_ATTEMPT' | 'USER_DELETE_BLOCKED'
+      | 'USER_SET_ACTIVE' | 'USER_SET_ACTIVE_ATTEMPT'
+      | 'USER_RESET_PASSWORD' | 'USER_RESET_PASSWORD_ATTEMPT'
+      | 'USER_ASSIGN_NPIS' | 'USER_ASSIGN_NPIS_ATTEMPT'
+    targetUserId?: string | null
+    success: boolean
+    message?: string | null
+    metadata?: Record<string, any> | null
+  }) {
+    try {
+      await auditEvent.admin({
+        action: input.action,
+        status: input.success ? 'SUCCESS' : 'FAILURE',
+        actorType: 'USER',
+        actorId: userId,
+        customerId,
+        entityType: 'USER',
+        entityId: input.targetUserId ?? null,
+        summary: input.message ?? null,
+        metadata: input.metadata ?? undefined,
+      })
+    } catch {}
+  }
+
   if (submission.status !== 'success') {
+    await writeAudit({ action: 'USER_UPDATE_ATTEMPT', success: false, message: 'Validation failed (discriminated union)', metadata: { issues: (submission as any).error?.issues } })
     return data(
       { result: submission.reply() },
       { status: submission.status === 'error' ? 400 : 200 }
@@ -252,6 +283,7 @@ export async function action({ request, params }: ActionFunctionArgs) {
   // Handle create action
   if (action.intent === 'create') {
     const { name, email, username, role, providerGroupId, active } = action
+    await writeAudit({ action: 'USER_CREATE_ATTEMPT', success: true, message: 'Attempt create user', metadata: { name, email, username, role, providerGroupId, active } })
 
     // Check if email or username already exists
     const existingUser = await prisma.user.findFirst({
@@ -261,6 +293,7 @@ export async function action({ request, params }: ActionFunctionArgs) {
     })
 
     if (existingUser) {
+      await writeAudit({ action: 'USER_CREATE_ATTEMPT', success: false, message: 'Email/username exists', metadata: { name, email, username } })
       return data(
         { 
           result: submission.reply({
@@ -346,6 +379,7 @@ export async function action({ request, params }: ActionFunctionArgs) {
       // Don't fail the user creation if email fails
     }
 
+    await writeAudit({ action: 'USER_CREATE', success: true, targetUserId: newUser.id, message: 'User created', metadata: { name, email, username, role, providerGroupId, active } })
     return redirectWithToast(`/admin/customer-manage/${customerId}/users`, {
       type: 'success',
       title: 'User created',
@@ -356,6 +390,7 @@ export async function action({ request, params }: ActionFunctionArgs) {
   // Handle update action
   if (action.intent === 'update') {
     const { userId: targetUserId, name, role, providerGroupId, active } = action
+    await writeAudit({ action: 'USER_UPDATE_ATTEMPT', success: true, targetUserId, message: 'Attempt update user', metadata: { name, role, providerGroupId, active } })
 
     // Verify the target user belongs to the same customer
     const targetUser = await prisma.user.findFirst({
@@ -370,6 +405,7 @@ export async function action({ request, params }: ActionFunctionArgs) {
     })
 
     if (!targetUser) {
+      await writeAudit({ action: 'USER_UPDATE_ATTEMPT', success: false, targetUserId, message: 'User not found' })
       return data(
         { error: 'User not found or not authorized to edit this user' },
         { status: 404 }
@@ -379,6 +415,7 @@ export async function action({ request, params }: ActionFunctionArgs) {
     // Prevent editing system admins
     const isTargetSystemAdmin = targetUser.roles.some(role => role.name === 'system-admin')
     if (isTargetSystemAdmin) {
+      await writeAudit({ action: 'USER_UPDATE_ATTEMPT', success: false, targetUserId, message: 'Cannot edit system administrators' })
       return data(
         { error: 'Cannot edit system administrators' },
         { status: 403 }
@@ -395,6 +432,7 @@ export async function action({ request, params }: ActionFunctionArgs) {
       })
 
       if (!providerGroup) {
+        await writeAudit({ action: 'USER_UPDATE_ATTEMPT', success: false, targetUserId, message: 'Invalid provider group' })
         return data(
           { result: submission.reply({ fieldErrors: { providerGroupId: ['Invalid provider group'] } }) },
           { status: 400 }
@@ -403,6 +441,7 @@ export async function action({ request, params }: ActionFunctionArgs) {
     }
 
     // Update the user
+    const before = { name: targetUser.name, active: (targetUser as any).active, roles: targetUser.roles?.map(r => r.name) }
     await prisma.user.update({
       where: { id: targetUserId },
       data: {
@@ -414,6 +453,7 @@ export async function action({ request, params }: ActionFunctionArgs) {
         }
       }
     })
+    await writeAudit({ action: 'USER_UPDATE', success: true, targetUserId, message: 'User updated', metadata: { before, after: { name, active, role, providerGroupId: providerGroupId || null } } })
 
     return redirectWithToast(`/admin/customer-manage/${customerId}/users`, {
       type: 'success',
@@ -425,6 +465,7 @@ export async function action({ request, params }: ActionFunctionArgs) {
   // Handle password reset action
   if (action.intent === 'reset-password') {
     const { userId: targetUserId, mode } = action
+    await writeAudit({ action: 'USER_RESET_PASSWORD_ATTEMPT', success: true, targetUserId, message: 'Attempt reset password', metadata: { mode } })
     const manualPassword = mode === 'manual' ? action.manualPassword : undefined
 
     const targetUser = await prisma.user.findFirst({
@@ -473,6 +514,7 @@ export async function action({ request, params }: ActionFunctionArgs) {
         providerGroupName: undefined,
       })
     } catch (e) { console.error('Failed to send reset email', e) }
+    await writeAudit({ action: 'USER_RESET_PASSWORD', success: true, targetUserId, message: 'Password reset completed', metadata: { mode } })
     return redirectWithToast(`/admin/customer-manage/${customerId}/users`, {
       type: 'success', title: 'Password reset', description: 'A new password has been emailed.'
     })
@@ -481,11 +523,13 @@ export async function action({ request, params }: ActionFunctionArgs) {
   // Assign NPIs
   if (action.intent === 'assign-npis') {
     const { userId: targetUserId, providerIds } = action
+    await writeAudit({ action: 'USER_ASSIGN_NPIS_ATTEMPT', success: true, targetUserId, message: 'Attempt assign NPIs', metadata: { providerIdsCount: providerIds?.length ?? 0 } })
     const targetUser = await prisma.user.findFirst({
       where: { id: targetUserId, customerId },
       include: { providerGroup: { select: { id: true } }, userNpis: { select: { providerId: true } } },
     })
     if (!targetUser) {
+      await writeAudit({ action: 'USER_ASSIGN_NPIS_ATTEMPT', success: false, targetUserId, message: 'User not found' })
       return redirectWithToast(`/admin/customer-manage/${customerId}/users`, { type: 'error', title: 'User not found', description: 'Unable to assign NPIs.' })
     }
     // Validate providers belong to same customer
@@ -495,6 +539,7 @@ export async function action({ request, params }: ActionFunctionArgs) {
     const fetchedIds = providersForValidation.map(p => p.id)
     const missingIds = providerIds.filter(id => !fetchedIds.includes(id))
     if (missingIds.length > 0) {
+      await writeAudit({ action: 'USER_ASSIGN_NPIS_ATTEMPT', success: false, targetUserId, message: 'Invalid NPI ids supplied', metadata: { missingIdsCount: missingIds.length } })
       return redirectWithToast(`/admin/customer-manage/${customerId}/users`, { type: 'error', title: 'Invalid NPIs', description: 'Some selected NPIs are not valid.' })
     }
     if (targetUser.providerGroup?.id) {

@@ -111,6 +111,7 @@ Features
 - List/Search provider NPIs within a customer
 - Create provider NPI (with optional Provider Group), update name/group/active
 - Toggle active status
+- Delete provider NPI with safety checks
 - Assign/Unassign users to provider NPIs
 - Bulk user assignment/unassignment with guard rails:
   - If provider has no group: only ungrouped users are eligible
@@ -120,10 +121,15 @@ Features
 - Provider Group alignment banner for quick fixes when user’s group differs from provider’s group
 - Drawer-based UX for create/edit; inline popovers for group/user actions
 
+Delete behavior (guard rails)
+- Block deletion when any dependents exist: assigned users, submissions, or letters (Prepay/Postpay/PostpayOther)
+- UI disables delete with tooltip while blocked; shows counts in confirmation
+
 Security/Logging
 - Requires `system-admin`
 - Audit events (`AuditEvent.ADMIN`) for create/update/toggle-active and assignment attempts
   - Examples: `PROVIDER_CREATE`, `PROVIDER_UPDATE`, `PROVIDER_TOGGLE_ACTIVE`, `PROVIDER_ASSIGN_USER_ATTEMPT`, `PCG_ADD_PROVIDER_NPI`, `PROVIDER_FETCH_REMOTE_NPIS`
+- Delete audit coverage: `PROVIDER_DELETE` with `SUCCESS`/`FAILURE` status (includes dependent counts on failure)
 - Provider business events saved in `ProviderEvent` (e.g., CREATED, UPDATED, ACTIVATED, GROUP_ASSIGNED, PCG_ADD_ERROR)
 
 External API calls (PCG)
@@ -204,6 +210,13 @@ Features
 Security/Logging
 - Requires `system-admin`
 - Security events appended for reset link and manual resets
+- Audit events (`AuditEvent.ADMIN`) for user lifecycle and access changes with attempt/success/blocked variants:
+  - Create: `USER_CREATE_ATTEMPT` → `USER_CREATE`
+  - Update: `USER_UPDATE_ATTEMPT` → `USER_UPDATE` (includes changed fields)
+  - Delete: `USER_DELETE_ATTEMPT` → `USER_DELETE` or `USER_DELETE_BLOCKED`
+  - Set Active: `USER_SET_ACTIVE_ATTEMPT` → `USER_SET_ACTIVE`
+  - Password Reset: `USER_RESET_PASSWORD_ATTEMPT` → `USER_RESET_PASSWORD` (mode captured)
+  - Assign NPIs: `USER_ASSIGN_NPIS_ATTEMPT` → `USER_ASSIGN_NPIS`
 - Emails sent via server utilities with audit-friendly content
 
 Tables used

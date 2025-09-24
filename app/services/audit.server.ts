@@ -64,6 +64,22 @@ export async function logAuditEvent(input: AuditEventInput): Promise<AuditEventR
     { allowPhi: !!input.allowPhi }
   )
 
+  // Best-effort enrichment: if a USER actor is provided without a display name, resolve name/email now
+  // so future reads don't need to backfill. This adds one lightweight query only when needed.
+  if (!input.actorDisplay && input.actorType === 'USER' && input.actorId) {
+    try {
+      const user = await prisma.user.findUnique({
+        where: { id: input.actorId },
+        select: { name: true, email: true },
+      })
+      if (user) {
+        input.actorDisplay = user.name || user.email || input.actorId
+      }
+    } catch {
+      // ignore lookup failures; UI loader will still attempt a fallback mapping
+    }
+  }
+
   let attempt = 0
   while (true) {
     try {

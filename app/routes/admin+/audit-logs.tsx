@@ -6,6 +6,7 @@ import { type LoaderFunctionArgs, data, useLoaderData, Form } from 'react-router
 import { InterexLayout } from '#app/components/interex-layout.tsx'
 import { JsonViewer } from '#app/components/json-view.tsx'
 import { LoadingOverlay } from '#app/components/ui/loading-overlay.tsx'
+import { actionLabel, entityLabel } from '#app/domain/audit-enums.ts'
 import { requireUserId } from '#app/utils/auth.server.ts'
 import { prisma } from '#app/utils/db.server.ts'
 import { INTEREX_ROLES } from '#app/utils/interex-roles.ts'
@@ -371,21 +372,41 @@ export default function AdminAuditLogsPage() {
                     )}
                     {visibleCols.includes('actor') && (
                       <Td className="w-[180px]">
-                        <div className="text-gray-900 text-[11px]">{row.actorDisplay || row.actorId || '—'}</div>
+                        <div className="text-gray-900 text-[11px]" title={row.actorId || ''}>{row.actorDisplay || row.actorId || '\u2014'}</div>
                         <div className="text-gray-500 text-[10px]">{row.actorType}</div>
                         {row.actorIp && <div className="text-gray-400 text-[10px]">{row.actorIp}</div>}
                       </Td>
                     )}
-                    {visibleCols.includes('category') && <Td className="w-[90px]">{row.category}</Td>}
+                    {visibleCols.includes('category') && (
+                      <Td className="w-[90px]">
+                        <span
+                          className={`inline-flex items-center px-2 py-0.5 rounded text-[10px] font-medium border
+                            ${row.category === 'AUTH' ? 'bg-blue-50 text-blue-700 border-blue-200'
+                              : row.category === 'ADMIN' ? 'bg-indigo-50 text-indigo-700 border-indigo-200'
+                              : row.category === 'SECURITY' ? 'bg-amber-50 text-amber-700 border-amber-200'
+                              : row.category === 'SYSTEM' ? 'bg-gray-50 text-gray-700 border-gray-200'
+                              : row.category === 'SUBMISSION' ? 'bg-purple-50 text-purple-700 border-purple-200'
+                              : row.category === 'DOCUMENT' ? 'bg-teal-50 text-teal-700 border-teal-200'
+                              : row.category === 'USER_ROLE' ? 'bg-pink-50 text-pink-700 border-pink-200'
+                              : row.category === 'TENANT_CFG' ? 'bg-cyan-50 text-cyan-700 border-cyan-200'
+                              : row.category === 'INTEGRATION' ? 'bg-fuchsia-50 text-fuchsia-700 border-fuchsia-200'
+                              : row.category === 'ERROR' ? 'bg-rose-50 text-rose-700 border-rose-200'
+                              : 'bg-gray-50 text-gray-700 border-gray-200'}`}
+                        >{row.category}</span>
+                      </Td>
+                    )}
                     {visibleCols.includes('action') && (
-                      <Td className="font-mono w-[150px] truncate">
-                        <div className="truncate" title={row.action}>{row.action}</div>
+                      <Td className="w-[150px]">
+                        <div className="text-gray-900 text-[11px]">{actionLabel(row.action)}</div>
+                        <div className="text-gray-400 text-[10px] font-mono" title={row.action}>{row.action}</div>
                       </Td>
                     )}
                     {visibleCols.includes('entity') && (
                       <Td className="w-[150px]">
-                        <div className="truncate" title={row.entityType || ''}>{row.entityType || '—'}</div>
-                        <div className="text-gray-500 text-[10px] truncate" title={row.entityId || ''}>{row.entityId || '—'} <CopyBtn value={row.entityId} label="entityId" /></div>
+                        <div className="text-gray-900 text-[11px]">{entityLabel(row.entityType)}</div>
+                        <div className="text-gray-500 text-[10px] truncate" title={row.entityId || ''}>
+                          {row.entityId || '—'} {row.entityId && <CopyBtn value={row.entityId} label="entityId" />}
+                        </div>
                       </Td>
                     )}
                     {visibleCols.includes('status') && (

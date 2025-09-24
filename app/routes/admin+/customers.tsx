@@ -31,13 +31,7 @@ const CreateCustomerSchema = z.object({
   adminUsername: UsernameSchema,
 })
 
-const UpdateCustomerSchema = z.object({
-  intent: z.literal('update'),
-  customerId: z.string().min(1, 'Customer ID is required'),
-  name: z.string().min(1, 'Customer name is required'),
-  description: z.string().optional().default(''),
-  baaNumber: z.string().optional(),
-})
+// Note: Update flow not implemented in this route; schema removed to avoid unused var warnings
 
 const AddAdminSchema = z.object({
   intent: z.literal('add-admin'),
@@ -203,7 +197,7 @@ export async function action({ request }: ActionFunctionArgs) {
     const temporaryPassword = generateTemporaryPassword()
 
     // Create customer and admin in a transaction
-    const result = await prisma.$transaction(async (tx) => {
+  await prisma.$transaction(async (tx) => {
       // Create customer
       const customer = await tx.customer.create({
         data: {
@@ -215,7 +209,7 @@ export async function action({ request }: ActionFunctionArgs) {
       })
 
       // Create customer admin
-      const admin = await tx.user.create({
+      await tx.user.create({
         data: {
           name: adminName,
           email: adminEmail,
@@ -232,7 +226,7 @@ export async function action({ request }: ActionFunctionArgs) {
         }
       })
 
-      return { customer, admin }
+      // return shape omitted; callers don't need it
     })
 
     // Send email with temporary password and login URL
