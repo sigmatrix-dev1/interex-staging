@@ -67,19 +67,35 @@ export async function handleNewSession(
 		)
 		authSession.set(sessionKey, session.id)
 
-		// Get user with roles for role-based redirect
-		const user = await prisma.user.findUnique({
+		// Get user with roles & password status
+		// Fetch user including password lifecycle flag & roles
+		// Cast for mustChangePassword field until Prisma client types regenerate
+		const user = await (prisma as any).user.findUnique({
 			where: { id: session.userId },
-			select: {
-				id: true,
-				roles: { select: { name: true } }
-			}
+			select: { id: true, mustChangePassword: true, roles: { select: { name: true } } },
 		})
+
+		// If the user is required to change their password, override redirect target
+		if (user?.mustChangePassword) {
+			return redirect(
+				'/change-password',
+				combineResponseInits(
+					{
+						headers: {
+							'set-cookie': await authSessionStorage.commitSession(authSession, {
+								expires: remember ? session.expirationDate : undefined,
+							}),
+						},
+					},
+					responseInit,
+				),
+			)
+		}
 
 		// Determine redirect URL based on user role or provided redirectTo
 		let finalRedirectTo = redirectTo
 		if (!finalRedirectTo && user) {
-			finalRedirectTo = getDashboardUrl(user)
+			finalRedirectTo = getDashboardUrl(user as any)
 		}
 
 		return redirect(
@@ -150,6 +166,26 @@ export async function handleVerification({
 		'set-cookie',
 		await verifySessionStorage.destroySession(verifySession),
 	)
+
+	// After successful 2FA verification, enforce password change if required
+	if (authSession.get(sessionKey)) {
+		const sessionId = authSession.get(sessionKey) as string | undefined
+		if (sessionId) {
+			const session = await prisma.session.findUnique({
+				where: { id: sessionId },
+				select: { userId: true },
+			})
+			if (session?.userId) {
+					const user = await (prisma as any).user.findUnique({
+					where: { id: session.userId },
+					select: { mustChangePassword: true },
+				})
+				if (user?.mustChangePassword) {
+					return redirect('/change-password', { headers })
+				}
+			}
+		}
+	}
 
 	return redirect(safeRedirect(redirectTo), { headers })
 }

@@ -22,6 +22,7 @@ import { useToast } from './components/toaster.tsx'
 // Removed unused imports (Button, UserDropdown, ThemeSwitch). Keep iconsHref & EpicToaster as used.
 import { href as iconsHref } from './components/ui/icon.tsx'
 import { useOptionalTheme } from './routes/resources+/theme-switch.tsx'
+import { listUserNotifications, serializeForClient } from './services/notifications.server.ts'
 import tailwindStyleSheetUrl from './styles/tailwind.css?url'
 import { getUserId, logout } from './utils/auth.server.ts'
 import { ClientHintCheck, getHints } from './utils/client-hints.tsx'
@@ -35,7 +36,7 @@ import { type Theme, getTheme } from './utils/theme.server.ts'
 import { makeTimings, time } from './utils/timing.server.ts'
 import { getToast } from './utils/toast.server.ts'
 import { useOptionalUser } from './utils/user.ts'
-import { listUserNotifications, serializeForClient } from './services/notifications.server.ts'
+// (imports reordered by linter)
 
 export const links: Route.LinksFunction = () => {
 	return [

@@ -12,7 +12,9 @@ import {
 	requireAnonymous,
 	resetUserPassword,
 } from '#app/utils/auth.server.ts'
+import { prisma } from '#app/utils/db.server.ts'
 import { useIsPending } from '#app/utils/misc.tsx'
+import { validatePasswordComplexity } from '#app/utils/password-policy.server.ts'
 import { PasswordAndConfirmPasswordSchema } from '#app/utils/user-validation.ts'
 import { verifySessionStorage } from '#app/utils/verification.server.ts'
 import { type Route } from './+types/reset-password.ts'
@@ -49,13 +51,21 @@ export async function action({ request }: Route.ActionArgs) {
 	const formData = await request.formData()
 	const submission = await parseWithZod(formData, {
 		schema: ResetPasswordSchema.superRefine(async ({ password }, ctx) => {
-			const isCommonPassword = await checkIsCommonPassword(password)
-			if (isCommonPassword) {
-				ctx.addIssue({
-					path: ['password'],
-					code: 'custom',
-					message: 'Password is too common',
-				})
+			// Enforce new complexity
+			const { ok, errors } = validatePasswordComplexity(password)
+			if (!ok) {
+				errors.forEach(msg => ctx.addIssue({ path: ['password'], code: 'custom', message: msg }))
+			}
+			// Hard block if password found in breaches
+			if (ok) { // only if complexity passed to avoid extra network
+				const isCommonPassword = await checkIsCommonPassword(password)
+				if (isCommonPassword) {
+					ctx.addIssue({
+						path: ['password'],
+						code: 'custom',
+						message: 'Password appears in breach data; choose another.',
+					})
+				}
 			}
 		}),
 		async: true,
@@ -69,6 +79,13 @@ export async function action({ request }: Route.ActionArgs) {
 	const { password } = submission.value
 
 	await resetUserPassword({ username: resetPasswordUsername, password })
+	// Clear mustChangePassword flag & set passwordChangedAt
+	// Cast for mustChangePassword until Prisma types updated
+	await (prisma as any).user.update({
+		where: { username: resetPasswordUsername },
+		data: { mustChangePassword: false, passwordChangedAt: new Date() },
+		select: { id: true },
+	})
 	const verifySession = await verifySessionStorage.getSession()
 	return redirect('/login', {
 		headers: {

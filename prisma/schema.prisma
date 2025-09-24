@@ -18,6 +18,13 @@ model User {
   name     String?
   active   Boolean @default(true)
 
+  // Soft delete timestamp (null => active, non-null => logically deleted)
+  deletedAt DateTime?
+
+  // Password lifecycle / policy fields (new)
+  mustChangePassword Boolean   @default(false) // Force user to change password on next login
+  passwordChangedAt  DateTime? // Timestamp of last successful password change
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -54,6 +61,7 @@ model User {
 
   @@index([customerId])
   @@index([providerGroupId])
+  @@index([deletedAt])
 }
 
 model Note {
@@ -258,19 +266,19 @@ model UserNotification {
   user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
   userId String
 
-  kind        String   // 'success' | 'error' | 'info' | 'warning'
+  kind        String // 'success' | 'error' | 'info' | 'warning'
   title       String
-  description String?  // optional longer text
+  description String? // optional longer text
 
   // read & lifecycle
-  readAt     DateTime? // null => unread
+  readAt      DateTime? // null => unread
   dismissedAt DateTime? // manual dismissal (soft delete)
-  expiresAt  DateTime? // optional auto-expiration
+  expiresAt   DateTime? // optional auto-expiration
 
   // reserved for future features (deep link, grouping, etc.)
-  actionUrl  String?
-  groupKey   String?
-  metadata   Json?
+  actionUrl String?
+  groupKey  String?
+  metadata  Json?
 
   @@index([userId, createdAt])
   @@index([userId, readAt])
@@ -327,7 +335,7 @@ model AuditEvent {
 
   category AuditCategory
   action   String
-  status   AuditStatus @default(SUCCESS)
+  status   AuditStatus   @default(SUCCESS)
 
   entityType String?
   entityId   String?
@@ -846,7 +854,6 @@ model PostpayOtherLetter {
   @@index([providerNpi])
   @@index([letterDate])
 }
-
 
 model AppLog {
   id        String   @id @default(cuid())

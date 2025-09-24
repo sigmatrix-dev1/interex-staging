@@ -1,7 +1,7 @@
 // app/utils/auth.server.ts
 
 import crypto from 'node:crypto'
-import { type Connection, type Password, type User } from '@prisma/client'
+import { type Connection, type Password } from '@prisma/client'
 import bcrypt from 'bcryptjs'
 import { redirect } from 'react-router'
 import { Authenticator } from 'remix-auth'
@@ -53,9 +53,9 @@ export async function getUserId(request: Request) {
     // ✅ Defense in depth: ensure the user tied to this session is still active
     const user = await prisma.user.findUnique({
         where: { id: session.userId },
+        // Avoid selecting deletedAt explicitly to stay compatible with any stale generated client.
         select: { id: true, active: true },
     })
-
     if (!user || !user.active) {
         // kill the session and bounce to home/login
         await prisma.session.deleteMany({ where: { id: sessionId } }).catch(() => {})
@@ -102,7 +102,7 @@ export async function login(
         username,
         password,
     }: {
-        username: User['username']
+    username: string
         password: string
     },
 ) {
@@ -158,7 +158,7 @@ export async function resetUserPassword({
                                             username,
                                             password,
                                         }: {
-    username: User['username']
+    username: string
     password: string
 }) {
     const hashedPassword = await getPasswordHash(password)
@@ -180,9 +180,9 @@ export async function signup({
                                  password,
                                  name,
                              }: {
-    email: User['email']
-    username: User['username']
-    name: User['name']
+    email: string
+    username: string
+    name: string
     password: string
 }) {
     const hashedPassword = await getPasswordHash(password)
@@ -218,9 +218,9 @@ export async function signupWithConnection({
                                                providerName,
                                                imageUrl,
                                            }: {
-    email: User['email']
-    username: User['username']
-    name: User['name']
+    email: string
+    username: string
+    name: string
     providerId: Connection['providerId']
     providerName: Connection['providerName']
     imageUrl?: string
@@ -316,14 +316,13 @@ export async function getPasswordHash(password: string) {
 }
 
 export async function verifyUserPassword(
-    where: Pick<User, 'username'> | Pick<User, 'id'>,
+    where: { username: string } | { id: string },
     password: Password['hash'],
 ) {
     const userWithPassword = await prisma.user.findUnique({
         where,
         select: { id: true, active: true, password: { select: { hash: true } } },
     })
-
     if (!userWithPassword || !userWithPassword.password) {
         return null
     }

@@ -20,6 +20,7 @@ import { useToast } from '#app/components/toaster.tsx'
 import { Drawer } from '#app/components/ui/drawer.tsx'
 import { Icon } from '#app/components/ui/icon.tsx'
 import { StatusButton } from '#app/components/ui/status-button.tsx'
+import { ManualPasswordSection } from '#app/components/user-management/manual-password-section.tsx'
 import { requireUserId } from '#app/utils/auth.server.ts'
 import { prisma } from '#app/utils/db.server.ts'
 import { sendAdminPasswordManualResetEmail } from '#app/utils/emails/send-admin-password-manual-reset.server.ts'
@@ -319,8 +320,16 @@ export async function action({ request }: ActionFunctionArgs) {
             }
         }
 
-        // Generate temporary password
-        const temporaryPassword = generateTemporaryPassword()
+        // Generate a compliant temporary password (regenerate until complexity satisfied, max 5 tries)
+        let temporaryPassword = generateTemporaryPassword()
+        {
+            const { validatePasswordComplexity } = await import('#app/utils/password-policy.server.ts')
+            for (let i = 0; i < 5; i++) {
+                const { ok } = validatePasswordComplexity(temporaryPassword)
+                if (ok) break
+                temporaryPassword = generateTemporaryPassword()
+            }
+        }
 
         // Create the user
         const newUser = await prisma.user.create({
@@ -333,7 +342,14 @@ export async function action({ request }: ActionFunctionArgs) {
                 roles: { connect: { name: role } },
                 password: { create: { hash: hashPassword(temporaryPassword) } },
             },
-            include: { providerGroup: { select: { name: true } } },
+            // providerGroup relation not needed for response any more
+        })
+
+        // Ensure mustChangePassword flag set (separate update to bypass outdated type definitions if any)
+        await (prisma as any).user.update({
+            where: { id: newUser.id },
+            data: { mustChangePassword: true },
+            select: { id: true },
         })
 
         // Get customer information for email
@@ -353,7 +369,7 @@ export async function action({ request }: ActionFunctionArgs) {
                 tempPassword: temporaryPassword,
                 loginUrl,
                 username: username.toLowerCase(),
-                providerGroupName: newUser.providerGroup?.name,
+                providerGroupName: effectiveProviderGroupId ? undefined : undefined,
             })
             console.log(`✅ Registration email sent to ${email}`)
         } catch (error) {
@@ -528,17 +544,27 @@ export async function action({ request }: ActionFunctionArgs) {
             }
         }
 
-        if (mode === 'manual') {
-            const pwd = (manualPassword ?? '').trim()
-            if (pwd.length < 8) {
-                return data(
-                    { result: submission.reply({ fieldErrors: { manualPassword: ['Password must be at least 8 characters'] } }) },
-                    { status: 400 },
-                )
+        let newPassword = mode === 'auto' ? generateTemporaryPassword() : (manualPassword ?? '').trim()
+        {
+            const { validatePasswordComplexity } = await import('#app/utils/password-policy.server.ts')
+            if (mode === 'manual') {
+                const { ok, errors } = validatePasswordComplexity(newPassword)
+                if (!ok) {
+                    return data(
+                        { result: submission.reply({ fieldErrors: { manualPassword: errors } }) },
+                        { status: 400 },
+                    )
+                }
+            } else {
+                // Ensure auto-generated password also meets policy (regenerate up to 5 attempts)
+                for (let i = 0; i < 5; i++) {
+                    const { ok } = validatePasswordComplexity(newPassword)
+                    if (ok) break
+                    newPassword = generateTemporaryPassword()
+                }
             }
         }
 
-        const newPassword = mode === 'auto' ? generateTemporaryPassword() : (manualPassword ?? '')
         const passwordHash = hashPassword(newPassword)
 
         await prisma.password.upsert({
@@ -547,6 +573,14 @@ export async function action({ request }: ActionFunctionArgs) {
             update: { hash: passwordHash },
         })
         await prisma.session.deleteMany({ where: { userId: targetUserId } })
+
+        // Force password change on next login for any reset
+        // Cast to any in case generated Prisma types not yet updated in this environment
+        await (prisma as any).user.update({
+            where: { id: targetUserId },
+            data: { mustChangePassword: true },
+            select: { id: true },
+        })
 
         const loginUrl = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/login`
         await sendAdminPasswordManualResetEmail({
@@ -749,6 +783,7 @@ export default function CustomerUsersPage() {
     useEffect(() => {
         const action = searchParams.get('action')
         const userId = searchParams.get('userId')
+        try { console.debug('[customer/users] searchParams ->', { action, userId }) } catch {}
 
         if (action === 'add') {
             setDrawerState({ isOpen: true, mode: 'create' })
@@ -772,6 +807,9 @@ export default function CustomerUsersPage() {
     }, [searchParams])
 
     const openDrawer = (mode: 'create' | 'edit' | 'assign-npis' | 'reset-password', userId?: string) => {
+        // Optimistic update so drawer appears immediately even before URL/state effect cycles
+        setDrawerState({ isOpen: true, mode, userId })
+        try { console.debug('[customer/users] openDrawer()', { mode, userId }) } catch {}
         const newParams = new URLSearchParams(searchParams)
         if (mode === 'create') newParams.set('action', 'add')
         else if (mode === 'edit') newParams.set('action', 'edit')
@@ -1154,6 +1192,7 @@ export default function CustomerUsersPage() {
                                                             <td className="px-6 py-4 whitespace-nowrap text-sm">
                                                                 {canReset && userItem.id !== user.id ? (
                                                                     <button
+                                                                        type="button"
                                                                         onClick={() => openDrawer('reset-password', userItem.id)}
                                                                         className="inline-flex items-center px-2.5 py-1 rounded-md text-indigo-700 hover:text-indigo-900 hover:bg-indigo-50"
                                                                         title="Reset password"
@@ -1715,6 +1754,7 @@ export default function CustomerUsersPage() {
                                         const curr = new Set(selectedNpis)
                                         const added = [...curr].filter(id => !orig.has(id)).length
                                         const removed = [...orig].filter(id => !curr.has(id)).length
+                                       
                                         if (added === 0 && removed === 0) return 'No Changes'
                                         if (added > 0 && removed === 0) return added === 1 ? 'Assign 1 NPI' : `Assign ${added} NPIs`
                                         if (removed > 0 && added === 0) return removed === 1 ? 'Unassign 1 NPI' : `Unassign ${removed} NPIs`
@@ -1775,20 +1815,16 @@ export default function CustomerUsersPage() {
                                 </div>
                             </fieldset>
 
-                            {resetMode === 'manual' && (
-                                <Field
-                                    labelProps={{ children: 'New Password' }}
-                                    inputProps={{
-                                        ...getInputProps(resetFields.manualPassword, { type: 'password' }),
-                                        name: 'manualPassword',
-                                        placeholder: 'Enter a password (min 8 characters)',
-                                        minLength: 8,
-                                        required: true,
-                                        autoComplete: 'new-password',
-                                    }}
-                                    errors={resetFields.manualPassword.errors}
-                                />
-                            )}
+                                                        {resetMode === 'manual' && (
+                                                            <div>
+                                                                <ManualPasswordSection name="manualPassword" />
+                                                                {resetFields.manualPassword.errors?.length ? (
+                                                                    <ul className="mt-1 text-xs text-red-600 space-y-0.5">
+                                                                        {resetFields.manualPassword.errors.map(e => <li key={e}>{e}</li>)}
+                                                                    </ul>
+                                                                ) : null}
+                                                            </div>
+                                                        )}
 
                             <ErrorList id={resetForm.errorId} errors={resetForm.errors} />
 
@@ -1938,3 +1974,6 @@ export default function CustomerUsersPage() {
         </>
     )
 }
+
+// Add manual password section component with show/hide and live validation
+// Local ManualPasswordSection removed in favor of shared component

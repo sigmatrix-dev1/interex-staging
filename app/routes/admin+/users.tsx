@@ -21,7 +21,7 @@ import { Drawer } from '#app/components/ui/drawer.tsx'
 import { Icon } from '#app/components/ui/icon.tsx'
 import { StatusButton } from '#app/components/ui/status-button.tsx'
 import { prepareVerification } from '#app/routes/_auth+/verify.server.ts'
-import { requireUserId } from '#app/utils/auth.server.ts'
+import { requireUserId, checkIsCommonPassword } from '#app/utils/auth.server.ts'
 import { prisma } from '#app/utils/db.server.ts'
 import { sendAdminPasswordManualResetEmail } from '#app/utils/emails/send-admin-password-manual-reset.server.ts'
 import { sendAdminPasswordResetLinkEmail } from '#app/utils/emails/send-admin-password-reset-link.server.ts'
@@ -361,25 +361,56 @@ export async function action({ request }: ActionFunctionArgs) {
             )
         }
 
-        await prisma.user.create({
+        // Generate a strong temporary password and ensure it's not pwned.
+        let tempPassword = generateTemporaryPassword()
+        // Regenerate up to a few times if it appears in breach data (very unlikely)
+        for (let i = 0; i < 3; i++) {
+            const compromised = await checkIsCommonPassword(tempPassword)
+            if (!compromised) break
+            tempPassword = generateTemporaryPassword()
+        }
+        const passwordHash = hashPassword(tempPassword)
+
+    const created = await (prisma as any).user.create({
             data: {
                 email,
                 username,
                 name: name || null,
                 active,
                 customerId: customerId || null,
+                mustChangePassword: true,
                 roles: roleId
                     ? {
                         connect: { id: roleId },
                     }
                     : undefined,
+                password: { create: { hash: passwordHash } },
             },
+            select: {
+                id: true,
+                name: true,
+                email: true,
+                username: true,
+                customer: { select: { name: true } },
+            },
+        })
+
+        // Email the temporary password to the user (reuse manual reset template for consistency)
+        const loginUrl = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/login`
+        void sendAdminPasswordManualResetEmail({
+            to: created.email,
+            recipientName: created.name || created.username,
+            requestedByName: admin.name ?? undefined,
+            customerName: created.customer?.name ?? undefined,
+            username: created.username,
+            tempPassword,
+            loginUrl,
         })
 
         return redirectWithToast('/admin/users', {
             type: 'success',
             title: 'User created',
-            description: `${name || username} has been created successfully.`,
+            description: `${name || username} created. Temporary password emailed; user must change it at first login.`,
         })
     }
 
@@ -480,6 +511,14 @@ export async function action({ request }: ActionFunctionArgs) {
             update: { hash: passwordHash },
         })
 
+        // Flag user to force password change on next login
+        // Cast to any in case Prisma client not regenerated yet with new field
+    await (prisma as any).user.update({
+            where: { id: userId },
+            data: { mustChangePassword: true },
+            select: { id: true },
+        })
+
         // Invalidate all sessions for this user
         await prisma.session.deleteMany({ where: { userId } })
 
@@ -532,7 +571,7 @@ export default function AdminUsers() {
     const currentCustomer = filterCustomerId ? customers.find(c => c.id === filterCustomerId) : undefined
 
     // Filter users by current customer if selected
-    const filteredUsers = filterCustomerId ? users.filter(u => u.customer?.id === filterCustomerId) : users
+    const filteredUsers = filterCustomerId ? (users as any[]).filter((u: any) => u.customer?.id === filterCustomerId) : (users as any[])
 
     const [drawerState, setDrawerState] = useState<{
         isOpen: boolean
@@ -659,7 +698,7 @@ export default function AdminUsers() {
                                         <dl>
                                             <dt className="text-sm font-medium text-gray-500 truncate">With Customers</dt>
                                             <dd className="text-lg font-medium text-gray-900">
-                                                {filteredUsers.filter(u => u.customer).length}
+                                                {filteredUsers.filter((u: any) => u.customer).length}
                                             </dd>
                                         </dl>
                                     </div>
@@ -677,7 +716,7 @@ export default function AdminUsers() {
                                         <dl>
                                             <dt className="text-sm font-medium text-gray-500 truncate">With NPIs</dt>
                                             <dd className="text-lg font-medium text-gray-900">
-                                                {filteredUsers.filter(u => u.userNpis.length > 0).length}
+                                                {filteredUsers.filter((u: any) => u.userNpis.length > 0).length}
                                             </dd>
                                         </dl>
                                     </div>
@@ -699,7 +738,7 @@ export default function AdminUsers() {
                             </p>
                         </div>
                         <ul className="divide-y divide-gray-200">
-                            {filteredUsers.map(userItem => (
+                            {(filteredUsers as any[]).map((userItem: any) => (
                                 <li key={userItem.id}>
                                     <div className="px-4 py-4 sm:px-6">
                                         <div className="flex items-center justify-between">
@@ -712,7 +751,7 @@ export default function AdminUsers() {
                                                         <p className="text-sm font-medium text-gray-900">
                                                             {userItem.name || userItem.username}
                                                         </p>
-                                                        {userItem.roles.map(role => (
+                                                        {userItem.roles.map((role: any) => (
                                                             <span
                                                                 key={role.name}
                                                                 className={`ml-2 inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${

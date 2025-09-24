@@ -238,10 +238,11 @@ export async function loader({ request }: LoaderFunctionArgs) {
     })
 
     // For assignment list: all active users within same customer (scoped for provider group admin)
-    const assignableUsers = await prisma.user.findMany({
+    const assignableUsers = await (prisma as any).user.findMany({
         where: {
             customerId: user.customerId,
             active: true,
+            deletedAt: null,
             roles: {
                 none: {
                     name: { in: [INTEREX_ROLES.CUSTOMER_ADMIN, INTEREX_ROLES.PROVIDER_GROUP_ADMIN] },
@@ -1547,7 +1548,7 @@ export default function CustomerProviderNpiPage() {
 
                                                 // Determine if there is at least one eligible user to add (group alignment rule)
                                                 // Filter users using new guard rail metadata
-                                                const eligibleUsers = assignableUsers.filter(u => {
+                                                const eligibleUsers = (assignableUsers as any[]).filter((u: any) => {
                                                     // Rule: if provider grouped -> only users in that group
                                                     if (provider.providerGroupId) {
                                                         if (u.providerGroupId !== provider.providerGroupId) return false
@@ -1614,7 +1615,7 @@ export default function CustomerProviderNpiPage() {
                                                                                     <div className="space-y-3">
                                                                                         <div className="max-h-32 overflow-y-auto border rounded-md p-1.5 space-y-1 bg-gray-50">
                                                                                                 {eligibleUsers.length > 0 ? (
-                                                                                                    eligibleUsers.map(u => (
+                                                                                                    eligibleUsers.map((u: any) => (
                                                                                                         <label key={u.id} className="flex items-center gap-1 text-[11px] text-gray-700 px-1 py-0.5 rounded hover:bg-white">
                                                                                                             <input type="checkbox" name="assignUserIds" value={u.id} className="h-3 w-3" />
                                                                                                             <span className="truncate" title={u.name || u.email}>{u.name || u.email}</span>
@@ -1668,7 +1669,7 @@ export default function CustomerProviderNpiPage() {
                                                                                         </div>
                                                                                         <div className="max-h-32 overflow-y-auto border rounded-md p-1.5 space-y-1 bg-gray-50">
                                                                                             {eligibleUsers.length > 0 ? (
-                                                                                                eligibleUsers.map(u => (
+                                                                                                eligibleUsers.map((u: any) => (
                                                                                                     <label key={u.id} className="flex items-center gap-1 text-[11px] text-gray-700 px-1 py-0.5 rounded hover:bg-white">
                                                                                                         <input type="checkbox" name="assignUserIds" value={u.id} className="h-3 w-3" />
                                                                                                         <span className="truncate" title={u.name || u.email}>{u.name || u.email}</span>

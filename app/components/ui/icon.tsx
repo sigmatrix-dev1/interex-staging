@@ -75,6 +75,8 @@ const RAW_ICON_NAMES = [
 	'upload',
 	'info',
 	'bell',
+	'eye',
+	'eye-closed',
 ] as const
 
 // Common aliases so nav can use friendlier names.

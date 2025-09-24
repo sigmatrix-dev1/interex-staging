@@ -1,4 +1,4 @@
-import { type LoaderFunctionArgs, data, useLoaderData, Link, Outlet   } from 'react-router'
+import { type LoaderFunctionArgs, data, useLoaderData, Link, Outlet, useMatches   } from 'react-router'
 import { InterexLayout } from '#app/components/interex-layout.tsx'
 import { Icon } from '#app/components/ui/icon.tsx'
 import { requireUserId } from '#app/utils/auth.server.ts'
@@ -129,6 +129,15 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
 
 export default function CustomerManagementPage() {
   const { user, customer, users, providerGroups, providers } = useLoaderData<typeof loader>()
+  const matches = useMatches()
+  const currentPath = matches[matches.length - 1]?.pathname || ''
+  const isNested = /\/admin\/customer-manage\/[^/]+\/(users|providers|provider-groups)/.test(currentPath)
+
+  // If we're on a nested route (users/providers/provider-groups), do NOT render this
+  // route's InterexLayout to avoid double headers. Let the child route own the layout.
+  if (isNested) {
+    return <Outlet />
+  }
 
   return (
     <InterexLayout 
@@ -316,8 +325,6 @@ export default function CustomerManagementPage() {
           </div>
         </div>
       </div>
-      {/* Render nested admin management pages here */}
-      <Outlet />
     </InterexLayout>
   )
 }

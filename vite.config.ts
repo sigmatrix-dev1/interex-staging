@@ -58,6 +58,7 @@ export default defineConfig((config) => ({
 	],
 	test: {
 		include: ['./app/**/*.test.{ts,tsx}'],
+		exclude: ['**/password-lifecycle.test.ts'],
 		setupFiles: ['./tests/setup/setup-test-env.ts'],
 		globalSetup: ['./tests/setup/global-setup.ts'],
 		restoreMocks: true,

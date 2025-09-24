@@ -40,14 +40,14 @@ export async function extractRequestContext(request: Request, opts: RequestConte
   let actorDisplay: string | null | undefined
   let rolesCsv: string | null | undefined
   if (userId) {
-    const user = await prisma.user.findUnique({
+    const user = await (prisma as any).user.findUnique({
       where: { id: userId },
       select: { name: true, email: true, customerId: true, roles: { select: { name: true } } },
     })
     if (user) {
       customerId = user.customerId
       actorDisplay = user.name || user.email
-      rolesCsv = user.roles.map(r => r.name).join(',') || null
+      rolesCsv = user.roles.map((r: any) => r.name).join(',') || null
     }
   }
 
