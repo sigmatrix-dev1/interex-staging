@@ -301,6 +301,7 @@ async function buildScopeWhere(userId: string) {
         let groupIds: string[] = []
         if (user.providerGroupId) groupIds.push(user.providerGroupId)
         try {
+            // providerGroupMember model access via any until generated type exposed (if exists)
             const memberships = await (prisma as any).providerGroupMember.findMany({
                 where: { userId: user.id },
                 select: { providerGroupId: true },

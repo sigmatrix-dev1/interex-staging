@@ -1,5 +1,4 @@
 import { test as base } from '@playwright/test'
-import { type User as UserModel } from '@prisma/client'
 import * as setCookieParser from 'set-cookie-parser'
 import {
 	getPasswordHash,
@@ -21,9 +20,9 @@ export * from './db-utils.ts'
 
 type GetOrInsertUserOptions = {
 	id?: string
-	username?: UserModel['username']
+	username?: string
 	password?: string
-	email?: UserModel['email']
+	email?: string
 }
 
 type User = {
