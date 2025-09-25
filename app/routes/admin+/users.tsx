@@ -30,6 +30,7 @@ import { useIsPending } from '#app/utils/misc.tsx'
 import { generateTemporaryPassword, hashPassword } from '#app/utils/password.server.ts'
 import { requireRoles } from '#app/utils/role-redirect.server.ts'
 import { redirectWithToast } from '#app/utils/toast.server.ts'
+import { disableTwoFactorForUser } from '#app/utils/twofa.server.ts'
 
 // NEW: password helpers + email senders + verification prep
 
@@ -53,6 +54,12 @@ const ManualResetSchema = z.object({
     userId: z.string().min(1, 'User ID is required'),
 })
 
+// Admin-only: Reset user's 2FA (disable and clear secret)
+const ResetTwoFASchema = z.object({
+    intent: z.literal('reset-2fa'),
+    userId: z.string().min(1, 'User ID is required'),
+})
+
 // --- FIX: make each branch a ZodObject with 'intent' key (no .and / intersection)
 const CreateUserActionSchema = CreateUserSchema.extend({
     intent: z.literal('create'),
@@ -63,6 +70,7 @@ const ActionSchema = z.discriminatedUnion('intent', [
     CreateUserActionSchema,
     SendResetLinkSchema,
     ManualResetSchema,
+    ResetTwoFASchema,
 ])
 
 function CreateUserForm({
@@ -245,6 +253,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
                 username: true,
                 createdAt: true,
                 active: true,
+                twoFactorEnabled: true,
                 customer: {
                     select: {
                         id: true,
@@ -553,6 +562,56 @@ export async function action({ request }: ActionFunctionArgs) {
         })
     }
 
+    // ====== RESET 2FA (admin-only) ======
+    if (submission.value.intent === 'reset-2fa') {
+        const { userId } = submission.value
+
+        const targetUser = await prisma.user.findUnique({
+            where: { id: userId },
+            select: { id: true, email: true, name: true, username: true, customer: { select: { name: true } } },
+        })
+
+        if (!targetUser) {
+            return redirectWithToast('/admin/users', {
+                type: 'error',
+                title: 'User not found',
+                description: 'Unable to reset 2FA. Please refresh and try again.',
+            })
+        }
+
+        // Disable 2FA via helper, clear secret and flag
+        await disableTwoFactorForUser(userId)
+
+        // Delete any existing verification records of type '2fa' to fully reset
+        try {
+            await prisma.verification.deleteMany({
+                where: { target: userId, type: '2fa' },
+            })
+        } catch {
+            // ignore if table/records differ; best-effort cleanup
+        }
+
+        // Invalidate all sessions for extra security
+        await prisma.session.deleteMany({ where: { userId } })
+
+        await prisma.securityEvent.create({
+            data: {
+                kind: 'TWO_FACTOR_RESET',
+                message: 'Admin reset user 2FA',
+                userId: targetUser.id,
+                userEmail: targetUser.email,
+                success: true,
+                reason: 'ADMIN_TRIGGERED',
+            },
+        })
+
+        return redirectWithToast('/admin/users', {
+            type: 'success',
+            title: '2FA reset',
+            description: `2FA has been reset for ${targetUser.name || targetUser.username}.`,
+        })
+    }
+
     // Fallback (should never hit)
     return redirectWithToast('/admin/users', {
         type: 'error',
@@ -568,10 +627,15 @@ export default function AdminUsers() {
 
     // Get current customer filter from URL
     const filterCustomerId = searchParams.get('filter')
-    const currentCustomer = filterCustomerId ? customers.find(c => c.id === filterCustomerId) : undefined
+    const isSystemFilter = filterCustomerId === 'system'
+    const currentCustomer = filterCustomerId && !isSystemFilter ? customers.find(c => c.id === filterCustomerId) : undefined
 
-    // Filter users by current customer if selected
-    const filteredUsers = filterCustomerId ? (users as any[]).filter((u: any) => u.customer?.id === filterCustomerId) : (users as any[])
+    // Filter users by current customer if selected; if 'system', show users without a customer
+    const filteredUsers = filterCustomerId
+        ? isSystemFilter
+            ? (users as any[]).filter((u: any) => !u.customer)
+            : (users as any[]).filter((u: any) => u.customer?.id === filterCustomerId)
+        : (users as any[])
 
     const [drawerState, setDrawerState] = useState<{
         isOpen: boolean
@@ -630,6 +694,15 @@ export default function AdminUsers() {
                             Back to Dashboard
                         </Link>
                     )}
+                    {/* Quick access: Create System Admin (only visible to system admins – route already protected) */}
+                    <Link
+                        to="/admin/system-admin/new"
+                        className="inline-flex items-center px-3 py-2 border border-red-300 shadow-sm text-sm font-medium rounded-md text-red-700 bg-white hover:bg-red-50"
+                        title="Create a new global System Administrator"
+                    >
+                        <Icon name="shield" className="-ml-1 mr-2 h-4 w-4" />
+                        New System Admin
+                    </Link>
                     <select
                         value={filterCustomerId || ''}
                         onChange={e => {
@@ -645,6 +718,7 @@ export default function AdminUsers() {
                         className="inline-flex items-center px-3 py-2 border border-gray-300 shadow-sm text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
                     >
                         <option value="">All Customers</option>
+                        <option value="system">System</option>
                         {customers.map(customer => (
                             <option key={customer.id} value={customer.id}>
                                 {customer.name}
@@ -767,6 +841,14 @@ export default function AdminUsers() {
                                 {role.name}
                               </span>
                                                         ))}
+                                                        {!userItem.customer && (
+                                                            <span
+                                                                className="ml-2 inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-800"
+                                                                title="User is not assigned to any customer"
+                                                            >
+                                                                system
+                                                            </span>
+                                                        )}
                                                     </div>
                                                     <p className="text-sm text-gray-500">{userItem.email}</p>
                                                     <div className="mt-1 flex items-center text-sm text-gray-500">
@@ -785,6 +867,9 @@ export default function AdminUsers() {
                                 </span>
                                                             </>
                                                         )}
+                                                        <span className={`ml-4 inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${userItem.twoFactorEnabled ? 'bg-green-100 text-green-800' : 'bg-yellow-100 text-yellow-800'}`}>
+                                                            {userItem.twoFactorEnabled ? '2FA enabled' : '2FA not set'}
+                                                        </span>
                                                     </div>
                                                 </div>
                                             </div>
@@ -831,6 +916,29 @@ export default function AdminUsers() {
                                                         {/* FIX: use an allowed icon name */}
                                                         <Icon name="lock-open-1" className="h-4 w-4 mr-1" />
                                                         Manual reset
+                                                    </button>
+                                                </Form>
+
+                                                {/* Admin: Reset 2FA */}
+                                                <Form method="post" className="inline">
+                                                    <input type="hidden" name="intent" value="reset-2fa" />
+                                                    <input type="hidden" name="userId" value={userItem.id} />
+                                                    <button
+                                                        type="submit"
+                                                        className="inline-flex items-center px-3 py-1.5 border border-transparent rounded-md shadow-sm text-xs font-medium text-white bg-red-600 hover:bg-red-700 focus:outline-none"
+                                                        title="Reset two-factor authentication for this user"
+                                                        onClick={e => {
+                                                            if (
+                                                                !confirm(
+                                                                    `Reset 2FA for "${userItem.name || userItem.username}"? This will disable 2FA and sign them out everywhere.`,
+                                                                )
+                                                            ) {
+                                                                e.preventDefault()
+                                                            }
+                                                        }}
+                                                    >
+                                                        <Icon name="shield-warning" className="h-4 w-4 mr-1" />
+                                                        Reset 2FA
                                                     </button>
                                                 </Form>
                                             </div>

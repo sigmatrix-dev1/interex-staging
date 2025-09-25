@@ -86,6 +86,14 @@ export default function AdminDashboard() {
             <Icon name="hero:chart" size="lg" className="-ml-0.5" />
             Reports
           </Link>
+          <Link
+            to="/admin/users"
+            className="inline-flex items-center gap-2.5 px-5 py-3 rounded-full text-base font-semibold text-white bg-slate-700 hover:bg-slate-800 shadow-lg ring-1 ring-slate-500/20"
+            title="Manage Users"
+          >
+            <Icon name="hero:users" size="lg" className="-ml-0.5" />
+            Users
+          </Link>
         </div>
       }
     >

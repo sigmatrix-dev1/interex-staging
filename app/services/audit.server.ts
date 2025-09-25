@@ -170,4 +170,8 @@ export const audit = {
   direct: logAuditEvent,
 }
 
+// Temporary compatibility alias: some stale build artifact referenced a named export `writeAudit`.
+// Provide an alias to avoid spurious type errors if an old import lingers. Prefer using `audit.<category>` helpers instead.
+export const writeAudit = logAuditEvent
+
 export type AuditService = typeof audit

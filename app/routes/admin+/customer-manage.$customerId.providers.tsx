@@ -29,20 +29,34 @@ import { INTEREX_ROLES } from '#app/utils/interex-roles.ts'
 import { useIsPending } from '#app/utils/misc.tsx'
 import { requireRoles } from '#app/utils/role-redirect.server.ts'
 
+// Schemas (restored after accidental removal during patch)
+const CreateProviderSchema = z.object({
+  intent: z.literal('create'),
+  npi: z.string().min(10).max(10),
+  name: z.string().min(1, 'Provider name is required'),
+  providerGroupId: z.string().optional(),
+})
+
+const UpdateProviderSchema = z.object({
+  intent: z.literal('update'),
+  providerId: z.string().min(1),
+  name: z.string().min(1, 'Provider name is required').optional(),
+  providerGroupId: z.string().optional(),
+  active: z.boolean().optional(),
+})
+
+const ToggleActiveSchema = z.object({
+  intent: z.literal('toggle-active'),
+  providerId: z.string().min(1),
+  active: z.boolean(),
+})
+
 // Local helpers copied/adapted from customer provider NPIs page
 async function logProviderEvent(input: {
   providerId: string
   customerId: string
   actorId?: string | null
-  kind:
-    | 'CREATED'
-    | 'UPDATED'
-    | 'ACTIVATED'
-    | 'INACTIVATED'
-    | 'GROUP_ASSIGNED'
-    | 'GROUP_UNASSIGNED'
-    | 'PCG_ADD_ATTEMPT'
-    | 'PCG_ADD_ERROR'
+  kind: 'CREATED' | 'UPDATED' | 'ACTIVATED' | 'INACTIVATED' | 'GROUP_ASSIGNED' | 'GROUP_UNASSIGNED' | 'PCG_ADD_ATTEMPT' | 'PCG_ADD_ERROR'
   message?: string
   payload?: any
 }) {
@@ -99,48 +113,6 @@ async function writeAudit(input: {
     })
   } catch {}
 }
-
-const CreateProviderSchema = z.object({
-  intent: z.literal('create'),
-  npi: z.string().regex(/^\d{10}$/, 'NPI must be exactly 10 digits'),
-  name: z
-    .string()
-    .min(1, 'Provider name is required')
-    .max(200, 'Provider name must be less than 200 characters'),
-  providerGroupId: z.string().optional(),
-})
-
-const UpdateProviderSchema = z.object({
-  intent: z.literal('update'),
-  providerId: z.string().min(1, 'Provider ID is required'),
-  name: z
-    .string()
-    .min(1, 'Provider name is required')
-    .max(200, 'Provider name must be less than 200 characters'),
-  providerGroupId: z.string().optional(),
-  active: z
-    .union([z.boolean(), z.string(), z.array(z.string())])
-    .transform(value => {
-      const last = Array.isArray(value) ? value[value.length - 1] : value
-      if (typeof last === 'boolean') return last
-      if (typeof last === 'string') return last === 'true' || last === 'on'
-      return false
-    })
-    .optional(),
-})
-
-const ToggleActiveSchema = z.object({
-  intent: z.literal('toggle-active'),
-  providerId: z.string().min(1, 'Provider ID is required'),
-  active: z
-    .union([z.boolean(), z.string(), z.array(z.string())])
-    .transform(v => {
-      const last = Array.isArray(v) ? v[v.length - 1] : v
-      if (typeof last === 'boolean') return last
-      if (typeof last === 'string') return last === 'true' || last === 'on'
-      return false
-    }),
-})
 
 const UpdateGroupSchema = z.object({
   intent: z.literal('update-group'),
@@ -1188,11 +1160,14 @@ export default function AdminCustomerProvidersPage() {
                             const displayName = provider.listDetail?.providerName || provider.registrationStatus?.providerName || provider.name || 'No name'
 
                             const eligibleUsers = (assignableUsers as any[]).filter((u: any) => {
+                              // Provider grouped: user must be in same group
                               if (provider.providerGroupId) {
                                 if (u.providerGroupId !== provider.providerGroupId) return false
                               } else {
+                                // Provider ungrouped: only users without a group
                                 if (u.providerGroupId) return false
                               }
+                              // De-dup current assignments
                               return !provider.userNpis.some((l: any) => l.userId === u.id)
                             })
                             const hasEligibleNewUser = eligibleUsers.length > 0

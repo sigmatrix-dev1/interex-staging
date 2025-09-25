@@ -12,7 +12,6 @@ import {
 	generateTwoFactorSecret, 
 	verifyTwoFactorToken, 
 	enableTwoFactorForUser,
-	disableTwoFactorForUser,
 	getUserTwoFactorStatus 
 } from '#app/utils/twofa.server.ts'
 
@@ -21,9 +20,7 @@ const TwoFAVerifySchema = z.object({
 	secret: z.string(),
 })
 
-const TwoFADisableSchema = z.object({
-	action: z.literal('disable'),
-})
+// Self-disable is not supported; only admins can reset 2FA
 
 export async function loader({ request }: { request: Request }) {
 	const userId = await requireUserId(request)
@@ -45,17 +42,6 @@ export async function action({ request }: { request: Request }) {
 	
 	const intent = formData.get('intent')
 	
-	// Handle disable 2FA
-	if (intent === 'disable') {
-		const submission = parseWithZod(formData, { schema: TwoFADisableSchema })
-		if (submission.status === 'success') {
-			await disableTwoFactorForUser(userId)
-			return redirect('/me/2fa')
-		}
-		return data({ result: submission.reply() }, { status: 400 })
-	}
-	
-	// Handle setup/verification
 	if (intent === 'verify') {
 		const submission = await parseWithZod(formData, {
 			schema: TwoFAVerifySchema.transform(async (data, ctx) => {
@@ -121,7 +107,7 @@ export default function TwoFAPage({ loaderData, actionData }: { loaderData: any;
 			<div className="container mx-auto max-w-md py-8">
 				<div className="rounded-lg bg-white p-6 shadow-md">
 					<h1 className="text-2xl font-bold text-gray-900 mb-4">Two-Factor Authentication</h1>
-					<div className="bg-green-50 border border-green-200 rounded-md p-4 mb-6">
+					<div className="bg-green-50 border border-green-200 rounded-md p-4 mb-4">
 						<div className="flex">
 							<div className="flex-shrink-0">
 								<svg className="h-5 w-5 text-green-400" viewBox="0 0 20 20" fill="currentColor">
@@ -135,18 +121,7 @@ export default function TwoFAPage({ loaderData, actionData }: { loaderData: any;
 							</div>
 						</div>
 					</div>
-					
-					<Form method="post">
-						<input type="hidden" name="intent" value="disable" />
-						<StatusButton
-							type="submit"
-							variant="destructive"
-							status={isPending ? 'pending' : 'idle'}
-							className="w-full"
-						>
-							Disable 2FA
-						</StatusButton>
-					</Form>
+					<p className="text-xs text-gray-500">Contact an administrator if you need to reset 2FA.</p>
 				</div>
 			</div>
 		)

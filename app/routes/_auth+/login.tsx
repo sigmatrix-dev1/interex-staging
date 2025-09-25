@@ -5,7 +5,7 @@ import { getZodConstraint, parseWithZod } from '@conform-to/zod'
 import { EyeIcon, EyeSlashIcon } from '@heroicons/react/24/outline'
 import { type SEOHandle } from '@nasa-gcn/remix-seo'
 import { useState } from 'react'
-import { data, Form, Link, redirect, useSearchParams } from 'react-router'
+import { data, Form, Link, useSearchParams } from 'react-router'
 import { HoneypotInputs } from 'remix-utils/honeypot/react'
 import { z } from 'zod'
 import { GeneralErrorBoundary } from '#app/components/error-boundary.tsx'
@@ -13,7 +13,6 @@ import { CheckboxField, ErrorList, Field } from '#app/components/forms.tsx'
 import { Spacer } from '#app/components/spacer.tsx'
 import { StatusButton } from '#app/components/ui/status-button.tsx'
 import { login, requireAnonymous } from '#app/utils/auth.server.ts'
-import { prisma } from '#app/utils/db.server.ts'
 import { checkHoneypot } from '#app/utils/honeypot.server.ts'
 import { useIsPending } from '#app/utils/misc.tsx'
 import { PasswordSchema, UsernameSchema } from '#app/utils/user-validation.ts'
@@ -28,7 +27,7 @@ const LoginFormSchema = z.object({
 	username: UsernameSchema,
 	password: PasswordSchema,
 	redirectTo: z.string().optional(),
-	remember: z.boolean().optional(),
+	remember: z.coerce.boolean().optional(),
 })
 
 // Passkey auth temporarily removed pending re-introduction with updated UX
@@ -43,48 +42,36 @@ export async function action({ request }: { request: Request }) {
 	const formData = await request.formData()
 	await checkHoneypot(formData)
 	const submission = await parseWithZod(formData, {
-		schema: (intent) =>
-			LoginFormSchema.transform(async (data, ctx) => {
-				if (intent !== null) return { ...data, session: null }
-
-				const session = await login(request, data)
-				if (!session) {
-					ctx.addIssue({
-						code: z.ZodIssueCode.custom,
-						message: 'Invalid username or password',
-					})
-					return z.NEVER
-				}
-
-				// Check if user has 2FA enabled
-				const user = await prisma.user.findUnique({ 
-					where: { id: session.userId }, 
-					select: { twoFactorEnabled: true } 
-				})
-				
-				if (user?.twoFactorEnabled) {
-					// Redirect to 2FA page instead of creating session
-					const url = new URL(`/auth/2fa`, 'http://localhost')
-					url.searchParams.set('userId', session.userId)
-					url.searchParams.set('remember', data.remember ? 'true' : 'false')
-					if (data.redirectTo) url.searchParams.set('redirectTo', data.redirectTo)
-					throw redirect(url.pathname + url.search)
-				}
-
-				return { ...data, session }
-			}),
+		schema: LoginFormSchema,
 		async: true,
 	})
 
-	if (submission.status !== 'success' || !submission.value.session) {
+	if (submission.status !== 'success') {
 		return data(
 			{ result: submission.reply({ hideFields: ['password'] }) },
 			{ status: submission.status === 'error' ? 400 : 200 },
 		)
 	}
 
-	const { session, remember, redirectTo } = submission.value
+	const { username, password, remember, redirectTo } = submission.value
 
+	const session = await login(request, { username, password })
+	if (!session) {
+		// Add a form-level error
+		return data(
+			{
+				result: submission.reply({
+					formErrors: ['Invalid username or password'],
+					hideFields: ['password'],
+				}),
+			},
+			{ status: 400 },
+		)
+	}
+
+	// Hand off to the shared session flow which:
+	// - If 2FA is enabled, sets a verify session and redirects to /verify
+	// - Else, commits the auth session and redirects to the dashboard or redirectTo
 	return handleNewSession({
 		request,
 		session,
@@ -127,6 +114,7 @@ export default function LoginPage({ actionData }: { actionData: any }) {
 						<Spacer size="xs" />
 
 						<Form method="POST" {...getFormProps(form)}>
+							<input type="hidden" name="intent" value="submit" />
 							<HoneypotInputs />
 							<Field
 								labelProps={{ children: 'Username' }}

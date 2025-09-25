@@ -23,7 +23,7 @@ export async function loader({ request }: { request: Request }) {
 	const userId = url.searchParams.get('userId')
 	
 	if (!userId) {
-		throw redirect('/auth/login')
+		throw redirect('/login')
 	}
 	
 	// Verify the user exists and has 2FA enabled
@@ -38,7 +38,7 @@ export async function loader({ request }: { request: Request }) {
 	})
 	
 	if (!user || !user.twoFactorEnabled || !user.twoFactorSecret) {
-		throw redirect('/auth/login')
+		throw redirect('/login')
 	}
 	
 	return { userId, username: user.username }
@@ -164,7 +164,7 @@ export default function TwoFALoginPage({ loaderData, actionData }: { loaderData:
 								</StatusButton>
 								
 								<a
-									href="/auth/login"
+									href="/login"
 									className="text-center text-sm text-gray-600 hover:text-gray-900"
 								>
 									← Back to login

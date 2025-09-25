@@ -1,5 +1,5 @@
 import { type SEOHandle } from '@nasa-gcn/remix-seo'
-import { redirect, Link, useFetcher } from 'react-router'
+import { redirect, useFetcher } from 'react-router'
 import { Icon } from '#app/components/ui/icon.tsx'
 import { StatusButton } from '#app/components/ui/status-button.tsx'
 import { requireUserId } from '#app/utils/auth.server.ts'
@@ -52,9 +52,9 @@ export default function TwoFactorRoute({ loaderData }: Route.ComponentProps) {
 							You have enabled two-factor authentication.
 						</Icon>
 					</p>
-					<Link to="disable">
-						<Icon name="lock-open-1">Disable 2FA</Icon>
-					</Link>
+					<p className="text-xs text-gray-500">
+						2FA cannot be disabled by users. Contact an administrator if you need to reset 2FA.
+					</p>
 				</>
 			) : (
 				<>
