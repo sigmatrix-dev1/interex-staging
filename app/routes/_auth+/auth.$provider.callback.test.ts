@@ -3,12 +3,11 @@ import { faker } from '@faker-js/faker'
 import { SetCookie } from '@mjackson/headers'
 import { http } from 'msw'
 import { afterEach, expect, test } from 'vitest'
-import { twoFAVerificationType } from '#app/routes/settings+/profile.two-factor.tsx'
+// Legacy 2FA verification type removed; tests updated to reflect TOTP-only flow
 import { getSessionExpirationDate, sessionKey } from '#app/utils/auth.server.ts'
 import { GITHUB_PROVIDER_NAME } from '#app/utils/connections.tsx'
 import { prisma } from '#app/utils/db.server.ts'
 import { authSessionStorage } from '#app/utils/session.server.ts'
-import { generateTOTP } from '#app/utils/totp.server.ts'
 import { createUser } from '#tests/db-utils.ts'
 import { insertGitHubUser, deleteGitHubUsers } from '#tests/mocks/github.ts'
 import { server } from '#tests/mocks/index.ts'
@@ -193,22 +192,13 @@ test('if a user is not logged in, but the connection exists and they have enable
 			userId,
 		},
 	})
-	const { otp: _otp, ...config } = await generateTOTP()
-	await prisma.verification.create({
-		data: {
-			type: twoFAVerificationType,
-			target: userId,
-			...config,
-		},
-	})
+	// Mark the user as having 2FA enabled in the new TOTP-only flow
+	await prisma.user.update({ where: { id: userId }, data: { twoFactorEnabled: true, twoFactorSecret: 'TESTSECRET' } })
 	const request = await setupRequest({ code: githubUser.code })
 	const response = await loader({ request, params: PARAMS, context: {} })
-	const searchParams = new URLSearchParams({
-		type: twoFAVerificationType,
-		target: userId,
-		redirectTo: '/',
-	})
-	expect(response).toHaveRedirect(`/verify?${searchParams}`)
+	// With TOTP-only flow, redirect to /2fa with userId and redirectTo
+	const searchParams = new URLSearchParams({ userId, redirectTo: '/', remember: 'true' })
+	expect(response).toHaveRedirect(`/2fa?${searchParams}`)
 })
 
 async function setupRequest({

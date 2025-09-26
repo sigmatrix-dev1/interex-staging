@@ -14,7 +14,6 @@ import { getUserImgSrc, useDoubleCheck } from '#app/utils/misc.tsx'
 import { authSessionStorage } from '#app/utils/session.server.ts'
 import { NameSchema, UsernameSchema } from '#app/utils/user-validation.ts'
 import { type Route } from './+types/profile.index.ts'
-import { twoFAVerificationType } from './profile.two-factor.tsx'
 
 export const handle: SEOHandle = {
     getSitemapEntries: () => null,
@@ -34,6 +33,7 @@ export async function loader({ request }: Route.LoaderArgs) {
             name: true,
             username: true,
             email: true,
+            twoFactorEnabled: true,
             image: { select: { objectKey: true } },
             _count: {
                 select: {
@@ -41,11 +41,6 @@ export async function loader({ request }: Route.LoaderArgs) {
                 },
             },
         },
-    })
-
-    const twoFactorVerification = await prisma.verification.findUnique({
-        select: { id: true },
-        where: { target_type: { type: twoFAVerificationType, target: userId } },
     })
 
     const password = await prisma.password.findUnique({
@@ -56,7 +51,7 @@ export async function loader({ request }: Route.LoaderArgs) {
     return {
         user,
         hasPassword: Boolean(password),
-        isTwoFactorEnabled: Boolean(twoFactorVerification),
+        isTwoFactorEnabled: Boolean(user.twoFactorEnabled),
     }
 }
 

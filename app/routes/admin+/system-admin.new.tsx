@@ -1,24 +1,24 @@
 // app/routes/admin+/system-admin.new.tsx
 // External libs first
-import { type LoaderFunctionArgs, type ActionFunctionArgs, data, Form, useActionData, useLoaderData, Link } from 'react-router'
-import { z } from 'zod'
 import { getFormProps, getInputProps, useForm } from '@conform-to/react'
 import { getZodConstraint, parseWithZod } from '@conform-to/zod'
+import { type LoaderFunctionArgs, type ActionFunctionArgs, data, Form, useActionData, useLoaderData, Link } from 'react-router'
+import { z } from 'zod'
 // UI components
-import { InterexLayout } from '#app/components/interex-layout.tsx'
 import { Field, ErrorList } from '#app/components/forms.tsx'
+import { InterexLayout } from '#app/components/interex-layout.tsx'
 import { Icon } from '#app/components/ui/icon.tsx'
 import { StatusButton } from '#app/components/ui/status-button.tsx'
-// Domain & utils
-import { INTEREX_ROLES } from '#app/utils/interex-roles.ts'
-import { requireUserId, checkIsCommonPassword } from '#app/utils/auth.server.ts'
-import { requireRoles } from '#app/utils/role-redirect.server.ts'
-import { prisma } from '#app/utils/db.server.ts'
-import { generateTemporaryPassword, hashPassword } from '#app/utils/password.server.ts'
-import { redirectWithToast } from '#app/utils/toast.server.ts'
-import { sendAdminPasswordManualResetEmail } from '#app/utils/emails/send-admin-password-manual-reset.server.ts'
-// Audit (after other internals per lint preference)
+// Domain & utils (audit before others per lint preference)
 import { audit } from '#app/services/audit.server.ts'
+// then auth, roles, db, password, email, toast
+import { requireUserId, checkIsCommonPassword } from '#app/utils/auth.server.ts'
+import { prisma } from '#app/utils/db.server.ts'
+import { sendAdminPasswordManualResetEmail } from '#app/utils/emails/send-admin-password-manual-reset.server.ts'
+import { INTEREX_ROLES } from '#app/utils/interex-roles.ts'
+import { generateTemporaryPassword, hashPassword } from '#app/utils/password.server.ts'
+import { requireRoles } from '#app/utils/role-redirect.server.ts'
+import { redirectWithToast } from '#app/utils/toast.server.ts'
 
 const CreateSystemAdminSchema = z.object({
   intent: z.literal('create'),
@@ -184,4 +184,4 @@ export default function CreateSystemAdminPage() {
   )
 }
 
-// Note: Uses audit.admin wrapper (no direct writeAudit export in audit.server.ts)
+// Note: Uses audit.admin wrapper (no direct writeAudit import/export needed)

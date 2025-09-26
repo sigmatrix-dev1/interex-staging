@@ -144,6 +144,7 @@ function mapPcgPurposeCodeToLocalEnum(code?: string | null): PrismaSubmissionPur
 async function applyStatusToDb(submissionId: string, pcgSubmissionId: string) {
     try {
         const statusResp = await pcgGetStatus(pcgSubmissionId)
+        const s: any = statusResp as any
 
         await prisma.submissionEvent.create({
             data: {
@@ -155,30 +156,30 @@ async function applyStatusToDb(submissionId: string, pcgSubmissionId: string) {
         })
 
         // Normalize possible transaction ID fields from PCG
-        const rawTxnList = (statusResp as any)?.transactionIdList || (statusResp as any)?.uniqueIdList || ''
+    const rawTxnList = (s?.transactionIdList) || (s?.uniqueIdList) || ''
         const normalizedTxnList = typeof rawTxnList === 'string' ? rawTxnList.trim() : ''
-        const txn = statusResp.esmdTransactionId ?? (normalizedTxnList || null)
+    const txn = s.esmdTransactionId ?? (normalizedTxnList || null)
 
         // Project snapshot fields into our submission row
         const updateData: any = {
             responseMessage: statusResp.stage ?? undefined,
             transactionId: txn ?? undefined,
-            title: statusResp.title ?? undefined,
-            claimId: statusResp.esmdClaimId ?? undefined,
-            caseId: statusResp.esmdCaseId ?? undefined,
-            authorType: statusResp.authorType ?? undefined,
-            autoSplit: typeof statusResp.autoSplit === 'boolean' ? statusResp.autoSplit : undefined,
-            comments: statusResp.comments ?? undefined,
-            recipient: normalizeOid(statusResp.intendedRecipient?.oid) ?? undefined,
+            title: s.title ?? undefined,
+            claimId: s.esmdClaimId ?? undefined,
+            caseId: s.esmdCaseId ?? undefined,
+            authorType: s.authorType ?? undefined,
+            autoSplit: typeof s.autoSplit === 'boolean' ? s.autoSplit : undefined,
+            comments: s.comments ?? undefined,
+            recipient: normalizeOid(s.intendedRecipient?.oid) ?? undefined,
             updatedAt: new Date(),
         }
-        const mappedPurpose = mapPcgPurposeCodeToLocalEnum(statusResp.purposeOfSubmission?.contentType)
+        const mappedPurpose = mapPcgPurposeCodeToLocalEnum(s.purposeOfSubmission?.contentType)
         if (mappedPurpose) updateData.purposeOfSubmission = mappedPurpose
 
         // Optional combined errors in a single surface
         const allErrors = [
             ...(statusResp.errorList ?? []),
-            ...(statusResp.errors ?? []),
+            ...(s.errors ?? []),
         ]
         if (allErrors.length) {
             updateData.errorDescription = allErrors
@@ -1117,7 +1118,7 @@ export default function ReviewSubmission() {
                         {/* ===== Split Settings ===== */}
                         <div className="rounded-lg border border-indigo-200 bg-indigo-50 p-4">
                             <h4 className="text-sm font-semibold text-indigo-900 mb-3">Split Settings</h4>
-                            <div className="grid grid-cols-1 md-grid-cols-12 gap-4 md:grid-cols-12">
+                            <div className="grid grid-cols-1 md:grid-cols-12 gap-4 md:grid-cols-12">
                                 <div className="md:col-span-6">
                                     <label className="block text-sm font-medium text-gray-700">Split kind *</label>
                                     <select

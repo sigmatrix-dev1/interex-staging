@@ -6,7 +6,7 @@
  * and CMS HIH API formats.
  */
 
-import crypto from 'crypto'
+// (no external crypto usage needed here)
 import { type SubmissionPurpose, type SubmissionCategory } from '@prisma/client'
 
 // CMS HIH Gateway configuration
@@ -137,8 +137,7 @@ async function getAccessToken(): Promise<string> {
   }
 
   if (!CMS_HIH_CLIENT_ID || !CMS_HIH_CLIENT_SECRET) {
-    console.warn('CMS HIH Gateway credentials not configured. Using mock token.')
-    return 'mock_token'
+    throw new Error('CMS HIH Gateway credentials not configured')
   }
 
   try {
@@ -186,16 +185,7 @@ async function getAccessToken(): Promise<string> {
     
   } catch (error) {
     console.error('❌ Error obtaining access token:', error)
-    
-    // For development/testing, fall back to mock mode
-    if (process.env.NODE_ENV === 'development') {
-      console.warn('🔄 Falling back to mock token for development')
-      return 'mock_token_dev'
-    }
-    
-    // In production, provide a more graceful fallback
-    console.warn('⚠️  Using mock mode - CMS HIH Gateway client may need administrator configuration')
-    return 'mock_token_pending_config'
+    throw error
   }
 }
 
@@ -222,16 +212,6 @@ export async function createCmsHihSubmission(payload: CmsHihSubmissionPayload): 
   try {
     // Get access token
     const accessToken = await getAccessToken()
-    
-    // If we got a mock token, return mock response
-    if (accessToken.startsWith('mock_')) {
-      console.warn('🎭 Using mock response for CMS HIH Gateway submission creation.')
-      return {
-        submissionId: `mock_${Date.now()}`,
-        status: 'success',
-        message: 'Mock submission created successfully (OAuth credentials may need configuration)'
-      }
-    }
 
     // Generate message and signature headers as required by CMS HIH Gateway
     const { message, signature } = generateMessageAndSignature()
@@ -282,17 +262,6 @@ export async function createCmsHihSubmission(payload: CmsHihSubmissionPayload): 
 
   } catch (error) {
     console.error('❌ Error calling CMS HIH Gateway API:', error)
-    
-    // In development, provide a mock response instead of failing
-    if (process.env.NODE_ENV === 'development') {
-      console.warn('🎭 Providing mock response due to API error in development mode')
-      return {
-        submissionId: `mock_dev_${Date.now()}`,
-        status: 'success',
-        message: 'Mock submission created (API error in development)'
-      }
-    }
-    
     return {
       status: 'error',
       message: `Failed to create submission: ${error instanceof Error ? error.message : 'Unknown error'}`,

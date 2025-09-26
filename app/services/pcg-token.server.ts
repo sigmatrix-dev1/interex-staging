@@ -89,18 +89,50 @@ export async function getAccessToken(opts?: { forceRefresh?: boolean }) {
 
 /** Helper for calling PCG endpoints with auto-refresh on 401 once. */
 export async function callPcg(endpoint: string, init: RequestInit = {}) {
+    // Transient errors we should retry briefly
+    const transientStatuses = new Set([429, 502, 503, 504])
+    const maxAttempts = 3
+
     let { token } = await getAccessToken()
-    let res = await fetch(endpoint, {
-        ...init,
-        headers: { ...(init.headers || {}), Authorization: `Bearer ${token}` },
-    })
-    if (res.status === 401) {
-        const refreshed = await getAccessToken({ forceRefresh: true })
-        token = refreshed.token
-        res = await fetch(endpoint, {
-            ...init,
-            headers: { ...(init.headers || {}), Authorization: `Bearer ${token}` },
-        })
+    let refreshedOnce = false
+
+    const doFetch = async (authToken: string) => {
+        const baseHeaders = init.headers || {}
+        // Ensure we always send an Accept; some gateways behave better with it
+        const headers = {
+            ...(typeof baseHeaders === 'object' ? baseHeaders : {}),
+            Accept: 'application/json',
+            // Set a simple UA: some upstream gateways behave oddly without it
+            'User-Agent': 'interex/1.0 (+pcg-hih)',
+            Authorization: `Bearer ${authToken}`,
+        } as Record<string, string>
+        return fetch(endpoint, { ...init, headers })
     }
-    return res
+
+    let attempt = 0
+    while (attempt < maxAttempts) {
+        let res = await doFetch(token)
+
+        // Handle expired/invalid token once
+        if (res.status === 401 && !refreshedOnce) {
+            refreshedOnce = true
+            const refreshed = await getAccessToken({ forceRefresh: true })
+            token = refreshed.token
+            attempt++
+            continue
+        }
+
+        // Simple backoff on transient upstream errors
+        if (transientStatuses.has(res.status) && attempt < maxAttempts - 1) {
+            const delayMs = 400 * Math.pow(2, attempt)
+            await new Promise(r => setTimeout(r, delayMs))
+            attempt++
+            continue
+        }
+
+        return res
+    }
+
+    // Last try without special handling
+    return doFetch(token)
 }

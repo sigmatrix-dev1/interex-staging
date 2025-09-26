@@ -8,36 +8,40 @@ import { requireAnonymous } from '#app/utils/auth.server.ts'
 import { prisma } from '#app/utils/db.server.ts'
 import { useIsPending } from '#app/utils/misc.tsx'
 import { generateTwoFactorSecret, verifyTwoFactorToken, enableTwoFactorForUser } from '#app/utils/twofa.server.ts'
+import { verifySessionStorage } from '#app/utils/verification.server.ts'
 import { handleNewSession } from './login.server.ts'
 
 const TwoFASetupSchema = z.object({
   code: z.string().min(6, 'Verification code must be 6 digits').max(6),
   userId: z.string(),
   secret: z.string(),
-  remember: z.boolean().optional(),
   redirectTo: z.string().optional(),
 })
 
 export async function loader({ request }: { request: Request }) {
   await requireAnonymous(request)
-  const url = new URL(request.url)
-  const userId = url.searchParams.get('userId')
-  if (!userId) return redirect('/login')
+  // Use the verify session stashed by handleNewSession to identify the user
+  const verifySession = await verifySessionStorage.getSession(request.headers.get('cookie'))
+  const unverifiedId = verifySession.get('unverified-session-id') as string | undefined
+  if (!unverifiedId) return redirect('/login')
+
+  const sess = await prisma.session.findUnique({ where: { id: unverifiedId }, select: { userId: true } })
+  if (!sess?.userId) return redirect('/login')
 
   const user = await prisma.user.findUnique({
-    where: { id: userId },
+    where: { id: sess.userId },
     select: { id: true, username: true, twoFactorEnabled: true },
   })
   if (!user) return redirect('/login')
   if (user.twoFactorEnabled) {
-    // If somehow enabled already, proceed to 2FA verify page
-    const q = new URLSearchParams(url.search)
-  return redirect(`/2fa?${q}`)
+    // If already enabled, go to the verification page instead of setup
+    const q = new URLSearchParams(new URL(request.url).search)
+    return redirect(`/2fa?${q.toString()}`)
   }
 
   // Generate a temporary secret and QR for setup (not persisted until verified)
   const { secret, qrCode } = await generateTwoFactorSecret(user.username || 'user')
-  return data({ userId, username: user.username, secret, qrCode })
+  return data({ userId: user.id, username: user.username, secret, qrCode })
 }
 
 export async function action({ request }: { request: Request }) {
@@ -68,26 +72,35 @@ export async function action({ request }: { request: Request }) {
     return data({ result: submission.reply({ hideFields: ['code'] }) }, { status: 400 })
   }
 
-  const { userId, secret, remember, redirectTo } = submission.value
+  const { userId, secret, redirectTo } = submission.value
   // Persist secret and enable 2FA
   await enableTwoFactorForUser(userId, secret)
 
-  // Create a new session and sign in (similar to /auth/2fa flow)
-  const session = { userId, id: crypto.randomUUID(), expirationDate: new Date(Date.now() + 1000 * 60 * 60 * 24 * 30) }
-  return handleNewSession({ request, session, remember: remember ?? false, redirectTo })
+  // Resume pending login session from verify session
+  const verifySession = await verifySessionStorage.getSession(request.headers.get('cookie'))
+  const unverifiedId = verifySession.get('unverified-session-id') as string | undefined
+  if (!unverifiedId) {
+    return data({ result: { formErrors: ['Session expired. Please log in again.'] } }, { status: 400 })
+  }
+  const session = await prisma.session.findUnique({ where: { id: unverifiedId }, select: { id: true, userId: true, expirationDate: true } })
+  if (!session) {
+    return data({ result: { formErrors: ['Session expired. Please log in again.'] } }, { status: 400 })
+  }
+  // Read remember flag from verify session to respect the original login choice
+  const remember = !!verifySession.get('remember')
+  return handleNewSession({ request, session, remember, redirectTo, twoFAVerified: true })
 }
 
 export default function TwoFASetupPage({ loaderData, actionData }: { loaderData: any; actionData: any }) {
   const { userId, username, secret, qrCode } = loaderData
   const isPending = useIsPending()
   const [searchParams] = useSearchParams()
-  const remember = searchParams.get('remember') === 'true'
   const redirectTo = searchParams.get('redirectTo') || undefined
 
   const [form, fields] = useForm({
     id: '2fa-setup',
     constraint: getZodConstraint(TwoFASetupSchema),
-    defaultValue: { userId, secret, remember, redirectTo },
+  defaultValue: { userId, secret, redirectTo },
     lastResult: actionData?.result,
     onValidate({ formData }) {
       return parseWithZod(formData, { schema: TwoFASetupSchema })
@@ -117,7 +130,7 @@ export default function TwoFASetupPage({ loaderData, actionData }: { loaderData:
             <Form method="post" {...getFormProps(form)}>
               <input {...getInputProps(fields.userId, { type: 'hidden' })} />
               <input {...getInputProps(fields.secret, { type: 'hidden' })} />
-              <input {...getInputProps(fields.remember, { type: 'hidden' })} />
+              {/* remember is sourced from verify session cookie; no hidden field needed */}
               <input {...getInputProps(fields.redirectTo, { type: 'hidden' })} />
 
               <Field
@@ -144,7 +157,7 @@ export default function TwoFASetupPage({ loaderData, actionData }: { loaderData:
                 >
                   Verify & Continue
                 </StatusButton>
-                <a href="/auth/login" className="text-center text-sm text-gray-600 hover:text-gray-900">← Back to login</a>
+                <a href="/login" className="text-center text-sm text-gray-600 hover:text-gray-900">← Back to login</a>
               </div>
             </Form>
           </div>

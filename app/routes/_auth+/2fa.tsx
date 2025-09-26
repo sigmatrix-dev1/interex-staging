@@ -8,40 +8,31 @@ import { requireAnonymous } from '#app/utils/auth.server.ts'
 import { prisma } from '#app/utils/db.server.ts'
 import { useIsPending } from '#app/utils/misc.tsx'
 import { verifyTwoFactorToken } from '#app/utils/twofa.server.ts'
+import { verifySessionStorage } from '#app/utils/verification.server.ts'
 import { handleNewSession } from './login.server.ts'
 
 const TwoFALoginSchema = z.object({
 	code: z.string().min(6, 'Verification code must be 6 digits').max(6),
-	userId: z.string(),
-	remember: z.boolean().optional(),
 	redirectTo: z.string().optional(),
 })
 
 export async function loader({ request }: { request: Request }) {
 	await requireAnonymous(request)
-	const url = new URL(request.url)
-	const userId = url.searchParams.get('userId')
-	
-	if (!userId) {
-		throw redirect('/login')
-	}
-	
-	// Verify the user exists and has 2FA enabled
+	const verifySession = await verifySessionStorage.getSession(request.headers.get('cookie'))
+	const unverifiedId = verifySession.get('unverified-session-id') as string | undefined
+	if (!unverifiedId) throw redirect('/login')
+	const session = await prisma.session.findUnique({ where: { id: unverifiedId }, select: { userId: true } })
+	if (!session?.userId) throw redirect('/login')
 	const user = await prisma.user.findUnique({
-		where: { id: userId },
-		select: { 
-			id: true, 
-			username: true, 
-			twoFactorEnabled: true,
-			twoFactorSecret: true 
-		}
+		where: { id: session.userId },
+		select: { username: true, twoFactorEnabled: true, twoFactorSecret: true },
 	})
-	
-	if (!user || !user.twoFactorEnabled || !user.twoFactorSecret) {
-		throw redirect('/login')
+	if (!user?.twoFactorEnabled || !user.twoFactorSecret) {
+		// If 2FA not configured, send to setup flow
+		const url = new URL(request.url)
+		return redirect(`/2fa-setup?${url.searchParams.toString()}`)
 	}
-	
-	return { userId, username: user.username }
+	return { username: user.username }
 }
 
 export async function action({ request }: { request: Request }) {
@@ -51,23 +42,25 @@ export async function action({ request }: { request: Request }) {
 	const submission = await parseWithZod(formData, {
 		schema: TwoFALoginSchema.transform(async (data, ctx) => {
 			// Get user and verify 2FA is enabled
-			const user = await prisma.user.findUnique({
-				where: { id: data.userId },
-				select: { 
-					id: true, 
-					twoFactorEnabled: true, 
-					twoFactorSecret: true 
-				}
-			})
-			
-			if (!user || !user.twoFactorEnabled || !user.twoFactorSecret) {
+			const verifySession = await verifySessionStorage.getSession(request.headers.get('cookie'))
+			const unverifiedId = verifySession.get('unverified-session-id') as string | undefined
+			if (!unverifiedId) {
 				ctx.addIssue({
 					code: z.ZodIssueCode.custom,
-					message: 'Invalid session',
+					message: 'Invalid or expired verification session',
 				})
 				return z.NEVER
 			}
-			
+			const sess = await prisma.session.findUnique({ where: { id: unverifiedId }, select: { userId: true } })
+			if (!sess?.userId) {
+				ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Invalid session' })
+				return z.NEVER
+			}
+			const user = await prisma.user.findUnique({ where: { id: sess.userId }, select: { twoFactorEnabled: true, twoFactorSecret: true } })
+			if (!user?.twoFactorEnabled || !user.twoFactorSecret) {
+				ctx.addIssue({ code: z.ZodIssueCode.custom, message: '2FA not configured' })
+				return z.NEVER
+			}
 			// Verify the 2FA code
 			const isValid = await verifyTwoFactorToken(user.twoFactorSecret, data.code)
 			if (!isValid) {
@@ -78,40 +71,41 @@ export async function action({ request }: { request: Request }) {
 				})
 				return z.NEVER
 			}
-			
-			return { ...data, session: { userId: user.id, id: crypto.randomUUID(), expirationDate: new Date(Date.now() + 1000 * 60 * 60 * 24 * 30) } }
+			return { ...data, sessionId: unverifiedId }
 		}),
 		async: true,
 	})
 
-	if (submission.status !== 'success' || !submission.value.session) {
+	if (submission.status !== 'success' || !submission.value.sessionId) {
 		return data(
 			{ result: submission.reply({ hideFields: ['code'] }) },
 			{ status: submission.status === 'error' ? 400 : 200 }
 		)
 	}
 
-	const { session, remember, redirectTo } = submission.value
+	const { sessionId, redirectTo } = submission.value
+	// Build minimal session stub; handleNewSession only needs id and userId for redirects, but it refetches user by session id.
+	const session = await prisma.session.findUnique({ where: { id: sessionId }, select: { id: true, userId: true, expirationDate: true } })
+	if (!session) {
+		return data({ result: submission.reply({ formErrors: ['Session expired. Please log in again.'] }) }, { status: 400 })
+	}
 
-	return handleNewSession({
-		request,
-		session,
-		remember: remember ?? false,
-		redirectTo,
-	})
+	// Pull remember from verify session (set during login)
+	const verifySession = await verifySessionStorage.getSession(request.headers.get('cookie'))
+	const remember = !!verifySession.get('remember')
+	return handleNewSession({ request, session, remember, redirectTo, twoFAVerified: true })
 }
 
 export default function TwoFALoginPage({ loaderData, actionData }: { loaderData: any; actionData: any }) {
-	const { userId, username } = loaderData
+	const { username } = loaderData
 	const isPending = useIsPending()
 	const [searchParams] = useSearchParams()
-	const remember = searchParams.get('remember') === 'true'
 	const redirectTo = searchParams.get('redirectTo')
 
 	const [form, fields] = useForm({
 		id: '2fa-login',
 		constraint: getZodConstraint(TwoFALoginSchema),
-		defaultValue: { userId, remember, redirectTo },
+	defaultValue: { redirectTo },
 		lastResult: actionData?.result,
 		onValidate({ formData }) {
 			return parseWithZod(formData, { schema: TwoFALoginSchema })
@@ -134,8 +128,6 @@ export default function TwoFALoginPage({ loaderData, actionData }: { loaderData:
 						</div>
 
 						<Form method="post" {...getFormProps(form)}>
-							<input {...getInputProps(fields.userId, { type: 'hidden' })} />
-							<input {...getInputProps(fields.remember, { type: 'hidden' })} />
 							<input {...getInputProps(fields.redirectTo, { type: 'hidden' })} />
 							
 							<Field

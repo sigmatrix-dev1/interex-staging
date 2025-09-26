@@ -3,7 +3,6 @@
 import { invariant } from '@epic-web/invariant'
 import { redirect } from 'react-router'
 import { safeRedirect } from 'remix-utils/safe-redirect'
-import { twoFAVerificationType } from '#app/routes/settings+/profile.two-factor.tsx'
 import { getUserId, sessionKey } from '#app/utils/auth.server.ts'
 import { prisma } from '#app/utils/db.server.ts'
 import { combineResponseInits } from '#app/utils/misc.tsx'
@@ -11,7 +10,7 @@ import { getDashboardUrl } from '#app/utils/role-redirect.server.ts'
 import { authSessionStorage } from '#app/utils/session.server.ts'
 import { redirectWithToast } from '#app/utils/toast.server.ts'
 import { verifySessionStorage } from '#app/utils/verification.server.ts'
-import { getRedirectToUrl, type VerifyFunctionArgs } from './verify.server.ts'
+import { type VerifyFunctionArgs } from './verify.server.ts'
 
 const verifiedTimeKey = 'verified-time'
 const unverifiedSessionIdKey = 'unverified-session-id'
@@ -23,59 +22,31 @@ export async function handleNewSession(
 		session,
 		redirectTo,
 		remember,
+		twoFAVerified,
 	}: {
 		request: Request
 		session: { userId: string; id: string; expirationDate: Date }
 		redirectTo?: string
 		remember: boolean
+		twoFAVerified?: boolean
 	},
 	responseInit?: ResponseInit,
 ) {
-	const verification = await prisma.verification.findUnique({
-		select: { id: true },
-		where: {
-			target_type: { target: session.userId, type: twoFAVerificationType },
-		},
-	})
-	const userHasTwoFactor = Boolean(verification)
-
-	if (userHasTwoFactor) {
-		const verifySession = await verifySessionStorage.getSession()
-		verifySession.set(unverifiedSessionIdKey, session.id)
-		verifySession.set(rememberKey, remember)
-		const redirectUrl = getRedirectToUrl({
-			request,
-			type: twoFAVerificationType,
-			target: session.userId,
-			redirectTo,
-		})
-		return redirect(
-			`${redirectUrl.pathname}?${redirectUrl.searchParams}`,
-			combineResponseInits(
-				{
-					headers: {
-						'set-cookie':
-							await verifySessionStorage.commitSession(verifySession),
-					},
-				},
-				responseInit,
-			),
-		)
-	} else {
+	// If the caller already verified 2FA (or no 2FA is required), commit the auth session directly.
+	if (twoFAVerified) {
 		const authSession = await authSessionStorage.getSession(
 			request.headers.get('cookie'),
 		)
 		authSession.set(sessionKey, session.id)
+		authSession.set(verifiedTimeKey, Date.now())
 
-		// Get user with roles & password status
-		// Fetch user including password lifecycle flag & roles
+		// Determine redirect URL based on user role or provided redirectTo
 		// Cast for mustChangePassword field until Prisma client types regenerate
 		const user = await (prisma as any).user.findUnique({
 			where: { id: session.userId },
 			select: { id: true, mustChangePassword: true, roles: { select: { name: true } } },
 		})
 
-		// If the user is required to change their password, override redirect target
 		if (user?.mustChangePassword) {
 			return redirect(
 				'/change-password',
@@ -92,7 +63,6 @@ export async function handleNewSession(
 			)
 		}
 
-		// Determine redirect URL based on user role or provided redirectTo
 		let finalRedirectTo = redirectTo
 		if (!finalRedirectTo && user) {
 			finalRedirectTo = getDashboardUrl(user as any)
@@ -112,6 +82,29 @@ export async function handleNewSession(
 			),
 		)
 	}
+
+	// New-only 2FA: Enforce TOTP for ALL users. If enabled, verify; if not, require setup.
+	const userTwoFA = await prisma.user.findUnique({
+		where: { id: session.userId },
+		select: { twoFactorEnabled: true },
+	})
+	const hasUserTwoFA = Boolean(userTwoFA?.twoFactorEnabled)
+
+	// Stash unverified session id and remember flag for the /2fa or /2fa-setup flow
+	const verifySession = await verifySessionStorage.getSession(
+		request.headers.get('cookie'),
+	)
+	verifySession.set(unverifiedSessionIdKey, session.id)
+	verifySession.set(rememberKey, !!remember)
+
+	const params = new URLSearchParams()
+	if (redirectTo) params.set('redirectTo', redirectTo)
+
+	return redirect(hasUserTwoFA ? `/2fa?${params}` : `/2fa-setup?${params}`, {
+		headers: {
+			'set-cookie': await verifySessionStorage.commitSession(verifySession),
+		},
+	})
 }
 
 export async function handleVerification({
@@ -200,13 +193,10 @@ export async function shouldRequestTwoFA(request: Request) {
 	if (verifySession.has(unverifiedSessionIdKey)) return true
 	const userId = await getUserId(request)
 	if (!userId) return false
-	// if it's over two hours since they last verified, we should request 2FA again
-	const userHasTwoFA = await prisma.verification.findUnique({
-		select: { id: true },
-		where: { target_type: { target: userId, type: twoFAVerificationType } },
-	})
-	if (!userHasTwoFA) return false
+	// If the user has 2FA (new-only), and it's over two hours since last verification, request 2FA again
+	const user = await prisma.user.findUnique({ where: { id: userId }, select: { twoFactorEnabled: true } })
+	if (!user?.twoFactorEnabled) return false
 	const verifiedTime = authSession.get(verifiedTimeKey) ?? new Date(0)
-	const twoHours = 1000 * 60 * 2
+	const twoHours = 1000 * 60 * 60 * 2
 	return Date.now() - verifiedTime > twoHours
 }

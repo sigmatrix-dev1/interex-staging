@@ -78,8 +78,12 @@ export async function pcgCreateSubmission(
         if (typeof data === 'object' && data?.message) {
             throw new Error(data.message)
         }
+        const snippet = String(text).slice(0, 800) || 'Unknown error'
+        const isHtml = /<html|<head|<body|<!DOCTYPE/i.test(snippet)
+        const statusText = (res as any).statusText || ''
+        const detail = isHtml ? 'Upstream gateway returned HTML error page' : snippet
         throw new Error(
-            `PCG create submission failed (${res.status}): ${String(text).slice(0, 500) || 'Unknown error'}`,
+            `PCG create submission failed (${res.status}${statusText ? ' ' + statusText : ''}): ${detail}`,
         )
     }
     return data as {
@@ -109,8 +113,13 @@ export async function pcgUploadFiles(submissionId: string, files: File[]) {
 
     if (!res.ok) {
         if (typeof data === 'object' && data?.message) throw new Error(data.message)
+
+        const snippet = String(text).slice(0, 800) || 'Unknown error'
+        const isHtml = /<html|<head|<body|<!DOCTYPE/i.test(snippet)
+        const statusText = (res as any).statusText || ''
+        const detail = isHtml ? 'Upstream gateway returned HTML error page' : snippet
         throw new Error(
-            `PCG upload failed (${res.status}): ${String(text).slice(0, 500) || 'Unknown error'}`,
+            `PCG upload failed (${res.status}${statusText ? ' ' + statusText : ''}): ${detail}`,
         )
     }
     return data as {
@@ -136,8 +145,13 @@ export async function pcgGetStatus(submissionId: string) {
 
     if (!res.ok) {
         if (typeof data === 'object' && data?.message) throw new Error(data.message)
+
+        const snippet = String(text).slice(0, 800) || 'Unknown error'
+        const isHtml = /<html|<head|<body|<!DOCTYPE/i.test(snippet)
+        const statusText = (res as any).statusText || ''
+        const detail = isHtml ? 'Upstream gateway returned HTML error page' : snippet
         throw new Error(
-            `PCG status failed (${res.status}): ${String(text).slice(0, 500) || 'Unknown error'}`,
+            `PCG status failed (${res.status}${statusText ? ' ' + statusText : ''}): ${detail}`,
         )
     }
     return data as {

@@ -28,7 +28,7 @@ const schema = z.object({
     AWS_ENDPOINT_URL_S3: z.string().url().optional(),
     BUCKET_NAME: z.string().optional(),
 
-    // Keep these in the schema (even though we won't use them right now)
+    // PCG config (optional in dev; required in production)
     PCGF_BASE_URL: z.string().url().optional(),
     PCGF_TOKEN_URL: z.string().url().optional(),
     PCGF_CLIENT_ID: z.string().optional(),
@@ -76,18 +76,22 @@ declare global {
 /* -------------------------------------------------------------------------- */
 
 export const PCG_ENV = {
-    BASE_URL: 'https://drfpimpl.cms.gov/pcgfhir/hih/api',
-    TOKEN_URL: 'https://drfpimpl.cms.gov/token',
-    CLIENT_ID: '0oayc2ysgssSksF81297',
-    CLIENT_SECRET: 'fNrlPQqDmjwMCdyxW1OicnR_nuJ0TzUA9nyaHryJbJGdi1F_OcN3616p_NGva8HY',
-    SCOPE: 'UserGroup',
+    BASE_URL:
+        process.env.PCGF_BASE_URL || 'https://drfpimpl.cms.gov/pcgfhir/hih/api',
+    TOKEN_URL: process.env.PCGF_TOKEN_URL || 'https://drfpimpl.cms.gov/token',
+    // Fall back to existing hard-coded values if env vars are not provided
+    CLIENT_ID: process.env.PCGF_CLIENT_ID || '0oayc2ysgssSksF81297',
+    CLIENT_SECRET:
+        process.env.PCGF_CLIENT_SECRET || 'fNrlPQqDmjwMCdyxW1OicnR_nuJ0TzUA9nyaHryJbJGdi1F_OcN3616p_NGva8HY',
+    SCOPE: process.env.PCGF_SCOPE || 'UserGroup',
 } as const
 
 // (Optional) tiny boot log to confirm which host you're hitting
 try {
-     
-    console.info(
-        'PCG hardcoded env in use',
-        JSON.stringify({ tokenUrlHost: new URL(PCG_ENV.TOKEN_URL).host, scope: PCG_ENV.SCOPE }),
-    )
+    if (process.env.NODE_ENV !== 'production') {
+        console.info(
+            'PCG env configured',
+            JSON.stringify({ tokenUrlHost: new URL(PCG_ENV.TOKEN_URL).host, scope: PCG_ENV.SCOPE }),
+        )
+    }
 } catch {}

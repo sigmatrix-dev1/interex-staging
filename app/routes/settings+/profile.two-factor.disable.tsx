@@ -9,12 +9,10 @@ export const handle: BreadcrumbHandle & SEOHandle = {
 }
 
 export async function loader({}: Route.LoaderArgs) {
-	// Self-disable of 2FA is no longer allowed. Only admins can reset 2FA.
 	throw new Response('Not Found', { status: 404 })
 }
 
 export async function action({}: Route.ActionArgs) {
-	// Block any attempts to POST here as well
 	throw new Response('Not Found', { status: 404 })
 }
 

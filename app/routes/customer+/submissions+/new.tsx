@@ -289,6 +289,7 @@ function mapPcgPurposeCodeToLocalEnum(code?: string | null): PrismaSubmissionPur
  */
 async function persistRemoteSnapshot(submissionId: string, pcgId: string) {
     const statusResp = await pcgGetStatus(pcgId)
+    const s: any = statusResp as any
 
     // Always audit the raw payload we got from PCG
     await prisma.submissionEvent.create({
@@ -301,29 +302,29 @@ async function persistRemoteSnapshot(submissionId: string, pcgId: string) {
     })
 
     // PCG may return one of multiple identifiers; normalize to a single transactionId
-    const rawTxnList = (statusResp as any)?.transactionIdList || (statusResp as any)?.uniqueIdList || ''
+    const rawTxnList = (s?.transactionIdList) || (s?.uniqueIdList) || ''
     const normalizedTxnList = typeof rawTxnList === 'string' ? rawTxnList.trim() : ''
-    const txn = statusResp.esmdTransactionId ?? (normalizedTxnList || null)
+    const txn = s.esmdTransactionId ?? (normalizedTxnList || null)
 
     // Update local submission with the authoritative snapshot
     const updateData: any = {
         responseMessage: statusResp.stage ?? undefined,
         transactionId: txn ?? undefined,
         pcgSubmissionId: pcgId,
-        title: statusResp.title ?? undefined,
-        claimId: statusResp.esmdClaimId ?? undefined,
-        caseId: statusResp.esmdCaseId ?? undefined,
-        authorType: statusResp.authorType ?? undefined,
-        autoSplit: typeof statusResp.autoSplit === 'boolean' ? statusResp.autoSplit : undefined,
-        comments: statusResp.comments ?? undefined,
-        recipient: normalizeOid(statusResp.intendedRecipient?.oid) ?? undefined,
+        title: s.title ?? undefined,
+        claimId: s.esmdClaimId ?? undefined,
+        caseId: s.esmdCaseId ?? undefined,
+        authorType: s.authorType ?? undefined,
+        autoSplit: typeof s.autoSplit === 'boolean' ? s.autoSplit : undefined,
+        comments: s.comments ?? undefined,
+        recipient: normalizeOid(s.intendedRecipient?.oid) ?? undefined,
     }
 
-    const mappedPurpose = mapPcgPurposeCodeToLocalEnum(statusResp.purposeOfSubmission?.contentType)
+    const mappedPurpose = mapPcgPurposeCodeToLocalEnum(s.purposeOfSubmission?.contentType)
     if (mappedPurpose) updateData.purposeOfSubmission = mappedPurpose
 
     // Optional combined error surface (convenience for operators)
-    const allErrors = [...(statusResp.errorList ?? []), ...(statusResp.errors ?? [])]
+    const allErrors = [...(statusResp.errorList ?? []), ...(s.errors ?? [])]
     if (allErrors.length) {
         updateData.errorDescription = allErrors
             .map((e: any) => (typeof e === 'string' ? e : e?.message ?? JSON.stringify(e)))
