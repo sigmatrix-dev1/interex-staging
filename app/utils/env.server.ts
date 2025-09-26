@@ -34,6 +34,9 @@ const schema = z.object({
     PCGF_CLIENT_ID: z.string().optional(),
     PCGF_CLIENT_SECRET: z.string().optional(),
     PCGF_SCOPE: z.string().optional(),
+
+    // Security policy flags
+    REQUIRE_2FA_ON_LOGIN: z.enum(['true', 'false']).optional(),
 })
 
 declare global {

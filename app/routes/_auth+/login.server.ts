@@ -95,6 +95,31 @@ export async function handleNewSession(
 	const hasUserTwoFA = Boolean(userTwoFA?.twoFactorEnabled)
 
 	if (!hasUserTwoFA) {
+		// If policy requires 2FA on login, force enrollment before granting full session
+		// Default behavior: enforce in development and production to avoid accidental weak auth.
+		// In test, keep opt-in to avoid breaking existing tests unless explicitly enabled.
+		const requireOnLogin =
+			process.env.NODE_ENV === 'test'
+				? process.env.REQUIRE_2FA_ON_LOGIN === 'true'
+				: process.env.REQUIRE_2FA_ON_LOGIN !== 'false'
+		if (requireOnLogin) {
+			const verifySession = await verifySessionStorage.getSession(
+				request.headers.get('cookie'),
+			)
+			verifySession.set(unverifiedSessionIdKey, session.id)
+			verifySession.set(rememberKey, !!remember)
+
+			const params = new URLSearchParams()
+			params.set('userId', session.userId)
+			if (redirectTo) params.set('redirectTo', redirectTo)
+			if (remember) params.set('remember', 'true')
+
+			return redirect(`/2fa-setup?${params.toString()}`, {
+				headers: {
+					'set-cookie': await verifySessionStorage.commitSession(verifySession),
+				},
+			})
+		}
 		return commitAndRedirect()
 	}
 
