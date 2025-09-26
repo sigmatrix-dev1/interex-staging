@@ -32,8 +32,8 @@ export async function handleNewSession(
 	},
 	responseInit?: ResponseInit,
 ) {
-	// If the caller already verified 2FA (or no 2FA is required), commit the auth session directly.
-	if (twoFAVerified) {
+	// Helper to commit auth session and redirect appropriately
+	async function commitAndRedirect() {
 		const authSession = await authSessionStorage.getSession(
 			request.headers.get('cookie'),
 		)
@@ -83,14 +83,22 @@ export async function handleNewSession(
 		)
 	}
 
-	// New-only 2FA: Enforce TOTP for ALL users. If enabled, verify; if not, require setup.
+	// If already verified via 2FA, or user has no 2FA enabled, commit immediately.
+	if (twoFAVerified) {
+		return commitAndRedirect()
+	}
+
 	const userTwoFA = await prisma.user.findUnique({
 		where: { id: session.userId },
 		select: { twoFactorEnabled: true },
 	})
 	const hasUserTwoFA = Boolean(userTwoFA?.twoFactorEnabled)
 
-	// Stash unverified session id and remember flag for the /2fa or /2fa-setup flow
+	if (!hasUserTwoFA) {
+		return commitAndRedirect()
+	}
+
+	// 2FA is enabled: stash unverified session and send to /2fa with details
 	const verifySession = await verifySessionStorage.getSession(
 		request.headers.get('cookie'),
 	)
@@ -98,9 +106,11 @@ export async function handleNewSession(
 	verifySession.set(rememberKey, !!remember)
 
 	const params = new URLSearchParams()
+	params.set('userId', session.userId)
 	if (redirectTo) params.set('redirectTo', redirectTo)
+	if (remember) params.set('remember', 'true')
 
-	return redirect(hasUserTwoFA ? `/2fa?${params}` : `/2fa-setup?${params}`, {
+	return redirect(`/2fa?${params.toString()}`, {
 		headers: {
 			'set-cookie': await verifySessionStorage.commitSession(verifySession),
 		},
