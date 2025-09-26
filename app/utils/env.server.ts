@@ -72,19 +72,35 @@ declare global {
 }
 
 /* -------------------------------------------------------------------------- */
-/*                     HARD-CODED PCG CONFIG (for debugging)                  */
+/*        PCG CONFIG — TEMPORARILY FORCE HARDCODED VALUES IN PRODUCTION       */
 /* -------------------------------------------------------------------------- */
 
-export const PCG_ENV = {
-    BASE_URL:
-        process.env.PCGF_BASE_URL || 'https://drfpimpl.cms.gov/pcgfhir/hih/api',
-    TOKEN_URL: process.env.PCGF_TOKEN_URL || 'https://drfpimpl.cms.gov/token',
-    // Fall back to existing hard-coded values if env vars are not provided
-    CLIENT_ID: process.env.PCGF_CLIENT_ID || '0oayc2ysgssSksF81297',
-    CLIENT_SECRET:
-        process.env.PCGF_CLIENT_SECRET || 'fNrlPQqDmjwMCdyxW1OicnR_nuJ0TzUA9nyaHryJbJGdi1F_OcN3616p_NGva8HY',
-    SCOPE: process.env.PCGF_SCOPE || 'UserGroup',
-} as const
+export const PCG_ENV = (() => {
+    // Single source of truth for the known-good endpoints/creds while we debug prod
+    const HARDCODED = {
+        BASE_URL: 'https://drfpimpl.cms.gov/pcgfhir/hih/api',
+        TOKEN_URL: 'https://drfpimpl.cms.gov/token',
+        CLIENT_ID: '0oayc2ysgssSksF81297',
+        CLIENT_SECRET:
+            'fNrlPQqDmjwMCdyxW1OicnR_nuJ0TzUA9nyaHryJbJGdi1F_OcN3616p_NGva8HY',
+        SCOPE: 'UserGroup',
+    } as const
+
+    // In production, ignore environment variables and use hardcoded values
+    if (process.env.NODE_ENV === 'production') {
+        return HARDCODED
+    }
+
+    // In development/test, allow env overrides for flexibility
+    return {
+        BASE_URL: process.env.PCGF_BASE_URL || HARDCODED.BASE_URL,
+        TOKEN_URL: process.env.PCGF_TOKEN_URL || HARDCODED.TOKEN_URL,
+        CLIENT_ID: process.env.PCGF_CLIENT_ID || HARDCODED.CLIENT_ID,
+        CLIENT_SECRET:
+            process.env.PCGF_CLIENT_SECRET || HARDCODED.CLIENT_SECRET,
+        SCOPE: process.env.PCGF_SCOPE || HARDCODED.SCOPE,
+    } as const
+})()
 
 // (Optional) tiny boot log to confirm which host you're hitting
 try {
@@ -93,5 +109,19 @@ try {
             'PCG env configured',
             JSON.stringify({ tokenUrlHost: new URL(PCG_ENV.TOKEN_URL).host, scope: PCG_ENV.SCOPE }),
         )
+    }
+    // In production, emit a warning if BASE_URL seems incomplete (common cause of 404: "no Route matched")
+    if (process.env.NODE_ENV === 'production') {
+        try {
+            const u = new URL(PCG_ENV.BASE_URL)
+            const p = u.pathname.replace(/\/+$/, '')
+            const hasHihApi = p.includes('/pcgfhir') && p.includes('/hih') && p.includes('/api')
+            if (!hasHihApi) {
+                console.warn(
+                    'PCG BASE_URL may be misconfigured. Expected path to include /pcgfhir/hih/api. Current:',
+                    PCG_ENV.BASE_URL,
+                )
+            }
+        } catch {}
     }
 } catch {}
