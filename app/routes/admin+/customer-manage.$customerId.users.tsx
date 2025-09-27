@@ -75,6 +75,12 @@ const SetActiveSchema = z.object({
   status: z.enum(['active', 'inactive']),
 })
 
+// New: Unassign all NPIs and deactivate in one atomic action
+const DeactivateAndUnassignSchema = z.object({
+  intent: z.literal('deactivate-and-unassign'),
+  userId: z.string().min(1),
+})
+
 const ActionSchema = z.discriminatedUnion('intent', [
   CreateUserSchema,
   UpdateUserSchema,
@@ -83,6 +89,7 @@ const ActionSchema = z.discriminatedUnion('intent', [
   AssignNpisSchema,
   CheckAvailabilitySchema,
   SetActiveSchema,
+  DeactivateAndUnassignSchema,
 ])
 
 export async function loader({ request, params }: LoaderFunctionArgs) {
@@ -237,6 +244,7 @@ export async function action({ request, params }: ActionFunctionArgs) {
       | 'USER_SET_ACTIVE' | 'USER_SET_ACTIVE_ATTEMPT'
       | 'USER_RESET_PASSWORD' | 'USER_RESET_PASSWORD_ATTEMPT'
       | 'USER_ASSIGN_NPIS' | 'USER_ASSIGN_NPIS_ATTEMPT'
+      | 'USER_DEACTIVATE_AND_UNASSIGN' | 'USER_DEACTIVATE_AND_UNASSIGN_ATTEMPT'
     targetUserId?: string | null
     success: boolean
     message?: string | null
@@ -575,6 +583,30 @@ export async function action({ request, params }: ActionFunctionArgs) {
     return redirectWithToast(`/admin/customer-manage/${customerId}/users`, { type: 'success', title: status === 'inactive' ? 'User deactivated' : 'User activated', description: 'Status updated.' })
   }
 
+  // Deactivate and Unassign all NPIs (single-click flow)
+  if (action.intent === 'deactivate-and-unassign') {
+    const targetUserId = action.userId
+    await writeAudit({ action: 'USER_DEACTIVATE_AND_UNASSIGN_ATTEMPT', success: true, targetUserId, message: 'Attempt deactivate and unassign all NPIs' })
+    const targetUser = await prisma.user.findFirst({ where: { id: targetUserId, customerId }, include: { roles: { select: { name: true } }, userNpis: { select: { providerId: true } } } })
+    if (!targetUser) {
+      await writeAudit({ action: 'USER_DEACTIVATE_AND_UNASSIGN_ATTEMPT', success: false, targetUserId, message: 'User not found' })
+      return redirectWithToast(`/admin/customer-manage/${customerId}/users`, { type: 'error', title: 'User not found', description: 'Unable to deactivate.' })
+    }
+    // Prevent acting on system administrators for safety
+    if (targetUser.roles.some(r => r.name === 'system-admin')) {
+      await writeAudit({ action: 'USER_DEACTIVATE_AND_UNASSIGN_ATTEMPT', success: false, targetUserId, message: 'Cannot deactivate system administrators' })
+      return redirectWithToast(`/admin/customer-manage/${customerId}/users`, { type: 'error', title: 'Not allowed', description: 'Cannot deactivate system administrators.' })
+    }
+    const removedNpis = targetUser.userNpis.length
+    await prisma.$transaction([
+      prisma.userNpi.deleteMany({ where: { userId: targetUserId } }),
+      prisma.user.update({ where: { id: targetUserId }, data: { active: false } }),
+      prisma.session.deleteMany({ where: { userId: targetUserId } }),
+    ])
+    await writeAudit({ action: 'USER_DEACTIVATE_AND_UNASSIGN', success: true, targetUserId, message: 'User deactivated and NPIs unassigned', metadata: { removedNpis } })
+    return redirectWithToast(`/admin/customer-manage/${customerId}/users`, { type: 'success', title: 'User deactivated', description: 'All NPIs unassigned and user marked inactive.' })
+  }
+
   // Handle delete action
   if (action.intent === 'delete') {
     const { userId: targetUserId, confirm } = action
@@ -625,8 +657,37 @@ export async function action({ request, params }: ActionFunctionArgs) {
       }
     }
 
+    // Preflight: block deletion if the user has dependent business data that reference them via FK
+    const displayName = targetUser.name || targetUser.username
+    const [submissionCount, uploadCount, eventCount] = await Promise.all([
+      prisma.submission.count({ where: { creatorId: targetUserId } }),
+      prisma.submissionDocument.count({ where: { uploaderId: targetUserId } }),
+      prisma.providerEvent.count({ where: { actorId: targetUserId } }),
+    ])
+
+    if (submissionCount > 0 || uploadCount > 0 || eventCount > 0) {
+      await writeAudit({
+        action: 'USER_DELETE_BLOCKED',
+        success: false,
+        targetUserId,
+        message: 'User has dependent records (submissions/documents/events)',
+        metadata: { submissions: submissionCount, uploads: uploadCount, providerEvents: eventCount },
+      })
+      // Return action data to render guidance inside the delete modal itself
+      return data({
+        deleteBlocked: {
+          userId: targetUserId,
+          userName: displayName,
+          submissions: submissionCount,
+          documents: uploadCount,
+          events: eventCount,
+          cause: 'fk-refs' as const,
+        }
+      })
+    }
+
     // HARD DELETE (reverted from earlier soft-delete approach): remove sessions then delete user
-    const userName = targetUser.name || targetUser.username
+  const userName = displayName
     await prisma.$transaction([
       prisma.session.deleteMany({ where: { userId: targetUserId } }),
       prisma.user.delete({ where: { id: targetUserId } }),
@@ -647,6 +708,8 @@ export default function CustomerUsersManagementPage() {
   const actionData = useActionData<typeof action>()
   const [searchParams, setSearchParams] = useSearchParams()
   const isPending = useIsPending()
+  // refs for potential future focus management inside modal
+  // const deactivateInModalBtnRef = useRef<HTMLButtonElement | null>(null)
   
   useToast(toast)
   // Component mount trace
@@ -667,6 +730,11 @@ export default function CustomerUsersManagementPage() {
   // Delete modal state
   const [deleteModal, setDeleteModal] = useState<{ isOpen: boolean; userId?: string; username?: string; name?: string; confirmValue: string }>(
     { isOpen: false, confirmValue: '' }
+  )
+
+  // Deactivate (with unassign) modal state
+  const [deactModal, setDeactModal] = useState<{ isOpen: boolean; userId?: string; name?: string; npiCount?: number }>(
+    { isOpen: false }
   )
 
   // Trace confirmValue updates (for debugging input behavior)
@@ -800,6 +868,9 @@ export default function CustomerUsersManagementPage() {
   const toggleNpiSelection = (id: string) => setSelectedNpis(prev => prev.includes(id) ? prev.filter(i => i !== id) : [...prev, id])
   const removeNpiFromSelection = (id: string) => setSelectedNpis(prev => prev.filter(i => i !== id))
 
+  // No-op: we now show delete-blocked guidance inside the modal itself
+  useEffect(() => {}, [])
+
   return (
     <>
   {/* Main content area */}
@@ -923,9 +994,24 @@ export default function CustomerUsersManagementPage() {
                       </thead>
                       <tbody className="bg-white divide-y divide-gray-200">
                         {customer.users.map((userItem: any) => (
-                          <tr key={userItem.id} className={`hover:bg-gray-50 ${!userItem.active ? 'opacity-70' : ''}`}>
-                            <td className="px-6 py-4 whitespace-nowrap">
-                              <div className="text-sm font-medium text-gray-900">{userItem.name}</div>
+                          <tr
+                            key={userItem.id}
+                            className={`transition-colors ${
+                              userItem.active
+                                ? 'hover:bg-gray-50'
+                                : 'bg-gray-50 hover:bg-gray-100 opacity-80'
+                            }`}
+                            title={userItem.active ? undefined : 'Inactive user — delete is disabled. Activate to enable deletion.'}
+                          >
+                            <td className={`px-6 py-4 whitespace-nowrap border-l-4 transition-colors duration-300 ease-in-out ${userItem.active ? 'border-green-400' : 'border-gray-300'}`}>
+                              <div className="text-sm font-medium text-gray-900 flex items-center gap-2">
+                                <span>{userItem.name}</span>
+                                {!userItem.active ? (
+                                  <span className="inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-medium bg-gray-200 text-gray-700" title="Inactive user">
+                                    Inactive
+                                  </span>
+                                ) : null}
+                              </div>
                             </td>
                             <td className="px-6 py-4 whitespace-nowrap">
                               <div className="text-sm text-gray-900">{userItem.email}</div>
@@ -952,27 +1038,56 @@ export default function CustomerUsersManagementPage() {
                               </div>
                             </td>
                             <td className="px-6 py-4 whitespace-nowrap">
-                              <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
+                              <span
+                                className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
                                 userItem.active 
                                   ? 'bg-green-100 text-green-800' 
                                   : 'bg-gray-100 text-gray-800'
-                              }`}>
+                              }`}
+                                title={userItem.active ? 'Active — click the lock icon to deactivate.' : 'Inactive — activate to re-enable actions (delete disabled).'}
+                              >
                                 {userItem.active ? 'Active' : 'Inactive'}
                               </span>
                             </td>
                             <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
                               <div className="flex items-center gap-2">
-                                <button onClick={() => openDrawer('edit', userItem.id)} className="text-blue-600 hover:text-blue-800 p-1" title="Edit user">
+                                <button
+                                  onClick={() => openDrawer('edit', userItem.id)}
+                                  className={`text-blue-600 hover:text-blue-800 p-1 ${!userItem.active ? 'opacity-60' : ''}`}
+                                  title={!userItem.active ? 'Edit user (inactive)' : 'Edit user'}
+                                >
                                   <Icon name="pencil-1" className="h-4 w-4" />
                                 </button>
-                                <Form method="post" className="inline">
-                                  <input type="hidden" name="intent" value="set-active" />
-                                  <input type="hidden" name="userId" value={userItem.id} />
-                                  <input type="hidden" name="status" value={userItem.active ? 'inactive' : 'active'} />
-                                  <button type="submit" className={`p-1 ${userItem.active ? 'text-red-600 hover:text-red-800' : 'text-green-600 hover:text-green-800'}`} title={userItem.active ? 'Deactivate user' : 'Activate user'}>
-                                    <Icon name={userItem.active ? 'lock-closed' : 'lock-open-1'} className="h-4 w-4" />
-                                  </button>
-                                </Form>
+                                {userItem.active ? (
+                                  userItem.userNpis?.length > 0 ? (
+                                    <button
+                                      type="button"
+                                      onClick={() => setDeactModal({ isOpen: true, userId: userItem.id, name: userItem.name, npiCount: userItem.userNpis.length })}
+                                      className="p-1 text-red-600 hover:text-red-800"
+                                      title="Deactivate user (will unassign all NPIs)"
+                                    >
+                                      <Icon name="lock-closed" className="h-4 w-4" />
+                                    </button>
+                                  ) : (
+                                    <Form method="post" className="inline">
+                                      <input type="hidden" name="intent" value="set-active" />
+                                      <input type="hidden" name="userId" value={userItem.id} />
+                                      <input type="hidden" name="status" value="inactive" />
+                                      <button type="submit" className="p-1 text-red-600 hover:text-red-800" title="Deactivate user">
+                                        <Icon name="lock-closed" className="h-4 w-4" />
+                                      </button>
+                                    </Form>
+                                  )
+                                ) : (
+                                  <Form method="post" className="inline">
+                                    <input type="hidden" name="intent" value="set-active" />
+                                    <input type="hidden" name="userId" value={userItem.id} />
+                                    <input type="hidden" name="status" value="active" />
+                                    <button type="submit" className="p-1 text-green-600 hover:text-green-800" title="Activate user">
+                                      <Icon name="lock-open-1" className="h-4 w-4" />
+                                    </button>
+                                  </Form>
+                                )}
                                 {(() => {
                                   const isSystemAdmin = userItem.roles.some((r: any) => r.name === 'system-admin')
                                   const isCustomerAdmin = userItem.roles.some((r: any) => r.name === 'customer-admin')
@@ -984,6 +1099,7 @@ export default function CustomerUsersManagementPage() {
                                   }
                                   let disabledReason: string | null = null
                                   if (isSystemAdmin) disabledReason = 'Cannot delete system administrators'
+                                  else if (!userItem.active) disabledReason = 'Cannot delete inactive users'
                                   else if (isSelf) disabledReason = 'You cannot delete your own account'
                                   else if (lastCustomerAdmin) disabledReason = 'Cannot delete the last customer-admin'
                                   return (
@@ -1006,10 +1122,22 @@ export default function CustomerUsersManagementPage() {
                               </div>
                             </td>
                             <td className="px-6 py-4 whitespace-nowrap text-sm">
-                              <button onClick={() => openDrawer('reset-password', userItem.id)} className="text-indigo-600 hover:text-indigo-800 p-1" title="Reset password"><Icon name="reset" className="h-4 w-4" /></button>
+                              <button
+                                onClick={() => openDrawer('reset-password', userItem.id)}
+                                className={`text-indigo-600 hover:text-indigo-800 p-1 ${!userItem.active ? 'opacity-60' : ''}`}
+                                title={!userItem.active ? 'Reset password (inactive)' : 'Reset password'}
+                              >
+                                <Icon name="reset" className="h-4 w-4" />
+                              </button>
                             </td>
                             <td className="px-6 py-4 whitespace-nowrap text-sm">
-                              <button onClick={() => openDrawer('assign-npis', userItem.id)} className="text-green-600 hover:text-green-800 p-1" title="Assign NPIs"><Icon name="file-text" className="h-4 w-4" /></button>
+                              <button
+                                onClick={() => openDrawer('assign-npis', userItem.id)}
+                                className={`text-green-600 hover:text-green-800 p-1 ${!userItem.active ? 'opacity-60' : ''}`}
+                                title={!userItem.active ? 'Assign NPIs (inactive)' : 'Assign NPIs'}
+                              >
+                                <Icon name="file-text" className="h-4 w-4" />
+                              </button>
                             </td>
                             {/** Delete column cell removed; delete now in Actions column */}
                           </tr>
@@ -1477,13 +1605,64 @@ export default function CustomerUsersManagementPage() {
                     placeholder={deleteModal.username}
                   />
                 </div>
+                {(() => {
+                  const blocked = (actionData && (actionData as any).deleteBlocked) as
+                    | { userId: string; userName: string; submissions: number; documents: number; events: number; cause: 'fk-refs' }
+                    | undefined
+                  if (!blocked || blocked.userId !== deleteModal.userId) return null
+                  const pieces: string[] = []
+                  if (blocked.submissions) pieces.push(`${blocked.submissions} submission${blocked.submissions === 1 ? '' : 's'}`)
+                  if (blocked.documents) pieces.push(`${blocked.documents} uploaded document${blocked.documents === 1 ? '' : 's'}`)
+                  if (blocked.events) pieces.push(`${blocked.events} provider event${blocked.events === 1 ? '' : 's'}`)
+                  const details = pieces.length ? pieces.join(', ') : 'linked records'
+                  return (
+                    <div className="rounded-md border border-yellow-300 bg-yellow-50 p-3">
+                      <div className="flex">
+                        <div className="flex-shrink-0"><Icon name="warning" className="h-4 w-4 text-yellow-600" /></div>
+                        <div className="ml-2 text-xs">
+                          <p className="text-yellow-800"><strong>Cannot delete {blocked.userName}</strong></p>
+                          <p className="text-yellow-700 mt-1">Deletion is blocked because this user has {details}. Please deactivate the user instead.</p>
+                          <div className="mt-2">
+                            <Form method="post" className="inline">
+                              <input type="hidden" name="intent" value="set-active" />
+                              <input type="hidden" name="userId" value={blocked.userId} />
+                              <input type="hidden" name="status" value="inactive" />
+                              {(() => {
+                                const userWithNpis = customer.users.find(u => u.id === blocked.userId)
+                                const hasNpis = Boolean(userWithNpis && (userWithNpis as any).userNpis?.length)
+                                if (hasNpis) {
+                                  return (
+                                    <Form method="post" className="inline">
+                                      <input type="hidden" name="intent" value="deactivate-and-unassign" />
+                                      <input type="hidden" name="userId" value={blocked.userId} />
+                                      <StatusButton status={isPending ? 'pending' : 'idle'} type="submit" className="bg-yellow-600 hover:bg-yellow-700 text-white px-3 py-1 rounded-md">Unassign NPIs & Deactivate</StatusButton>
+                                    </Form>
+                                  )
+                                }
+                                return (
+                                  <Form method="post" className="inline">
+                                    <input type="hidden" name="intent" value="set-active" />
+                                    <input type="hidden" name="userId" value={blocked.userId} />
+                                    <input type="hidden" name="status" value="inactive" />
+                                    <StatusButton status={isPending ? 'pending' : 'idle'} type="submit" className="bg-yellow-600 hover:bg-yellow-700 text-white px-3 py-1 rounded-md">Deactivate user</StatusButton>
+                                  </Form>
+                                )
+                              })()}
+                            </Form>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  )
+                })()}
                 {deleteModal.username && deleteModal.confirmValue && deleteModal.confirmValue.toLowerCase() !== deleteModal.username.toLowerCase() && (
                   <p className="text-xs text-red-600">Entered value does not match <code>{deleteModal.username}</code>.</p>
                 )}
               </div>
               {(() => {
                 const targetMatch = deleteModal.username ? deleteModal.confirmValue.toLowerCase() === deleteModal.username.toLowerCase() : false
-                const disabled = !targetMatch || isPending || !deleteModal.userId
+                const blocked = (actionData && (actionData as any).deleteBlocked) as { userId: string } | undefined
+                const disabled = !targetMatch || isPending || !deleteModal.userId || (blocked && blocked.userId === deleteModal.userId)
                 return (
                   <div className="px-5 py-3 border-t border-gray-200 flex justify-end gap-3">
                     <button
@@ -1505,6 +1684,39 @@ export default function CustomerUsersManagementPage() {
                   </div>
                 )
               })()}
+            </Form>
+          </div>
+        </div>
+      )}
+      
+      {/* Deactivate + Unassign confirmation modal */}
+      {deactModal.isOpen && (
+        <div className="fixed inset-0 z-50" role="dialog" aria-modal="true" aria-labelledby="deact-user-title">
+          <div className="absolute inset-0 bg-black/40" onClick={() => setDeactModal(s => ({ ...s, isOpen: false }))} />
+          <div className="absolute inset-0 flex items-center justify-center p-4">
+            <Form method="post" replace className="w-full max-w-md rounded-lg bg-white shadow-xl flex flex-col">
+              <input type="hidden" name="intent" value="deactivate-and-unassign" />
+              {deactModal.userId && <input type="hidden" name="userId" value={deactModal.userId} />}
+              <div className="px-5 py-4 border-b border-gray-200">
+                <h3 id="deact-user-title" className="text-sm font-semibold text-amber-800 flex items-center gap-2">
+                  <Icon name="warning" className="h-4 w-4" /> Unassign NPIs & Deactivate
+                </h3>
+              </div>
+              <div className="px-5 py-4 text-sm space-y-3">
+                <p>
+                  This will unassign all NPIs from <strong>{deactModal.name}</strong> and mark the user inactive.
+                </p>
+                {typeof deactModal.npiCount === 'number' ? (
+                  <p className="text-xs text-gray-600">Currently assigned NPIs: <strong>{deactModal.npiCount}</strong></p>
+                ) : null}
+                <div className="rounded-md border border-amber-300 bg-amber-50 p-2 text-xs text-amber-800">
+                  Sessions will be terminated. You can reactivate the user later if needed.
+                </div>
+              </div>
+              <div className="px-5 py-3 border-t border-gray-200 flex justify-end gap-3">
+                <button type="button" onClick={() => setDeactModal(s => ({ ...s, isOpen: false }))} className="inline-flex justify-center py-2 px-3 rounded-md border border-gray-300 text-sm bg-white text-gray-700 hover:bg-gray-50">Cancel</button>
+                <StatusButton type="submit" disabled={isPending} status={isPending ? 'pending' : 'idle'} className="inline-flex justify-center py-2 px-4 rounded-md text-sm text-white bg-amber-600 hover:bg-amber-700">Unassign & Deactivate</StatusButton>
+              </div>
             </Form>
           </div>
         </div>
