@@ -441,8 +441,8 @@ export default function Submissions() {
                                                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                                                     Created
                                                 </th>
-                                                <th className="relative px-4 py-3 text-right font-medium text-gray-500 " >
-                                                    <span className="sr-only">Actions</span>
+                                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider" >
+                                                    Actions
                                                 </th>
                                             </tr>
                                             </thead>
