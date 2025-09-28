@@ -4,9 +4,11 @@ import { data, Form, redirect, useSearchParams } from 'react-router'
 import { z } from 'zod'
 import { Field, ErrorList } from '#app/components/forms.tsx'
 import { StatusButton } from '#app/components/ui/status-button.tsx'
+import { audit } from '#app/services/audit.server.ts'
 import { requireAnonymous } from '#app/utils/auth.server.ts'
 import { prisma } from '#app/utils/db.server.ts'
 import { useIsPending } from '#app/utils/misc.tsx'
+import { extractRequestContext } from '#app/utils/request-context.server.ts'
 import { verifyTwoFactorToken } from '#app/utils/twofa.server.ts'
 import { verifySessionStorage } from '#app/utils/verification.server.ts'
 import { handleNewSession } from './login.server.ts'
@@ -37,6 +39,7 @@ export async function loader({ request }: { request: Request }) {
 
 export async function action({ request }: { request: Request }) {
 	await requireAnonymous(request)
+	const reqCtx = await extractRequestContext(request, { requireUser: false })
 	const formData = await request.formData()
 	
 	const submission = await parseWithZod(formData, {
@@ -64,6 +67,29 @@ export async function action({ request }: { request: Request }) {
 			// Verify the 2FA code
 			const isValid = await verifyTwoFactorToken(user.twoFactorSecret, data.code)
 			if (!isValid) {
+				// Attempt to resolve userId for audit
+				try {
+					const verifySession = await verifySessionStorage.getSession(request.headers.get('cookie'))
+					const unverifiedId = verifySession.get('unverified-session-id') as string | undefined
+					if (unverifiedId) {
+						const sess = await prisma.session.findUnique({ where: { id: unverifiedId }, select: { userId: true } })
+						if (sess?.userId) {
+							await audit.security({
+								action: 'TWO_FACTOR_VERIFY_FAILED',
+								status: 'FAILURE',
+								actorType: 'USER',
+								actorId: sess.userId,
+								actorIp: reqCtx.ip ?? null,
+								actorUserAgent: reqCtx.userAgent ?? null,
+								chainKey: 'global',
+								entityType: 'User',
+								entityId: sess.userId,
+								summary: 'Invalid 2FA code during login',
+								metadata: { method: 'TOTP' },
+							})
+						}
+					}
+				} catch {}
 				ctx.addIssue({
 					code: z.ZodIssueCode.custom,
 					message: 'Invalid verification code',
@@ -93,6 +119,18 @@ export async function action({ request }: { request: Request }) {
 	// Pull remember from verify session (set during login)
 	const verifySession = await verifySessionStorage.getSession(request.headers.get('cookie'))
 	const remember = !!verifySession.get('remember')
+	await audit.security({
+		action: 'TWO_FACTOR_VERIFY',
+		actorType: 'USER',
+		actorId: session.userId,
+		actorIp: reqCtx.ip ?? null,
+		actorUserAgent: reqCtx.userAgent ?? null,
+		chainKey: 'global',
+		entityType: 'User',
+		entityId: session.userId,
+		summary: '2FA verified during login',
+		metadata: { method: 'TOTP' },
+	})
 	return handleNewSession({ request, session, remember, redirectTo, twoFAVerified: true })
 }
 

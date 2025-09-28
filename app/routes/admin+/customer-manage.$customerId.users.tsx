@@ -11,7 +11,7 @@ import { Icon } from '#app/components/ui/icon.tsx'
 import { StatusButton } from '#app/components/ui/status-button.tsx'
 import { ManualPasswordSection } from '#app/components/user-management/manual-password-section.tsx'
 import { audit as auditEvent } from '#app/services/audit.server.ts'
-import { requireUserId } from '#app/utils/auth.server.ts'
+import { requireUserId, isPasswordReused, captureCurrentPasswordToHistory } from '#app/utils/auth.server.ts'
 import { prisma } from '#app/utils/db.server.ts'
 import { sendUserRegistrationEmail } from '#app/utils/emails/send-user-registration.server.ts'
 import { INTEREX_ROLES } from '#app/utils/interex-roles.ts'
@@ -501,6 +501,12 @@ export async function action({ request, params }: ActionFunctionArgs) {
         }
       }
     }
+    // Prevent reuse when manual mode; for auto-generated, it's highly unlikely but still guard
+    if (await isPasswordReused(targetUserId, newPassword)) {
+      return redirectWithToast(`/admin/customer-manage/${customerId}/users`, { type: 'error', title: 'Password reuse blocked', description: 'New password cannot match any of the last 5.' })
+    }
+    // Move current hash to history then set new
+    await captureCurrentPasswordToHistory(targetUserId)
     const passwordHash = hashPassword(newPassword)
     await prisma.password.upsert({
       where: { userId: targetUserId },

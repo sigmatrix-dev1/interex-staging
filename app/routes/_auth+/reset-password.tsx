@@ -7,14 +7,18 @@ import { data, redirect, Form } from 'react-router'
 import { GeneralErrorBoundary } from '#app/components/error-boundary.tsx'
 import { ErrorList, Field } from '#app/components/forms.tsx'
 import { StatusButton } from '#app/components/ui/status-button.tsx'
+import { audit } from '#app/services/audit.server.ts'
 import {
 	checkIsCommonPassword,
 	requireAnonymous,
-	resetUserPassword,
+	isPasswordReused,
+	captureCurrentPasswordToHistory,
+	getPasswordHash,
 } from '#app/utils/auth.server.ts'
 import { prisma } from '#app/utils/db.server.ts'
 import { useIsPending } from '#app/utils/misc.tsx'
 import { validatePasswordComplexity } from '#app/utils/password-policy.server.ts'
+import { extractRequestContext } from '#app/utils/request-context.server.ts'
 import { PasswordAndConfirmPasswordSchema } from '#app/utils/user-validation.ts'
 import { verifySessionStorage } from '#app/utils/verification.server.ts'
 import { type Route } from './+types/reset-password.ts'
@@ -48,6 +52,7 @@ export async function loader({ request }: Route.LoaderArgs) {
 
 export async function action({ request }: Route.ActionArgs) {
 	const resetPasswordUsername = await requireResetPasswordUsername(request)
+	const ctx = await extractRequestContext(request, { requireUser: false })
 	const formData = await request.formData()
 	const submission = await parseWithZod(formData, {
 		schema: ResetPasswordSchema.superRefine(async ({ password }, ctx) => {
@@ -78,13 +83,59 @@ export async function action({ request }: Route.ActionArgs) {
 	}
 	const { password } = submission.value
 
-	await resetUserPassword({ username: resetPasswordUsername, password })
+	// Prevent reuse of current or last 5
+	const user = await prisma.user.findUnique({ where: { username: resetPasswordUsername }, select: { id: true, customerId: true } })
+	if (!user) throw redirect('/login')
+	if (await isPasswordReused(user.id, password)) {
+		await audit.auth({
+			action: 'PASSWORD_RESET',
+			status: 'FAILURE',
+			actorType: 'USER',
+			actorId: user.id,
+			actorDisplay: ctx.actorDisplay ?? null,
+			actorIp: ctx.ip ?? null,
+			actorUserAgent: ctx.userAgent ?? null,
+			customerId: user.customerId ?? null,
+			chainKey: user.customerId || 'global',
+			entityType: 'User',
+			entityId: user.id,
+			summary: 'Password reset rejected: password reuse detected',
+			metadata: { reason: 'REUSE_BLOCK', lastN: 5, username: resetPasswordUsername },
+		})
+		return data(
+			{ result: submission.reply({ formErrors: ['New password cannot match any of the last 5 passwords.'] }) },
+			{ status: 400 },
+		)
+	}
+	// Capture current into history and then set new password
+	await captureCurrentPasswordToHistory(user.id)
+	const hash = await getPasswordHash(password)
+	await prisma.password.upsert({
+		where: { userId: user.id },
+		update: { hash },
+		create: { userId: user.id, hash },
+	})
 	// Clear mustChangePassword flag & set passwordChangedAt
 	// Cast for mustChangePassword until Prisma types updated
 	await (prisma as any).user.update({
-		where: { username: resetPasswordUsername },
+		where: { id: user.id },
 		data: { mustChangePassword: false, passwordChangedAt: new Date() },
 		select: { id: true },
+	})
+
+	await audit.auth({
+		action: 'PASSWORD_RESET',
+		actorType: 'USER',
+		actorId: user.id,
+		actorDisplay: ctx.actorDisplay ?? null,
+		actorIp: ctx.ip ?? null,
+		actorUserAgent: ctx.userAgent ?? null,
+		customerId: user.customerId ?? null,
+		chainKey: user.customerId || 'global',
+		entityType: 'User',
+		entityId: user.id,
+		summary: 'User reset password via reset flow',
+		metadata: { username: resetPasswordUsername },
 	})
 	const verifySession = await verifySessionStorage.getSession()
 	return redirect('/login', {

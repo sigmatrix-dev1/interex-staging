@@ -203,18 +203,13 @@ function App() {
 	useToast(data.toast)
 
 	// Check if we're on an app page that uses InterexLayout (has its own header)
-		const currentPath = matches[matches.length - 1]?.pathname || ''
-		const isAppPage =
-			currentPath.startsWith('/customer') ||
-			currentPath.startsWith('/admin') ||
-			currentPath.startsWith('/provider') ||
-			currentPath.startsWith('/submissions') ||
-			currentPath.startsWith('/settings') ||
-			currentPath === '/dashboard' ||
-			// App top-level routes that also use InterexLayout
-			currentPath.startsWith('/basic') ||
-			currentPath.startsWith('/providers-emdr') ||
-			currentPath.startsWith('/my-npis')
+	const currentPath = matches[matches.length - 1]?.pathname || ''
+	const isAppPage = currentPath.startsWith('/customer') || 
+	                  currentPath.startsWith('/admin') || 
+	                  currentPath.startsWith('/provider') || 
+	                  currentPath.startsWith('/submissions') ||
+	                  currentPath.startsWith('/settings') ||
+	                  currentPath === '/dashboard'
 
 	return (
 		<OpenImgContextProvider

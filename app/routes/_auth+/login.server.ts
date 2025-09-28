@@ -3,7 +3,7 @@
 import { invariant } from '@epic-web/invariant'
 import { redirect } from 'react-router'
 import { safeRedirect } from 'remix-utils/safe-redirect'
-import { getUserId, sessionKey } from '#app/utils/auth.server.ts'
+import { getUserId, sessionKey, isPasswordExpired } from '#app/utils/auth.server.ts'
 import { prisma } from '#app/utils/db.server.ts'
 import { combineResponseInits } from '#app/utils/misc.tsx'
 import { getDashboardUrl } from '#app/utils/role-redirect.server.ts'
@@ -44,8 +44,28 @@ export async function handleNewSession(
 		// Cast for mustChangePassword field until Prisma client types regenerate
 		const user = await (prisma as any).user.findUnique({
 			where: { id: session.userId },
-			select: { id: true, mustChangePassword: true, roles: { select: { name: true } } },
+			select: { id: true, mustChangePassword: true, passwordChangedAt: true, roles: { select: { name: true } } },
 		})
+
+		// If password expired, force change (set flag if missing)
+		if (user && isPasswordExpired(user.passwordChangedAt)) {
+			if (!user.mustChangePassword) {
+				await (prisma as any).user.update({ where: { id: user.id }, data: { mustChangePassword: true } })
+			}
+			return redirect(
+				'/change-password',
+				combineResponseInits(
+					{
+						headers: {
+							'set-cookie': await authSessionStorage.commitSession(authSession, {
+								expires: remember ? session.expirationDate : undefined,
+							}),
+						},
+					},
+					responseInit,
+				),
+			)
+		}
 
 		if (user?.mustChangePassword) {
 			return redirect(

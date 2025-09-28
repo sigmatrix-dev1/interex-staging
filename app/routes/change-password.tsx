@@ -10,11 +10,13 @@ import { GeneralErrorBoundary } from '#app/components/error-boundary.tsx'
 import { ErrorList, Field } from '#app/components/forms.tsx'
 import { Icon } from '#app/components/ui/icon.tsx'
 import { StatusButton } from '#app/components/ui/status-button.tsx'
-import { getUserId, checkIsCommonPassword, getPasswordHash } from '#app/utils/auth.server.ts'
+import { audit } from '#app/services/audit.server.ts'
+import { getUserId, checkIsCommonPassword, getPasswordHash, isPasswordReused, captureCurrentPasswordToHistory } from '#app/utils/auth.server.ts'
 import { prisma } from '#app/utils/db.server.ts'
 import { useIsPending } from '#app/utils/misc.tsx'
 import { validatePasswordComplexity } from '#app/utils/password-policy.server.ts'
 import { PASSWORD_REQUIREMENTS } from '#app/utils/password-requirements.ts'
+import { extractRequestContext } from '#app/utils/request-context.server.ts'
 import { PasswordAndConfirmPasswordSchema } from '#app/utils/user-validation.ts'
 
 export const handle: SEOHandle = { getSitemapEntries: () => null }
@@ -35,6 +37,7 @@ export async function action({ request }: { request: Request }) {
   if (!userId) throw redirect('/login')
   const user = await (prisma as any).user.findUnique({ where: { id: userId }, select: { mustChangePassword: true, username: true } })
   if (!user) throw redirect('/login')
+  const ctx = await extractRequestContext(request, { requireUser: true })
   const formData = await request.formData()
   const submission = await parseWithZod(formData, {
     schema: ForcedChangeSchema.superRefine(async ({ password }, ctx) => {
@@ -53,12 +56,49 @@ export async function action({ request }: { request: Request }) {
   const { password } = submission.value
   // Update password
   const hash = await getPasswordHash(password)
+  // Reuse check against current + last 5
+  if (await isPasswordReused(userId, password)) {
+    // Audit: rejected due to reuse
+    await audit.auth({
+      action: 'PASSWORD_CHANGE',
+      status: 'FAILURE',
+      actorType: 'USER',
+      actorId: userId,
+      actorDisplay: ctx.actorDisplay ?? null,
+      actorIp: ctx.ip ?? null,
+      actorUserAgent: ctx.userAgent ?? null,
+      customerId: ctx.customerId ?? null,
+      chainKey: ctx.customerId || 'global',
+      entityType: 'User',
+      entityId: userId,
+      summary: 'Password change rejected: password reuse detected',
+      metadata: { reason: 'REUSE_BLOCK', lastN: 5 },
+    })
+    return data({ result: submission.reply({ formErrors: ['New password cannot match any of the last 5 passwords.'] }) }, { status: 400 })
+  }
+  // Move current into history before updating
+  await captureCurrentPasswordToHistory(userId)
   await prisma.password.upsert({
     where: { userId },
     update: { hash },
     create: { userId, hash },
   })
   await (prisma as any).user.update({ where: { id: userId }, data: { mustChangePassword: false, passwordChangedAt: new Date() } })
+  // Audit: successful password change
+  await audit.auth({
+    action: 'PASSWORD_CHANGE',
+    actorType: 'USER',
+    actorId: userId,
+    actorDisplay: ctx.actorDisplay ?? null,
+    actorIp: ctx.ip ?? null,
+    actorUserAgent: ctx.userAgent ?? null,
+    customerId: ctx.customerId ?? null,
+    chainKey: ctx.customerId || 'global',
+    entityType: 'User',
+    entityId: userId,
+    summary: 'User changed password (forced due to policy)',
+    metadata: { reason: 'FORCED_CHANGE' },
+  })
   return redirect('/')
 }
 

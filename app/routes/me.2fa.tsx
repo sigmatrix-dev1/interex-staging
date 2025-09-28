@@ -5,9 +5,11 @@ import { data, Form, redirect } from 'react-router'
 import { z } from 'zod'
 import { Field, ErrorList } from '#app/components/forms.tsx'
 import { StatusButton } from '#app/components/ui/status-button.tsx'
+import { audit } from '#app/services/audit.server.ts'
 import { requireUserId } from '#app/utils/auth.server.ts'
 import { prisma } from '#app/utils/db.server.ts'
 import { useIsPending } from '#app/utils/misc.tsx'
+import { extractRequestContext } from '#app/utils/request-context.server.ts'
 import { 
 	generateTwoFactorSecret, 
 	verifyTwoFactorToken, 
@@ -38,16 +40,32 @@ export async function loader({ request }: { request: Request }) {
 
 export async function action({ request }: { request: Request }) {
 	const userId = await requireUserId(request)
+	const reqCtx = await extractRequestContext(request, { requireUser: true })
 	const formData = await request.formData()
 	
 	const intent = formData.get('intent')
 	
 	if (intent === 'verify') {
 		const submission = await parseWithZod(formData, {
-			schema: TwoFAVerifySchema.transform(async (data, ctx) => {
+			schema: TwoFAVerifySchema.transform(async (data, zodCtx) => {
 				const isValid = await verifyTwoFactorToken(data.secret, data.code)
 				if (!isValid) {
-					ctx.addIssue({
+					await audit.security({
+						action: 'TWO_FACTOR_VERIFY_FAILED',
+						status: 'FAILURE',
+						actorType: 'USER',
+						actorId: userId,
+						actorDisplay: reqCtx.actorDisplay ?? null,
+						actorIp: reqCtx.ip ?? null,
+						actorUserAgent: reqCtx.userAgent ?? null,
+						customerId: reqCtx.customerId ?? null,
+						chainKey: reqCtx.customerId || 'global',
+						entityType: 'User',
+						entityId: userId,
+						summary: 'Invalid 2FA verification code during enablement',
+						metadata: { method: 'TOTP' },
+					})
+					zodCtx.addIssue({
 						code: z.ZodIssueCode.custom,
 						message: 'Invalid verification code',
 						path: ['code'],
@@ -64,6 +82,20 @@ export async function action({ request }: { request: Request }) {
 		}
 
 		await enableTwoFactorForUser(userId, submission.value.secret)
+		await audit.security({
+			action: 'TWO_FACTOR_ENABLE',
+			actorType: 'USER',
+			actorId: userId,
+			actorDisplay: reqCtx.actorDisplay ?? null,
+			actorIp: reqCtx.ip ?? null,
+			actorUserAgent: reqCtx.userAgent ?? null,
+			customerId: reqCtx.customerId ?? null,
+			chainKey: reqCtx.customerId || 'global',
+			entityType: 'User',
+			entityId: userId,
+			summary: 'User enabled 2FA',
+			metadata: { method: 'TOTP' },
+		})
 		return redirect('/me/2fa')
 	}
 	
@@ -84,6 +116,21 @@ export async function action({ request }: { request: Request }) {
 	}
 
 	const { secret, qrCode } = await generateTwoFactorSecret(userInfo.username)
+	await audit.security({
+		action: 'TWO_FACTOR_SETUP_START',
+		status: 'INFO',
+		actorType: 'USER',
+		actorId: userId,
+		actorDisplay: reqCtx.actorDisplay ?? null,
+		actorIp: reqCtx.ip ?? null,
+		actorUserAgent: reqCtx.userAgent ?? null,
+		customerId: reqCtx.customerId ?? null,
+		chainKey: reqCtx.customerId || 'global',
+		entityType: 'User',
+		entityId: userId,
+		summary: 'User initiated 2FA setup',
+		metadata: { method: 'TOTP' },
+	})
 	
 	return data({ setupData: { secret, qrCode } })
 }

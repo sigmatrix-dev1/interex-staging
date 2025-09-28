@@ -4,9 +4,11 @@ import { data, Form, redirect, useSearchParams } from 'react-router'
 import { z } from 'zod'
 import { Field, ErrorList } from '#app/components/forms.tsx'
 import { StatusButton } from '#app/components/ui/status-button.tsx'
+import { audit } from '#app/services/audit.server.ts'
 import { requireAnonymous } from '#app/utils/auth.server.ts'
 import { prisma } from '#app/utils/db.server.ts'
 import { useIsPending } from '#app/utils/misc.tsx'
+import { extractRequestContext } from '#app/utils/request-context.server.ts'
 import { generateTwoFactorSecret, verifyTwoFactorToken, enableTwoFactorForUser } from '#app/utils/twofa.server.ts'
 import { verifySessionStorage } from '#app/utils/verification.server.ts'
 import { handleNewSession } from './login.server.ts'
@@ -20,6 +22,7 @@ const TwoFASetupSchema = z.object({
 
 export async function loader({ request }: { request: Request }) {
   await requireAnonymous(request)
+  const ctx = await extractRequestContext(request, { requireUser: false })
   // Use the verify session stashed by handleNewSession to identify the user
   const verifySession = await verifySessionStorage.getSession(request.headers.get('cookie'))
   const unverifiedId = verifySession.get('unverified-session-id') as string | undefined
@@ -41,11 +44,26 @@ export async function loader({ request }: { request: Request }) {
 
   // Generate a temporary secret and QR for setup (not persisted until verified)
   const { secret, qrCode } = await generateTwoFactorSecret(user.username || 'user')
+  await audit.security({
+    action: 'TWO_FACTOR_SETUP_START',
+    status: 'INFO',
+    actorType: 'USER',
+    actorId: user.id,
+    actorDisplay: user.username || null,
+    actorIp: ctx.ip ?? null,
+    actorUserAgent: ctx.userAgent ?? null,
+    chainKey: 'global',
+    entityType: 'User',
+    entityId: user.id,
+    summary: 'User initiated 2FA setup during login',
+    metadata: { method: 'TOTP' },
+  })
   return data({ userId: user.id, username: user.username, secret, qrCode })
 }
 
 export async function action({ request }: { request: Request }) {
   await requireAnonymous(request)
+  const ctx = await extractRequestContext(request, { requireUser: false })
   const formData = await request.formData()
   const submission = await parseWithZod(formData, {
     schema: TwoFASetupSchema.transform(async (val, ctx) => {
@@ -75,6 +93,18 @@ export async function action({ request }: { request: Request }) {
   const { userId, secret, redirectTo } = submission.value
   // Persist secret and enable 2FA
   await enableTwoFactorForUser(userId, secret)
+  await audit.security({
+    action: 'TWO_FACTOR_ENABLE',
+    actorType: 'USER',
+    actorId: userId,
+    actorIp: ctx.ip ?? null,
+    actorUserAgent: ctx.userAgent ?? null,
+    chainKey: 'global',
+    entityType: 'User',
+    entityId: userId,
+    summary: '2FA enabled during login setup flow',
+    metadata: { method: 'TOTP' },
+  })
 
   // Resume pending login session from verify session
   const verifySession = await verifySessionStorage.getSession(request.headers.get('cookie'))

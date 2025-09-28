@@ -13,7 +13,6 @@ import {
     formatEnum,
 } from '#app/domain/submission-enums.ts'
 import { pcgGetStatus } from '#app/services/pcg-hih.server.ts'
-import { getAccessToken } from '#app/services/pcg-token.server.ts'
 import { requireUserId } from '#app/utils/auth.server.ts'
 import { prisma } from '#app/utils/db.server.ts'
 import { redirectWithToast } from '#app/utils/toast.server.ts'
@@ -273,14 +272,6 @@ export default function Submissions() {
         return true
     })
 
-    const handleFilterChange = (type: string, value: string) => {
-        const sp = new URLSearchParams(searchParams)
-        if (value === 'all') sp.delete(type)
-        else sp.set(type, value)
-        setSearchParams(sp)
-        if (type === 'purpose') setPurposeFilter(value)
-    }
-
     const getStageColor = (stage: string, hasErrorEvent: boolean) => {
         const s = (stage || 'Draft').toLowerCase()
         if (s.includes('draft')) return 'bg-gray-100 text-gray-800'
@@ -292,19 +283,12 @@ export default function Submissions() {
     }
     const formatSubmissionPurpose = (purpose: string) =>
         purpose.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())
-    const formatStatus = (status: string) => status.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())
-
-    function isDraftFromPCG(s: { responseMessage?: string | null; events?: PcgEvent[] | any[] }) {
-        return latestStageFromPCG(s).toLowerCase().includes('draft')
-    }
-
     const getLatestPcgStatusPayload = (events: any[] = []) => {
         const ev = events.find(e => e.kind === 'PCG_STATUS')
         return (ev?.payload as any) ?? null
     }
 
-    const safe = (v: any, fallback = '—') =>
-        v === null || v === undefined || v === '' ? fallback : v
+    //
 
     // --- ADDED: derive whether we're doing the update-status submit
     const isUpdatingStatus =

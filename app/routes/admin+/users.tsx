@@ -21,6 +21,7 @@ import { Drawer } from '#app/components/ui/drawer.tsx'
 import { Icon } from '#app/components/ui/icon.tsx'
 import { StatusButton } from '#app/components/ui/status-button.tsx'
 import { prepareVerification } from '#app/routes/_auth+/verify.server.ts'
+import { audit } from '#app/services/audit.server.ts'
 import { requireUserId, checkIsCommonPassword } from '#app/utils/auth.server.ts'
 import { prisma } from '#app/utils/db.server.ts'
 import { sendAdminPasswordManualResetEmail } from '#app/utils/emails/send-admin-password-manual-reset.server.ts'
@@ -568,7 +569,7 @@ export async function action({ request }: ActionFunctionArgs) {
 
         const targetUser = await prisma.user.findUnique({
             where: { id: userId },
-            select: { id: true, email: true, name: true, username: true, customer: { select: { name: true } } },
+            select: { id: true, email: true, name: true, username: true, customer: { select: { id: true, name: true } } },
         })
 
         if (!targetUser) {
@@ -579,7 +580,7 @@ export async function action({ request }: ActionFunctionArgs) {
             })
         }
 
-        // Disable 2FA via helper, clear secret and flag
+    // Disable 2FA via helper, clear secret and flag
         await disableTwoFactorForUser(userId)
 
         // Delete any existing verification records of type '2fa' to fully reset
@@ -594,15 +595,18 @@ export async function action({ request }: ActionFunctionArgs) {
         // Invalidate all sessions for extra security
         await prisma.session.deleteMany({ where: { userId } })
 
-        await prisma.securityEvent.create({
-            data: {
-                kind: 'TWO_FACTOR_RESET',
-                message: 'Admin reset user 2FA',
-                userId: targetUser.id,
-                userEmail: targetUser.email,
-                success: true,
-                reason: 'ADMIN_TRIGGERED',
-            },
+        // Audit: Admin initiated 2FA reset
+        await audit.admin({
+            action: 'TWO_FACTOR_RESET',
+            actorType: 'USER',
+            actorId: adminUserId,
+            actorDisplay: admin.name || admin.email || null,
+            customerId: targetUser.customer?.id ?? null,
+            chainKey: targetUser.customer?.id || 'global',
+            entityType: 'User',
+            entityId: targetUser.id,
+            summary: `Admin reset 2FA for user ${targetUser.username}`,
+            metadata: { targetUser: { id: targetUser.id, email: targetUser.email, username: targetUser.username } },
         })
 
         return redirectWithToast('/admin/users', {

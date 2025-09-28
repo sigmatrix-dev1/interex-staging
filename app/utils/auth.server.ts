@@ -315,6 +315,51 @@ export async function getPasswordHash(password: string) {
     return hash
 }
 
+// Password policy helpers: history + expiry
+export const PASSWORD_MAX_AGE_DAYS = 60
+export const PASSWORD_HISTORY_LIMIT = 5
+
+export async function isPasswordReused(userId: string, newPlainPassword: string) {
+    // Compare against current and last 5 history hashes
+    const current = await prisma.password.findUnique({ where: { userId } })
+    if (current && await bcrypt.compare(newPlainPassword, current.hash)) return true
+    const history = await (prisma as any).passwordHistory.findMany({
+        where: { userId },
+        orderBy: { createdAt: 'desc' },
+        take: PASSWORD_HISTORY_LIMIT,
+        select: { hash: true },
+    })
+    for (const h of history) {
+        if (await bcrypt.compare(newPlainPassword, (h as { hash: string }).hash)) return true
+    }
+    return false
+}
+
+export async function captureCurrentPasswordToHistory(userId: string) {
+    // Push current hash into history and keep only last PASSWORD_HISTORY_LIMIT entries
+    const current = await prisma.password.findUnique({ where: { userId }, select: { hash: true } })
+    if (current?.hash) {
+        await (prisma as any).passwordHistory.create({ data: { userId, hash: current.hash } })
+        // Trim extras beyond limit
+        const extra = await (prisma as any).passwordHistory.findMany({
+            where: { userId },
+            orderBy: { createdAt: 'desc' },
+            skip: PASSWORD_HISTORY_LIMIT,
+            select: { id: true },
+        })
+        if (extra.length) {
+            await (prisma as any).passwordHistory.deleteMany({ where: { id: { in: (extra as Array<{ id: string }>).map((e) => e.id) } } })
+        }
+    }
+}
+
+export function isPasswordExpired(passwordChangedAt: Date | null | undefined) {
+    if (!passwordChangedAt) return true
+    const ageMs = Date.now() - passwordChangedAt.getTime()
+    const maxMs = PASSWORD_MAX_AGE_DAYS * 24 * 60 * 60 * 1000
+    return ageMs > maxMs
+}
+
 export async function verifyUserPassword(
     where: { username: string } | { id: string },
     password: Password['hash'],
