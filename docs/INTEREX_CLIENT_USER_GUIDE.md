@@ -51,11 +51,10 @@ You manage users within your group, providers assigned to your group, and relate
 
 ### Basic User (day-to-day work)
 You focus on your own assigned providers and related tasks.
-- My NPIs: See the providers assigned directly to you.
+- Dashboard: Your home with quick metrics (total submissions, your group, assigned NPIs) and your assigned NPIs list.
 - Provider NPIs (scoped): View providers you’re allowed to see.
 - Providers & eMDR (scoped): View registration status.
 - Submissions and Letters: Create and track items relevant to you.
-- Note: A dedicated Basic User dashboard is coming soon.
 
 ---
 
@@ -203,9 +202,14 @@ A focused workspace for a single customer with three main areas:
   - Filters to narrow to specific customers, groups, or providers
   - Sort by date and other fields
 
-### My NPIs (Basic User)
-- Purpose: A personal list of providers assigned to you.
-- Use this as your shortcut to daily work.
+### Basic Dashboard (Basic User)
+- Purpose: Your personal home page.
+- What you see:
+  - Total submissions you can access
+  - Your provider group (if any)
+  - Total NPIs assigned to you
+  - A read-only table of your assigned NPIs, with quick links to manage
+  - Tip: Use the Submissions and Letters tabs for your day-to-day items
 
 ---
 

@@ -41,7 +41,7 @@ export function getDashboardUrl(user: User): string {
     case INTEREX_ROLES.PROVIDER_GROUP_ADMIN:
       return '/provider'
     case INTEREX_ROLES.BASIC_USER:
-      return '/customer/submissions'
+      return '/basic'
     default:
       return '/' // fallback to home page for unknown roles
   }

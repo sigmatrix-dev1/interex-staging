@@ -20,6 +20,7 @@ export function buildNavItems(user: User): NavItem[] {
 	if (isSystem) items.push(makeLink('Dashboard', '/admin/dashboard', 'hero:dashboard', 'System administration overview'))
 	else if (isCustomerAdmin) items.push(makeLink('Dashboard', '/customer', 'hero:dashboard', 'Customer overview'))
 	else if (isProviderGroupAdmin) items.push(makeLink('Dashboard', '/provider', 'hero:dashboard', 'Provider group overview'))
+	else if (isBasic) items.push(makeLink('Dashboard', '/basic', 'hero:dashboard', 'Your overview'))
 
 	// Organization
 	if (isSystem) {
@@ -46,7 +47,7 @@ export function buildNavItems(user: User): NavItem[] {
 		] })
 	} else if (isCustomerAdmin || isProviderGroupAdmin || isBasic) {
 		items.push({ type: 'group', name: 'Provider', icon: 'id-card', items: [
-			...(isBasic ? [makeLink('My NPIs', '/my-npis', 'lock-closed', 'View assigned NPIs')] : []),
+			// Basic users see their assigned NPIs on their dashboard; omit separate menu link
 			makeLink('Provider NPIs', '/customer/provider-npis', 'id-card', 'Manage provider NPIs'),
 			makeLink('Provider & eMDR Mgmt', '/providers-emdr', 'envelope-closed', 'eMDR Registration / Management'),
 		] })
