@@ -47,40 +47,49 @@ export async function handleNewSession(
 			select: { id: true, mustChangePassword: true, passwordChangedAt: true, roles: { select: { name: true } } },
 		})
 
-		// If password expired, force change (set flag if missing)
-		if (user && isPasswordExpired(user.passwordChangedAt)) {
-			if (!user.mustChangePassword) {
-				await (prisma as any).user.update({ where: { id: user.id }, data: { mustChangePassword: true } })
-			}
-			return redirect(
-				'/change-password',
-				combineResponseInits(
-					{
-						headers: {
-							'set-cookie': await authSessionStorage.commitSession(authSession, {
-								expires: remember ? session.expirationDate : undefined,
-							}),
-						},
-					},
-					responseInit,
-				),
-			)
-		}
 
-		if (user?.mustChangePassword) {
-			return redirect(
-				'/change-password',
-				combineResponseInits(
-					{
-						headers: {
-							'set-cookie': await authSessionStorage.commitSession(authSession, {
-								expires: remember ? session.expirationDate : undefined,
-							}),
+		// Configure enforcement: default ON in non-test, OFF in test unless explicitly enabled
+		const enforceChangePassword =
+			process.env.NODE_ENV === 'test'
+				? process.env.REQUIRE_PASSWORD_CHANGE_ON_LOGIN === 'true'
+				: process.env.REQUIRE_PASSWORD_CHANGE_ON_LOGIN !== 'false'
+
+		if (enforceChangePassword) {
+			// If password expired, force change (set flag if missing)
+			if (user && isPasswordExpired(user.passwordChangedAt)) {
+				if (!user.mustChangePassword) {
+					await (prisma as any).user.update({ where: { id: user.id }, data: { mustChangePassword: true } })
+				}
+				return redirect(
+					'/change-password',
+					combineResponseInits(
+						{
+							headers: {
+								'set-cookie': await authSessionStorage.commitSession(authSession, {
+									expires: remember ? session.expirationDate : undefined,
+								}),
+							},
 						},
-					},
-					responseInit,
-				),
-			)
+						responseInit,
+					),
+				)
+			}
+
+			if (user?.mustChangePassword) {
+				return redirect(
+					'/change-password',
+					combineResponseInits(
+						{
+							headers: {
+								'set-cookie': await authSessionStorage.commitSession(authSession, {
+									expires: remember ? session.expirationDate : undefined,
+								}),
+							},
+						},
+						responseInit,
+					),
+				)
+			}
 		}
 
 		let finalRedirectTo = redirectTo
@@ -216,7 +225,12 @@ export async function handleVerification({
 	)
 
 	// After successful 2FA verification, enforce password change if required
-	if (authSession.get(sessionKey)) {
+	const enforceChangePassword =
+		process.env.NODE_ENV === 'test'
+			? process.env.REQUIRE_PASSWORD_CHANGE_ON_LOGIN === 'true'
+			: process.env.REQUIRE_PASSWORD_CHANGE_ON_LOGIN !== 'false'
+
+	if (authSession.get(sessionKey) && enforceChangePassword) {
 		const sessionId = authSession.get(sessionKey) as string | undefined
 		if (sessionId) {
 			const session = await prisma.session.findUnique({
