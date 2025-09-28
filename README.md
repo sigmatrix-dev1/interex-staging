@@ -35,6 +35,10 @@ npx epicli
 [Read the docs](https://github.com/epicweb-dev/epic-stack/blob/main/docs)
 (please 🙏).
 
+### Project-specific docs
+
+- Complete Guide (single file, includes all docs inline): `docs/INTEREX_FULL_GUIDE.md`
+
 ## Support
 
 - 🆘 Join the

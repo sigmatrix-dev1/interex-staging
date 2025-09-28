@@ -508,7 +508,7 @@ export default function AdminReportsPage() {
   }
 
   return (
-    <InterexLayout user={user} title="Reports" subtitle="System-wide and tenant-specific reports" showBackButton backTo="/admin" currentPath="/admin/reports">
+    <InterexLayout user={user} title="Reports" subtitle="System-wide and tenant-specific reports" showBackButton backTo="/admin/dashboard" currentPath="/admin/reports">
       <LoadingOverlay show={Boolean(isPending)} />
       <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 py-6 space-y-6">
         <div className="bg-white shadow rounded-md p-4" id="top">
