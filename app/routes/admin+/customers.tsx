@@ -11,6 +11,7 @@ import { useToast } from '#app/components/toaster.tsx'
 import { Drawer } from '#app/components/ui/drawer.tsx'
 import { Icon } from '#app/components/ui/icon.tsx'
 import { StatusButton } from '#app/components/ui/status-button.tsx'
+import { audit } from '#app/services/audit.server.ts'
 import { requireUserId } from '#app/utils/auth.server.ts'
 import { prisma } from '#app/utils/db.server.ts'
 import { sendTemporaryPasswordEmail } from '#app/utils/emails/send-temporary-password.server.ts'
@@ -41,9 +42,23 @@ const AddAdminSchema = z.object({
   adminUsername: UsernameSchema,
 })
 
+const DeleteCustomerSchema = z.object({
+  intent: z.literal('delete'),
+  customerId: z.string().min(1, 'Customer ID is required'),
+})
+
+const UpdateCustomerSchema = z.object({
+  intent: z.literal('update'),
+  customerId: z.string().min(1, 'Customer ID is required'),
+  name: z.string().min(1, 'Customer name is required'),
+  description: z.string().optional().default(''),
+})
+
 const ActionSchema = z.discriminatedUnion('intent', [
   CreateCustomerSchema,
   AddAdminSchema,
+  DeleteCustomerSchema,
+  UpdateCustomerSchema,
 ])
 
 export async function loader({ request }: LoaderFunctionArgs) {
@@ -339,6 +354,144 @@ export async function action({ request }: ActionFunctionArgs) {
     })
   }
 
+  // Handle update customer action
+  if (action.intent === 'update') {
+    const { customerId, name, description } = action
+
+    const existing = await prisma.customer.findUnique({ where: { id: customerId } })
+    if (!existing) {
+      return data({ error: 'Customer not found' }, { status: 404 })
+    }
+
+    // Enforce unique name constraint if changing name
+    if (name && name !== existing.name) {
+      const nameConflict = await prisma.customer.findFirst({
+        where: { name, NOT: { id: customerId } },
+      })
+      if (nameConflict) {
+        return data(
+          {
+            result: submission.reply({
+              fieldErrors: { name: ['Customer name already exists'] },
+            }),
+          },
+          { status: 400 },
+        )
+      }
+    }
+
+    await prisma.customer.update({
+      where: { id: customerId },
+      data: { name, description: description || '' },
+    })
+
+    await audit.admin({
+      action: 'CUSTOMER_UPDATE',
+      actorType: 'USER',
+      actorId: user.id,
+      customerId,
+      entityType: 'Customer',
+      entityId: customerId,
+      summary: `Updated customer: ${existing.name}${existing.name !== name ? ` -> ${name}` : ''}`,
+      status: 'SUCCESS',
+    })
+
+    return redirectWithToast('/admin/customers', {
+      type: 'success',
+      title: 'Customer updated',
+      description: `${name} has been saved.`,
+    })
+  }
+
+  // Handle delete customer action (with elevated override if description contains "Test-Customer")
+  if (action.intent === 'delete') {
+    const { customerId } = action
+
+    // Fetch the customer with minimal fields we need
+    const customer = await prisma.customer.findUnique({
+      where: { id: customerId },
+      select: { id: true, name: true, description: true },
+    })
+    if (!customer) {
+      return data({ error: 'Customer not found' }, { status: 404 })
+    }
+
+    const isElevatedDelete = (customer.description || '').includes('Test-Customer')
+
+    if (!isElevatedDelete) {
+      // New policy: only customers explicitly marked as "Test-Customer" can be deleted.
+      return redirectWithToast('/admin/customers', {
+        type: 'error',
+        title: 'Delete blocked',
+        description:
+          'Only customers marked as "Test-Customer" in the description can be deleted. You can edit the customer to add this marker if this is a test record.',
+      })
+    }
+
+    // Elevated delete: forcefully remove all related data regardless of dependencies
+    try {
+      await prisma.$transaction(async (tx) => {
+        // Submissions (will cascade submission documents & events)
+        await tx.submission.deleteMany({ where: { customerId } })
+
+        // Provider events for this customer
+        await tx.providerEvent.deleteMany({ where: { customerId } })
+
+        // Letters for this customer
+        await tx.prepayLetter.deleteMany({ where: { customerId } })
+        await tx.postpayLetter.deleteMany({ where: { customerId } })
+        await tx.postpayOtherLetter.deleteMany({ where: { customerId } })
+
+        // Providers (will cascade userNpis, provider list/registration snapshots)
+        await tx.provider.deleteMany({ where: { customerId } })
+
+        // Provider groups
+        await tx.providerGroup.deleteMany({ where: { customerId } })
+
+        // Users that belong to this customer (will cascade password, sessions, notifications, etc.)
+        await tx.user.deleteMany({ where: { customerId } })
+
+        // Finally, the customer
+        await tx.customer.delete({ where: { id: customerId } })
+      })
+
+      await audit.admin({
+        action: 'CUSTOMER_DELETE_FORCE',
+        actorType: 'USER',
+        actorId: user.id,
+        customerId,
+        entityType: 'Customer',
+        entityId: customerId,
+        summary: `Force-deleted Test-Customer: ${customer.name}`,
+        status: 'SUCCESS',
+      })
+
+      return redirectWithToast('/admin/customers', {
+        type: 'success',
+        title: 'Customer force-deleted',
+        description: `${customer.name} (Test-Customer) and all dependent data have been removed.`,
+      })
+    } catch (error) {
+      console.error('Force delete customer failed', error)
+      await audit.admin({
+        action: 'CUSTOMER_DELETE_FORCE',
+        actorType: 'USER',
+        actorId: user.id,
+        customerId,
+        entityType: 'Customer',
+        entityId: customerId,
+        summary: `Force delete failed for: ${customer.name}`,
+        status: 'FAILURE',
+        message: error instanceof Error ? error.message : String(error),
+      })
+      return redirectWithToast('/admin/customers', {
+        type: 'error',
+        title: 'Delete failed',
+        description: 'Could not delete the customer. Please check server logs.',
+      })
+    }
+  }
+
   return data({ error: 'Invalid action' }, { status: 400 })
 }
 
@@ -352,7 +505,7 @@ export default function AdminCustomersPage() {
   
   const [drawerState, setDrawerState] = useState<{
     isOpen: boolean
-    mode: 'create' | 'add-admin'
+    mode: 'create' | 'add-admin' | 'edit'
     customerId?: string
   }>({ isOpen: false, mode: 'create' })
 
@@ -365,14 +518,16 @@ export default function AdminCustomersPage() {
       setDrawerState({ isOpen: true, mode: 'create' })
     } else if (action === 'add-admin' && customerId) {
       setDrawerState({ isOpen: true, mode: 'add-admin', customerId })
+    } else if (action === 'edit' && customerId) {
+      setDrawerState({ isOpen: true, mode: 'edit', customerId })
     } else {
       setDrawerState({ isOpen: false, mode: 'create' })
     }
   }, [searchParams])
 
-  const openDrawer = (mode: 'create' | 'add-admin', customerId?: string) => {
+  const openDrawer = (mode: 'create' | 'add-admin' | 'edit', customerId?: string) => {
     const newParams = new URLSearchParams(searchParams)
-    newParams.set('action', mode === 'create' ? 'add' : 'add-admin')
+    newParams.set('action', mode === 'create' ? 'add' : mode === 'add-admin' ? 'add-admin' : 'edit')
     if (customerId) newParams.set('customerId', customerId)
     setSearchParams(newParams)
   }
@@ -403,6 +558,15 @@ export default function AdminCustomersPage() {
     lastResult: actionData && 'result' in actionData ? actionData.result : undefined,
     onValidate({ formData }) {
       return parseWithZod(formData, { schema: AddAdminSchema })
+    },
+  })
+
+  const [editForm, editFields] = useForm({
+    id: 'edit-customer-form',
+    constraint: getZodConstraint(UpdateCustomerSchema),
+    lastResult: actionData && 'result' in actionData ? actionData.result : undefined,
+    onValidate({ formData }) {
+      return parseWithZod(formData, { schema: UpdateCustomerSchema })
     },
   })
 
@@ -457,7 +621,7 @@ export default function AdminCustomersPage() {
               </div>
 
               {/* Customers List */}
-              <div className="bg-white shadow rounded-lg">
+              <div className="bg-white shadow rounded-lg flex flex-col">
                 <div className="px-6 py-4 border-b border-gray-200">
                   <div className="flex justify-between items-center">
                     <div>
@@ -495,27 +659,33 @@ export default function AdminCustomersPage() {
                     </button>
                   </div>
                 ) : (
-                  <div className="overflow-hidden">
+                  <div className="overflow-auto max-h-[70vh]">
                     <table className="min-w-full divide-y divide-gray-200">
-                      <thead className="bg-gray-50">
+                      <thead>
                         <tr>
-                          <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                          <th className="sticky top-0 z-10 bg-blue-900 px-6 py-3 text-left text-xs font-medium uppercase tracking-wider">
                             Customer
                           </th>
-                          <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                          <th className="sticky top-0 z-10 bg-blue-900 px-6 py-3 text-left text-xs font-medium uppercase tracking-wider">
                             BAA Number
                           </th>
-                          <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                          <th className="sticky top-0 z-10 bg-blue-900 px-6 py-3 text-left text-xs font-medium uppercase tracking-wider">
                             Admins  
                           </th>
-                          <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                          <th className="sticky top-0 z-10 bg-blue-900 px-6 py-3 text-left text-xs font-medium uppercase tracking-wider">
                             Created
                           </th>
-                          <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                          <th className="sticky top-0 z-10 bg-blue-900 px-6 py-3 text-left text-xs font-medium uppercase tracking-wider">
                             Status
                           </th>
-                          <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                            Actions
+                          <th className="sticky top-0 z-10 bg-blue-900 px-6 py-3 text-left text-xs font-medium uppercase tracking-wider">
+                            Add Admin
+                          </th>
+                          <th className="sticky top-0 z-10 bg-blue-900 px-6 py-3 text-left text-xs font-medium uppercase tracking-wider">
+                            Edit
+                          </th>
+                          <th className="sticky top-0 z-10 bg-blue-900 px-6 py-3 text-left text-xs font-medium uppercase tracking-wider">
+                            Delete
                           </th>
                         </tr>
                       </thead>
@@ -524,7 +694,14 @@ export default function AdminCustomersPage() {
                           <tr key={customer.id} className="hover:bg-gray-50">
                             <td className="px-6 py-4 whitespace-nowrap">
                               <div>
-                                <div className="text-sm font-medium text-gray-900">{customer.name}</div>
+                                <div className="flex items-center gap-2">
+                                  <div className="text-sm font-medium text-gray-900">{customer.name}</div>
+                                  {customer.description?.includes('Test-Customer') ? (
+                                    <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium bg-red-100 text-red-800 border border-red-200">
+                                      Test-Customer
+                                    </span>
+                                  ) : null}
+                                </div>
                                 <div className="text-sm text-gray-500">{customer.description}</div>
                               </div>
                             </td>
@@ -553,15 +730,47 @@ export default function AdminCustomersPage() {
                               </span>
                             </td>
                             <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
-                              <div className="flex items-center space-x-2">
-                                <button
-                                  onClick={() => openDrawer('add-admin', customer.id)}
-                                  className="text-green-600 hover:text-green-800 p-1"
-                                  title="Add admin"
+                              <button
+                                onClick={() => openDrawer('add-admin', customer.id)}
+                                className="text-green-600 hover:text-green-800 p-1"
+                                title="Add admin"
+                              >
+                                <Icon name="plus" className="h-4 w-4" />
+                              </button>
+                            </td>
+                            <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
+                              <button
+                                onClick={() => openDrawer('edit', customer.id)}
+                                className="text-blue-600 hover:text-blue-800 p-1"
+                                title="Edit customer"
+                              >
+                                <Icon name="pencil-2" className="h-4 w-4" />
+                              </button>
+                            </td>
+                            <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
+                              {customer.description?.includes('Test-Customer') ? (
+                                <Form
+                                  method="post"
+                                  onSubmit={(e) => {
+                                    const ok = confirm(
+                                      `Delete customer "${customer.name}"?\n\nThis is marked as Test-Customer and will be force-deleted with all related data.`,
+                                    )
+                                    if (!ok) e.preventDefault()
+                                  }}
                                 >
-                                  <Icon name="plus" className="h-4 w-4" />
-                                </button>
-                              </div>
+                                  <input type="hidden" name="intent" value="delete" />
+                                  <input type="hidden" name="customerId" value={customer.id} />
+                                  <button
+                                    type="submit"
+                                    className="text-red-600 hover:text-red-800 p-1"
+                                    title="Delete customer"
+                                  >
+                                    <Icon name="trash" className="h-4 w-4" />
+                                  </button>
+                                </Form>
+                              ) : (
+                                <span className="text-gray-400">—</span>
+                              )}
                             </td>
                           </tr>
                         ))}
@@ -783,6 +992,65 @@ export default function AdminCustomersPage() {
                   className="inline-flex justify-center py-2 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500"
                 >
                   Add Admin
+                </StatusButton>
+              </div>
+            </div>
+          </Form>
+        )}
+      </Drawer>
+
+      {/* Edit Customer Drawer */}
+      <Drawer
+        isOpen={drawerState.isOpen && drawerState.mode === 'edit'}
+        onClose={closeDrawer}
+        title={`Edit ${selectedCustomer?.name || 'Customer'}`}
+        size="lg"
+      >
+        {selectedCustomer && (
+          <Form method="post" {...getFormProps(editForm)}>
+            <input type="hidden" name="intent" value="update" />
+            <input type="hidden" name="customerId" value={selectedCustomer.id} />
+            <div className="space-y-6">
+              <div className="border-b border-gray-200 pb-4">
+                <h3 className="text-lg font-medium text-gray-900">Customer Details</h3>
+                <p className="text-sm text-gray-500">Update the customer information below.</p>
+              </div>
+
+              <Field
+                labelProps={{ children: 'Customer Name' }}
+                inputProps={{
+                  ...getInputProps(editFields.name, { type: 'text' }),
+                  defaultValue: selectedCustomer.name,
+                }}
+                errors={editFields.name.errors}
+              />
+
+              <Field
+                labelProps={{ children: 'Description (Optional)' }}
+                inputProps={{
+                  ...getInputProps(editFields.description, { type: 'text' }),
+                  defaultValue: selectedCustomer.description ?? '',
+                }}
+                errors={editFields.description.errors}
+              />
+
+              <ErrorList id={editForm.errorId} errors={editForm.errors} />
+
+              <div className="flex justify-end space-x-3 pt-6 border-t border-gray-200">
+                <button
+                  type="button"
+                  onClick={closeDrawer}
+                  className="inline-flex justify-center py-2 px-4 border border-gray-300 shadow-sm text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
+                >
+                  Cancel
+                </button>
+                <StatusButton
+                  type="submit"
+                  disabled={isPending}
+                  status={isPending ? 'pending' : 'idle'}
+                  className="inline-flex justify-center py-2 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
+                >
+                  Save Changes
                 </StatusButton>
               </div>
             </div>
