@@ -119,6 +119,7 @@ export async function action({ request }: { request: Request }) {
 	// Pull remember from verify session (set during login)
 	const verifySession = await verifySessionStorage.getSession(request.headers.get('cookie'))
 	const remember = !!verifySession.get('remember')
+	const logoutOthers = !!verifySession.get('logout-others')
 	await audit.security({
 		action: 'TWO_FACTOR_VERIFY',
 		actorType: 'USER',
@@ -131,7 +132,7 @@ export async function action({ request }: { request: Request }) {
 		summary: '2FA verified during login',
 		metadata: { method: 'TOTP' },
 	})
-	return handleNewSession({ request, session, remember, redirectTo, twoFAVerified: true })
+	return handleNewSession({ request, session, remember, redirectTo, twoFAVerified: true, logoutOthers })
 }
 
 export default function TwoFALoginPage({ loaderData, actionData }: { loaderData: any; actionData: any }) {

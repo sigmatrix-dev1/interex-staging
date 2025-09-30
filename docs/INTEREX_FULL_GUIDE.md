@@ -140,6 +140,26 @@ Tip: For local development, a `MOCKS=true` flag can enable mock responses in dev
 - PHI minimization: Strict audit logging heuristics; explicit opt-in required to log PHI
 - Session management: HttpOnly cookies; expiration and destruction on logout or admin resets
 
+### Sessions UI (Active Sessions)
+
+- Location: Profile → Active Sessions
+- Features:
+	- List all active sessions for the signed-in user, including:
+		- Device label with icon (phone for mobile UAs, laptop for desktop)
+		- Browser and OS summary (e.g., “Chrome 140 on macOS 10.15”)
+		- Signed in timestamp in Eastern Time with timezone label (EST/EDT)
+		- Last active timestamp (derived from session activity)
+		- IP address display following privacy mode
+	- Actions:
+		- Per-session Sign out to revoke a specific device
+		- “Sign Out Other Sessions” to log out everywhere else
+- Privacy modes for IP (configure via environment):
+	- `LOG_IP_MODE=raw` — store/show full IP
+	- `LOG_IP_MODE=masked` — store/show masked IP (/24 for IPv4, /48 for IPv6)
+	- `LOG_IP_MODE=hash` — store/show salted SHA-256 hash (set `IP_HASH_SALT`)
+- Notes:
+	- In local dev without proxy headers, IP may appear as “Unknown IP”. In production (Fly/Cloudflare), IP is taken from `fly-client-ip` or `cf-connecting-ip` (fallback to first `x-forwarded-for`).
+
 See: 2FA Implementation (full content included below in Appendix) and sections below
 
 ---

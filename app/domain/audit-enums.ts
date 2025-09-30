@@ -43,6 +43,14 @@ export const AuditActionValues = [
     /* Optional: user & auth events (handy for later) */
     'AUTH_LOGIN',
     'AUTH_LOGOUT',
+    // Auth actions currently emitted by the app (ensure nice labels)
+    'LOGIN_SUCCESS',
+    'LOGIN_FAILURE',
+    'LOGOUT',
+    // Session management actions
+    'SESSION_LOGOUT_OTHERS',
+    'SESSION_REVOKE',
+    'LOGOUT_OTHERS_ON_LOGIN',
     'USER_CREATE',
     'USER_CREATE_ATTEMPT',
     'USER_UPDATE',
@@ -126,6 +134,12 @@ export const AuditActionLabels: Record<AuditAction, string> = {
 
     AUTH_LOGIN: 'Auth: Login',
     AUTH_LOGOUT: 'Auth: Logout',
+    LOGIN_SUCCESS: 'Auth: Login (Success)',
+    LOGIN_FAILURE: 'Auth: Login (Failure)',
+    LOGOUT: 'Auth: Logout',
+    SESSION_LOGOUT_OTHERS: 'Session: Sign Out Other Sessions',
+    SESSION_REVOKE: 'Session: Revoke',
+    LOGOUT_OTHERS_ON_LOGIN: 'Auth: Logout Others on Login',
     USER_CREATE: 'User: Create',
     USER_CREATE_ATTEMPT: 'User: Create (Attempt)',
     USER_UPDATE: 'User: Update',

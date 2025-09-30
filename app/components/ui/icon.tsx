@@ -17,6 +17,7 @@ import {
 	UserGroupIcon as HeroUserGroupIcon,
 	DocumentPlusIcon as HeroDocumentPlusIcon,
 	TrashIcon as HeroTrashIcon,
+  DevicePhoneMobileIcon as HeroDevicePhoneMobileIcon,
 } from '@heroicons/react/24/outline'
 import { type SVGProps } from 'react'
 import { cn } from '#app/utils/misc.tsx'
@@ -110,6 +111,7 @@ const HERO_ICON_COMPONENTS = {
 	'hero:document-plus': HeroDocumentPlusIcon,
 	'hero:bell': HeroBellIcon,
 	'hero:trash': HeroTrashIcon,
+  'hero:phone': HeroDevicePhoneMobileIcon,
 } as const
 
 // Bridge: allow plain "plus" usage even though it's not in sprite; map to hero:plus.

@@ -1,3 +1,4 @@
+import { randomUUID, createHash } from 'node:crypto'
 import { getUserId, requireUserId } from '#app/utils/auth.server.ts'
 import { prisma } from '#app/utils/db.server.ts'
 
@@ -51,12 +52,16 @@ export async function extractRequestContext(request: Request, opts: RequestConte
     }
   }
 
+  // Prefer trusted proxy headers when present
+  const flyIp = request.headers.get('fly-client-ip') || ''
+  const cfIp = request.headers.get('cf-connecting-ip') || ''
   const forwarded = request.headers.get('x-forwarded-for') || ''
-  const ip = forwarded.split(',')[0]?.trim() || undefined
+  const rawIp = (flyIp || cfIp || forwarded.split(',')[0]?.trim() || undefined) as string | undefined
+  const ip = sanitizeIp(rawIp)
   const userAgent = request.headers.get('user-agent') || undefined
 
   return {
-    requestId: request.headers.get(HDR_REQUEST_ID) || crypto.randomUUID(),
+  requestId: request.headers.get(HDR_REQUEST_ID) || randomUUID(),
     traceId: request.headers.get(HDR_TRACE_ID) || undefined,
     spanId: request.headers.get(HDR_SPAN_ID) || undefined,
     ip,
@@ -66,4 +71,25 @@ export async function extractRequestContext(request: Request, opts: RequestConte
     actorDisplay: actorDisplay ?? null,
     rolesCsv: rolesCsv ?? null,
   }
+}
+
+function sanitizeIp(ip?: string) {
+  if (!ip) return undefined
+  const mode = process.env.LOG_IP_MODE || 'raw'
+  if (mode === 'raw') return ip
+  if (mode === 'masked') {
+    // IPv4: a.b.c.d -> a.b.c.0/24; IPv6: keep first 3 hextets /48
+    if (/^\d+\.\d+\.\d+\.\d+$/.test(ip)) {
+      const parts = ip.split('.')
+      return `${parts[0]}.${parts[1]}.${parts[2]}.0/24`
+    }
+    const hex = ip.split(':')
+    return `${hex.slice(0, 3).join(':')}::/48`
+  }
+  if (mode === 'hash') {
+    const salt = process.env.IP_HASH_SALT || ''
+    const h = createHash('sha256').update(salt + ip).digest('hex')
+    return h
+  }
+  return ip
 }

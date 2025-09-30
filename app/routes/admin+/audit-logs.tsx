@@ -418,12 +418,22 @@ export default function AdminAuditLogsPage() {
                       <Td className="min-w-[320px] w-[420px] overflow-hidden">
                         <div className="text-gray-900 truncate" title={row.summary || row.message || ''}>{row.summary || '—'}</div>
                         {row.message && <div className="text-gray-500 truncate text-[11px]" title={row.message}>{row.message}</div>}
-                        {(row.requestId || row.traceId) && (
+                        {(() => {
+                          const metadata = safeParse(row.metadata) as any
+                          const sessionId = metadata && typeof metadata.sessionId === 'string' ? metadata.sessionId : undefined
+                          const hasIds = Boolean(row.requestId || row.traceId || sessionId)
+                          return hasIds ? (
                           <div className="text-[10px] text-gray-400 mt-1 space-y-0.5">
                             {row.requestId && <div>req: {row.requestId} <CopyBtn value={row.requestId} label="requestId" /></div>}
                             {row.traceId && <div>trace: {row.traceId} <CopyBtn value={row.traceId} label="traceId" /></div>}
+                            {sessionId && (
+                              <div>
+                                session: <span title={sessionId} className="font-mono">{sessionId.slice(0, 8)}…</span> <CopyBtn value={sessionId} label="sessionId" />
+                              </div>
+                            )}
                           </div>
-                        )}
+                          ) : null
+                        })()}
                       </Td>
                     )}
                     {visibleCols.includes('chain') && (

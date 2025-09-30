@@ -3,7 +3,9 @@
 import { invariant } from '@epic-web/invariant'
 import { redirect } from 'react-router'
 import { safeRedirect } from 'remix-utils/safe-redirect'
+import { audit } from '#app/services/audit.server.ts'
 import { getUserId, sessionKey, isPasswordExpired } from '#app/utils/auth.server.ts'
+import { extractRequestContext } from '#app/utils/request-context.server.ts'
 import { prisma } from '#app/utils/db.server.ts'
 import { combineResponseInits } from '#app/utils/misc.tsx'
 import { getDashboardUrl } from '#app/utils/role-redirect.server.ts'
@@ -15,6 +17,7 @@ import { type VerifyFunctionArgs } from './verify.server.ts'
 const verifiedTimeKey = 'verified-time'
 const unverifiedSessionIdKey = 'unverified-session-id'
 const rememberKey = 'remember'
+const logoutOthersKey = 'logout-others'
 
 export async function handleNewSession(
 	{
@@ -23,12 +26,14 @@ export async function handleNewSession(
 		redirectTo,
 		remember,
 		twoFAVerified,
+		logoutOthers,
 	}: {
 		request: Request
 		session: { userId: string; id: string; expirationDate: Date }
 		redirectTo?: string
 		remember: boolean
 		twoFAVerified?: boolean
+		logoutOthers?: boolean
 	},
 	responseInit?: ResponseInit,
 ) {
@@ -39,6 +44,24 @@ export async function handleNewSession(
 		)
 		authSession.set(sessionKey, session.id)
 		authSession.set(verifiedTimeKey, Date.now())
+
+		// If requested, sign out other sessions for this user before committing
+		if (logoutOthers) {
+			const ctx = await extractRequestContext(request, { requireUser: false })
+			const result = await prisma.session.deleteMany({
+				where: { userId: session.userId, id: { not: session.id } },
+			})
+			await audit.auth({
+				action: 'LOGOUT_OTHERS_ON_LOGIN',
+				actorType: 'USER',
+				actorId: session.userId,
+				actorIp: ctx.ip ?? null,
+				actorUserAgent: ctx.userAgent ?? null,
+				summary: 'Logged out other active sessions after login',
+				status: 'SUCCESS',
+				metadata: { newSessionId: session.id, deletedCount: result.count },
+			})
+		}
 
 		// Determine redirect URL based on user role or provided redirectTo
 		// Cast for mustChangePassword field until Prisma client types regenerate
@@ -158,6 +181,7 @@ export async function handleNewSession(
 	)
 	verifySession.set(unverifiedSessionIdKey, session.id)
 	verifySession.set(rememberKey, !!remember)
+	if (logoutOthers) verifySession.set(logoutOthersKey, true)
 
 	const params = new URLSearchParams()
 	params.set('userId', session.userId)
@@ -187,6 +211,7 @@ export async function handleVerification({
 	)
 
 	const remember = verifySession.get(rememberKey)
+	const shouldLogoutOthers = verifySession.get(logoutOthersKey)
 	const { redirectTo } = submission.value
 	const headers = new Headers()
 	authSession.set(verifiedTimeKey, Date.now())
@@ -205,6 +230,27 @@ export async function handleVerification({
 			})
 		}
 		authSession.set(sessionKey, unverifiedSessionId)
+
+		// If requested, sign out other sessions for this user now that 2FA succeeded
+		if (shouldLogoutOthers) {
+			const current = await prisma.session.findUnique({ where: { id: unverifiedSessionId }, select: { userId: true, id: true } })
+			if (current?.userId) {
+				const del = await prisma.session.deleteMany({ where: { userId: current.userId, id: { not: current.id } } })
+				try {
+					const ctx = await extractRequestContext(request, { requireUser: false })
+					await audit.auth({
+						action: 'LOGOUT_OTHERS_ON_LOGIN',
+						actorType: 'USER',
+						actorId: current.userId,
+						actorIp: ctx.ip ?? null,
+						actorUserAgent: ctx.userAgent ?? null,
+						status: 'SUCCESS',
+						summary: 'Logged out other active sessions after 2FA login',
+						metadata: { newSessionId: unverifiedSessionId, deletedCount: del.count },
+					})
+				} catch {}
+			}
+		}
 
 		headers.append(
 			'set-cookie',

@@ -38,7 +38,7 @@ export async function getUserId(request: Request) {
     if (!sessionId) return null
 
     const session = await prisma.session.findUnique({
-        select: { userId: true, expirationDate: true },
+        select: { id: true, userId: true, expirationDate: true },
         where: { id: sessionId, expirationDate: { gt: new Date() } },
     })
 
@@ -64,6 +64,11 @@ export async function getUserId(request: Request) {
                 'set-cookie': await authSessionStorage.destroySession(authSession),
             },
         })
+    }
+
+    // Update last active (updatedAt) best-effort and ignore failures
+    if (session?.id) {
+        void prisma.session.update({ where: { id: session.id }, data: { updatedAt: new Date() } }).catch(() => {})
     }
 
     return session.userId
@@ -119,6 +124,8 @@ export async function login(
             actorType: 'USER',
             actorId: undefined,
             actorDisplay: username,
+            actorIp: ctx.ip ?? null,
+            actorUserAgent: ctx.userAgent ?? null,
             customerId: null,
             requestId: ctx.requestId,
             traceId: ctx.traceId,
@@ -143,11 +150,13 @@ export async function login(
         actorType: 'USER',
         actorId: verified.id,
         actorDisplay: username,
+        actorIp: ctx.ip ?? null,
+        actorUserAgent: ctx.userAgent ?? null,
         customerId: ctx.customerId ?? null,
         requestId: ctx.requestId,
         traceId: ctx.traceId,
         spanId: ctx.spanId,
-        metadata: { username, sessionId: session.id },
+        metadata: { username, sessionId: session.id, ip: ctx.ip, userAgent: ctx.userAgent },
         summary: 'Login successful',
         status: 'SUCCESS',
     })
@@ -292,11 +301,13 @@ export async function logout(
         actorType: 'USER',
         actorId: actorId,
         actorDisplay: ctx.actorDisplay,
+        actorIp: ctx.ip ?? null,
+        actorUserAgent: ctx.userAgent ?? null,
         customerId: ctx.customerId ?? null,
         requestId: ctx.requestId,
         traceId: ctx.traceId,
         spanId: ctx.spanId,
-        metadata: { sessionId, redirectTo },
+        metadata: { sessionId, redirectTo, ip: ctx.ip, userAgent: ctx.userAgent },
         summary: 'User logout',
         status: 'SUCCESS',
     })

@@ -37,6 +37,10 @@ const schema = z.object({
 
     // Security policy flags
     REQUIRE_2FA_ON_LOGIN: z.enum(['true', 'false']).optional(),
+
+    // Privacy: how to record client IPs in audit logs: 'raw' | 'masked' | 'hash'
+    LOG_IP_MODE: z.enum(['raw', 'masked', 'hash']).optional(),
+    IP_HASH_SALT: z.string().optional(),
 })
 
 declare global {
@@ -61,6 +65,7 @@ export function getEnv() {
         MODE: process.env.NODE_ENV,
         SENTRY_DSN: process.env.SENTRY_DSN,
         ALLOW_INDEXING: process.env.ALLOW_INDEXING,
+        LOG_IP_MODE: process.env.LOG_IP_MODE,
     }
 }
 

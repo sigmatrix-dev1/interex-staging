@@ -12,7 +12,8 @@ import { GeneralErrorBoundary } from '#app/components/error-boundary.tsx'
 import { CheckboxField, ErrorList, Field } from '#app/components/forms.tsx'
 import { Spacer } from '#app/components/spacer.tsx'
 import { StatusButton } from '#app/components/ui/status-button.tsx'
-import { login, requireAnonymous } from '#app/utils/auth.server.ts'
+import { login, requireAnonymous, verifyUserPassword } from '#app/utils/auth.server.ts'
+import { prisma } from '#app/utils/db.server.ts'
 import { checkHoneypot } from '#app/utils/honeypot.server.ts'
 import { useIsPending } from '#app/utils/misc.tsx'
 import { PasswordSchema, UsernameSchema } from '#app/utils/user-validation.ts'
@@ -28,6 +29,8 @@ const LoginFormSchema = z.object({
 	password: PasswordSchema,
 	redirectTo: z.string().optional(),
 	remember: z.coerce.boolean().optional(),
+  // When true, user acknowledges that logging in here will sign out other sessions
+  confirmLogoutOthers: z.coerce.boolean().optional(),
 })
 
 // Passkey auth temporarily removed pending re-introduction with updated UX
@@ -53,15 +56,52 @@ export async function action({ request }: { request: Request }) {
 		)
 	}
 
-	const { username, password, remember, redirectTo } = submission.value
+	const { username, password, remember, redirectTo, confirmLogoutOthers } = submission.value
 
-	const session = await login(request, { username, password })
-	if (!session) {
-		// Add a form-level error
+	// First, verify credentials without creating a session so we can decide UX
+	const verified = await verifyUserPassword({ username }, password)
+	if (!verified) {
 		return data(
 			{
 				result: submission.reply({
 					formErrors: ['Invalid username or password'],
+					hideFields: ['password'],
+				}),
+			},
+			{ status: 400 },
+		)
+	}
+
+	// Check if user already has active sessions
+	const activeCount = await prisma.session.count({
+		where: { userId: verified.id, expirationDate: { gt: new Date() } },
+	})
+
+	if (activeCount > 0 && !confirmLogoutOthers) {
+		// Ask user to confirm proceeding. Do NOT hide password so they can continue without retyping.
+		return data(
+			{
+				warnExistingSessions: activeCount,
+				result: submission.reply({
+					formErrors: [
+						activeCount === 1
+							? 'There is already an active session for this account. Logging in here will sign out the other session.'
+							: `There are ${activeCount} active sessions for this account. Logging in here will sign out all other sessions.`,
+					],
+				}),
+			},
+			{ status: 200 },
+		)
+	}
+
+	// Proceed: create new session and then sign out other sessions
+	const session = await login(request, { username, password })
+	if (!session) {
+		// Very unlikely (race), but handle just in case
+		return data(
+			{
+				result: submission.reply({
+					formErrors: ['Login failed. Please try again.'],
 					hideFields: ['password'],
 				}),
 			},
@@ -77,6 +117,7 @@ export async function action({ request }: { request: Request }) {
 		session,
 		remember: remember ?? false,
 		redirectTo,
+	    logoutOthers: true,
 	})
 }
 
@@ -99,6 +140,8 @@ export default function LoginPage({ actionData }: { actionData: any }) {
 	// 👁️ Show/Hide password toggle
 	const [showPassword, setShowPassword] = useState(false)
 
+	const showSessionWarning = Boolean(actionData?.warnExistingSessions)
+
 	return (
 		<div className="flex min-h-full flex-col justify-center pt-20 pb-32 bg-gray-50">
 			<div className="mx-auto w-full max-w-md px-4 sm:px-0">
@@ -112,6 +155,15 @@ export default function LoginPage({ actionData }: { actionData: any }) {
 							</p>
 						</div>
 						<Spacer size="xs" />
+
+            {showSessionWarning && (
+              <div className="mb-3 rounded border border-amber-300 bg-amber-50 text-amber-900 p-3 text-sm">
+                <div className="font-medium">You’re already signed in elsewhere</div>
+                <div>
+                  Logging in here will sign out your other active session{actionData?.warnExistingSessions > 1 ? 's' : ''}.
+                </div>
+              </div>
+            )}
 
 						<Form method="POST" {...getFormProps(form)}>
 							<input type="hidden" name="intent" value="submit" />
@@ -194,16 +246,21 @@ export default function LoginPage({ actionData }: { actionData: any }) {
 							/>
 							<ErrorList errors={form.errors} id={form.errorId} />
 
+							{/* Confirmation flag so second submit proceeds and logs out others */}
+							{showSessionWarning && (
+								<input type="hidden" name="confirmLogoutOthers" value="true" />
+							)}
+
 							<div className="flex items-center justify-between gap-6 pt-3">
 								<StatusButton
 									className="w-full rounded-md bg-gray-900 text-white shadow-sm
-												 hover:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500
-												 focus:ring-offset-2 transition"
+													 hover:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500
+													 focus:ring-offset-2 transition"
 									status={isPending ? 'pending' : (form.status ?? 'idle')}
 									type="submit"
 									disabled={isPending}
 								>
-									Log in
+									{showSessionWarning ? 'Continue and sign out others' : 'Log in'}
 								</StatusButton>
 							</div>
 						</Form>

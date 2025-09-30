@@ -2,15 +2,17 @@ import { parseWithZod } from '@conform-to/zod'
 import { invariantResponse } from '@epic-web/invariant'
 import { type SEOHandle } from '@nasa-gcn/remix-seo'
 import { Img } from 'openimg/react'
-import { data, Link, useFetcher } from 'react-router'
+import { data, Link, useFetcher, Form, redirect } from 'react-router'
 import { z } from 'zod'
 import { Field } from '#app/components/forms.tsx'
 import { Button } from '#app/components/ui/button.tsx'
 import { Icon } from '#app/components/ui/icon.tsx'
 import { StatusButton } from '#app/components/ui/status-button.tsx'
 import { requireUserId, sessionKey } from '#app/utils/auth.server.ts'
+import { audit } from '#app/services/audit.server.ts'
+import { extractRequestContext } from '#app/utils/request-context.server.ts'
 import { prisma } from '#app/utils/db.server.ts'
-import { getUserImgSrc, useDoubleCheck } from '#app/utils/misc.tsx'
+import { cn, getUserImgSrc, useDoubleCheck } from '#app/utils/misc.tsx'
 import { authSessionStorage } from '#app/utils/session.server.ts'
 import { NameSchema, UsernameSchema } from '#app/utils/user-validation.ts'
 import { type Route } from './+types/profile.index.ts'
@@ -26,6 +28,12 @@ const ProfileFormSchema = z.object({
 
 export async function loader({ request }: Route.LoaderArgs) {
     const userId = await requireUserId(request)
+    // Identify the current session id from cookie
+    const authSession = await authSessionStorage.getSession(
+        request.headers.get('cookie'),
+    )
+    const currentSessionId = (authSession.get(sessionKey) as string | undefined) || null
+
     const user = await prisma.user.findUniqueOrThrow({
         where: { id: userId },
         select: {
@@ -48,10 +56,49 @@ export async function loader({ request }: Route.LoaderArgs) {
         where: { userId },
     })
 
+    // Fetch all active sessions for this user
+    const sessions = await prisma.session.findMany({
+        where: { userId, expirationDate: { gt: new Date() } },
+        orderBy: { createdAt: 'desc' },
+        select: { id: true, createdAt: true, updatedAt: true, expirationDate: true },
+    })
+
+    // Enrich sessions with IP and User-Agent from last LOGIN_SUCCESS audit for that session
+    // We fetch recent AUTH events for this user and map by sessionId embedded in metadata
+    const authEvents = await prisma.auditEvent.findMany({
+        where: { category: 'AUTH', action: 'LOGIN_SUCCESS', actorId: userId },
+        orderBy: { createdAt: 'desc' },
+        take: 100,
+        select: { createdAt: true, actorIp: true, actorUserAgent: true, metadata: true },
+    })
+    const metaBySession: Record<string, { ip?: string | null; userAgent?: string | null; loginAt?: string }> = {}
+    for (const ev of authEvents) {
+        try {
+            const md: any = ev.metadata ? JSON.parse(ev.metadata) : undefined
+            const sid: string | undefined = md?.sessionId as string | undefined
+            if (sid && !metaBySession[sid]) {
+                const mdIp = md && typeof md.ip === 'string' ? (md.ip as string) : undefined
+                const mdUa = md && typeof md.userAgent === 'string' ? (md.userAgent as string) : undefined
+                metaBySession[sid] = {
+                    ip: ev.actorIp ?? mdIp ?? null,
+                    userAgent: ev.actorUserAgent ?? mdUa ?? null,
+                    loginAt: ev.createdAt?.toISOString?.() ?? undefined,
+                }
+            }
+        } catch {}
+    }
+
     return {
         user,
         hasPassword: Boolean(password),
         isTwoFactorEnabled: Boolean(user.twoFactorEnabled),
+        sessions: sessions.map((s) => ({
+            ...s,
+            ip: metaBySession[s.id]?.ip ?? null,
+            userAgent: metaBySession[s.id]?.userAgent ?? null,
+            loginAt: metaBySession[s.id]?.loginAt ?? null,
+        })),
+        currentSessionId,
     }
 }
 
@@ -62,6 +109,7 @@ type ProfileActionArgs = {
 }
 const profileUpdateActionIntent = 'update-profile'
 const signOutOfSessionsActionIntent = 'sign-out-of-sessions'
+const revokeSessionIntent = 'revoke-session'
 
 export async function action({ request }: Route.ActionArgs) {
     const userId = await requireUserId(request)
@@ -73,6 +121,9 @@ export async function action({ request }: Route.ActionArgs) {
         }
         case signOutOfSessionsActionIntent: {
             return signOutOfSessionsAction({ request, userId, formData })
+        }
+        case revokeSessionIntent: {
+            return revokeSessionAction({ request, userId, formData })
         }
         default: {
             throw new Response(`Invalid intent "${intent}"`, { status: 400 })
@@ -167,6 +218,8 @@ export default function EditUserProfile({ loaderData }: Route.ComponentProps) {
                 </div>
 
                 <SignOutOfSessions loaderData={loaderData} />
+
+                <ActiveSessionsList loaderData={loaderData} />
             </div>
         </div>
     )
@@ -257,9 +310,59 @@ async function signOutOfSessionsAction({ request, userId }: ProfileActionArgs) {
         sessionId,
         'You must be authenticated to sign out of other sessions',
     )
-    await prisma.session.deleteMany({
+    const ctx = await extractRequestContext(request, { requireUser: false })
+    const result = await prisma.session.deleteMany({
         where: { userId, id: { not: sessionId } },
     })
+    await audit.auth({
+        action: 'SESSION_LOGOUT_OTHERS',
+        actorType: 'USER',
+        actorId: userId,
+        actorIp: ctx.ip ?? null,
+        actorUserAgent: ctx.userAgent ?? null,
+        status: 'SUCCESS',
+        summary: 'User signed out of other active sessions',
+        metadata: { keptSessionId: sessionId, deletedCount: result.count },
+    })
+    return { status: 'success' } as const
+}
+
+async function revokeSessionAction({ request, userId, formData }: ProfileActionArgs) {
+    const sessionIdToDelete = String(formData.get('sessionId') || '')
+    if (!sessionIdToDelete) throw new Response('Missing sessionId', { status: 400 })
+
+    const authSession = await authSessionStorage.getSession(
+        request.headers.get('cookie'),
+    )
+    const currentSessionId = (authSession.get(sessionKey) as string | undefined) || null
+
+    // Ensure the session belongs to this user
+    const target = await prisma.session.findUnique({ where: { id: sessionIdToDelete }, select: { userId: true } })
+    if (!target || target.userId !== userId) throw new Response('Not found', { status: 404 })
+
+    await prisma.session.delete({ where: { id: sessionIdToDelete } })
+    // Audit the targeted revoke
+    const ctx = await extractRequestContext(request, { requireUser: false })
+    await audit.auth({
+        action: 'SESSION_REVOKE',
+        actorType: 'USER',
+        actorId: userId,
+        actorIp: ctx.ip ?? null,
+        actorUserAgent: ctx.userAgent ?? null,
+        status: 'SUCCESS',
+        summary: 'User revoked a specific session',
+        metadata: { sessionId: sessionIdToDelete, selfRevoked: currentSessionId === sessionIdToDelete },
+    })
+
+    // If the user revoked their current session, log them out
+    if (currentSessionId && currentSessionId === sessionIdToDelete) {
+        authSession.unset(sessionKey)
+        return redirect('/login', {
+            headers: {
+                'set-cookie': await authSessionStorage.commitSession(authSession),
+            },
+        })
+    }
     return { status: 'success' } as const
 }
 
@@ -309,6 +412,139 @@ function SignOutOfSessions({
                     </div>
                 </div>
             )}
+        </div>
+    )
+}
+
+function ActiveSessionsList({
+    loaderData,
+}: {
+    loaderData: Awaited<ReturnType<typeof loader>>
+}) {
+    const fetcher = useFetcher<typeof revokeSessionAction>()
+    const sessions = loaderData.sessions
+    if (!sessions?.length) return null
+
+    function formatUserAgent(ua?: string | null) {
+        if (!ua) return 'Unknown device'
+        const s = ua
+        // Detect browser (order matters)
+    let browser = 'Unknown'
+    let version: string = ''
+        // Edge
+    let m = s.match(/Edg\/(\d+)/)
+    if (m) { browser = 'Edge'; version = m[1] || '' }
+        // Opera
+    if (browser === 'Unknown') { m = s.match(/OPR\/(\d+)/); if (m) { browser = 'Opera'; version = m[1] || '' } }
+        // Firefox
+    if (browser === 'Unknown') { m = s.match(/Firefox\/(\d+)/); if (m) { browser = 'Firefox'; version = m[1] || '' } }
+        // Chrome (exclude Edge/Opera already matched)
+    if (browser === 'Unknown') { m = s.match(/Chrome\/(\d+)/); if (m) { browser = 'Chrome'; version = m[1] || '' } }
+        // Safari (Version/x.y present for Safari)
+    if (browser === 'Unknown') { m = s.match(/Version\/(\d+).+Safari\//); if (m) { browser = 'Safari'; version = m[1] || '' } }
+
+        // Detect OS
+        let os = 'Unknown OS'
+        // Windows
+        m = s.match(/Windows NT ([0-9.]+)/)
+        if (m) {
+            const map: Record<string, string> = { '10.0': 'Windows 10/11', '6.3': 'Windows 8.1', '6.2': 'Windows 8', '6.1': 'Windows 7' }
+            const v = m[1] || ''
+            os = v ? (map[v] || `Windows ${v}`) : 'Windows'
+        }
+        // macOS
+        if (os === 'Unknown OS') {
+            m = s.match(/Mac OS X (\d+)[_.](\d+)(?:[_.](\d+))?/)
+            if (m) {
+                const major = m[1], minor = m[2]
+                os = `macOS ${major}.${minor}`
+            }
+        }
+        // iOS
+        if (os === 'Unknown OS') {
+            m = s.match(/iPhone OS (\d+)[_.](\d+)/)
+            if (m) os = `iOS ${m[1]}.${m[2]}`
+        }
+        // Android
+        if (os === 'Unknown OS') {
+            m = s.match(/Android (\d+(?:\.\d+)?)/)
+            if (m) os = `Android ${m[1]}`
+        }
+
+        return `${browser}${version ? ' ' + version : ''} on ${os}`
+    }
+
+    function formatET(date: Date) {
+        try {
+            return new Intl.DateTimeFormat('en-US', {
+                timeZone: 'America/New_York',
+                dateStyle: 'medium',
+                timeStyle: 'medium',
+                timeZoneName: 'short', // shows EST/EDT as appropriate
+            }).format(date)
+        } catch {
+            return date.toLocaleString('en-US', { timeZone: 'America/New_York' })
+        }
+    }
+
+    function isMobile(ua?: string | null) {
+        if (!ua) return false
+        return /(Mobi|Android|iPhone|iPad|iPod)/i.test(ua)
+    }
+
+    return (
+        <div className="p-3 rounded-lg border">
+            <div className="font-medium mb-2">Active Sessions</div>
+            <div className="text-sm text-gray-500 mb-4">Manage where you're signed in. Signing out a session logs that device out.</div>
+            <ul className="divide-y">
+                {sessions.map((s) => {
+                    const isCurrent = s.id === loaderData.currentSessionId
+                    const ua = formatUserAgent(s.userAgent)
+                    const ip = s.ip || 'Unknown IP'
+                    const mobile = isMobile(s.userAgent)
+                    const tzLabel = 'ET'
+                    const lastActive = s.updatedAt ? new Date(s.updatedAt as any) : new Date(s.createdAt as any)
+                    return (
+                        <li key={s.id} className="py-3 flex items-start gap-3">
+                            <Icon name={mobile ? 'hero:phone' : 'laptop'} className={cn('size-5 mt-1', isCurrent ? 'text-green-600' : 'text-gray-600')} />
+                            <div className="flex-1 min-w-0">
+                                <div className="flex items-center justify-between gap-3">
+                                    <div className="truncate">
+                                        <div className="font-medium truncate">{isCurrent ? 'This device' : 'Other device'}</div>
+                                        <div className="text-xs text-gray-500 truncate">{ua}</div>
+                                    </div>
+                                    <div className="shrink-0">
+                                        {isCurrent ? (
+                                            <Form method="POST">
+                                                <input type="hidden" name="intent" value={revokeSessionIntent} />
+                                                <input type="hidden" name="sessionId" value={s.id} />
+                                                <Button variant="outline" size="sm">Sign out</Button>
+                                            </Form>
+                                        ) : (
+                                            <fetcher.Form method="POST">
+                                                <input type="hidden" name="intent" value={revokeSessionIntent} />
+                                                <input type="hidden" name="sessionId" value={s.id} />
+                                                <StatusButton size="sm" variant="outline" status={fetcher.state !== 'idle' ? 'pending' : (fetcher.data?.status ?? 'idle')}>Sign out</StatusButton>
+                                            </fetcher.Form>
+                                        )}
+                                    </div>
+                                </div>
+                                <div className="text-xs text-gray-500 mt-1">
+                                    <span>IP: {ip}</span>
+                                    <span className="mx-2">•</span>
+                                    <span>
+                                        Signed in: {formatET(s.loginAt ? new Date(s.loginAt) : new Date(s.createdAt as any))} ({tzLabel})
+                                    </span>
+                                    <span className="mx-2">•</span>
+                                    <span>
+                                        Last active: {formatET(lastActive)} ({tzLabel})
+                                    </span>
+                                </div>
+                            </div>
+                        </li>
+                    )
+                })}
+            </ul>
         </div>
     )
 }
