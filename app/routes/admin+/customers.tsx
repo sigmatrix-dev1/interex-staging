@@ -3,7 +3,7 @@
 import { getFormProps, getInputProps, useForm } from '@conform-to/react'
 import { getZodConstraint, parseWithZod } from '@conform-to/zod'
 import { useState, useEffect } from 'react'
-import { data, useLoaderData, Form, useSearchParams, useActionData, type LoaderFunctionArgs, type ActionFunctionArgs , Link  } from 'react-router'
+import { data, useLoaderData, Form, useSearchParams, useActionData, type LoaderFunctionArgs, type ActionFunctionArgs , Link, useNavigation  } from 'react-router'
 import { z } from 'zod'
 import { Field, ErrorList } from '#app/components/forms.tsx'
 import { InterexLayout } from '#app/components/interex-layout.tsx'
@@ -45,6 +45,7 @@ const AddAdminSchema = z.object({
 const DeleteCustomerSchema = z.object({
   intent: z.literal('delete'),
   customerId: z.string().min(1, 'Customer ID is required'),
+  confirmName: z.string().min(1, 'Confirmation is required'),
 })
 
 const UpdateCustomerSchema = z.object({
@@ -405,7 +406,7 @@ export async function action({ request }: ActionFunctionArgs) {
 
   // Handle delete customer action (with elevated override if description contains "Test-Customer")
   if (action.intent === 'delete') {
-    const { customerId } = action
+    const { customerId, confirmName } = action
 
     // Fetch the customer with minimal fields we need
     const customer = await prisma.customer.findUnique({
@@ -417,6 +418,15 @@ export async function action({ request }: ActionFunctionArgs) {
     }
 
     const isElevatedDelete = (customer.description || '').includes('Test-Customer')
+
+    // Extra guard: require exact name confirmation like GitHub
+    if (confirmName !== customer.name) {
+      return redirectWithToast('/admin/customers', {
+        type: 'error',
+        title: 'Confirmation did not match',
+        description: `Type the exact customer name: ${customer.name}`,
+      })
+    }
 
     if (!isElevatedDelete) {
       // New policy: only customers explicitly marked as "Test-Customer" can be deleted.
@@ -500,6 +510,8 @@ export default function AdminCustomersPage() {
   const actionData = useActionData<typeof action>()
   const [searchParams, setSearchParams] = useSearchParams()
   const isPending = useIsPending()
+  const [confirmDelete, setConfirmDelete] = useState<{ id: string; name: string } | null>(null)
+  const [confirmText, setConfirmText] = useState('')
   
   useToast(toast)
   
@@ -749,25 +761,17 @@ export default function AdminCustomersPage() {
                             </td>
                             <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
                               {customer.description?.includes('Test-Customer') ? (
-                                <Form
-                                  method="post"
-                                  onSubmit={(e) => {
-                                    const ok = confirm(
-                                      `Delete customer "${customer.name}"?\n\nThis is marked as Test-Customer and will be force-deleted with all related data.`,
-                                    )
-                                    if (!ok) e.preventDefault()
+                                <button
+                                  type="button"
+                                  className="text-red-600 hover:text-red-800 p-1"
+                                  title="Delete customer"
+                                  onClick={() => {
+                                    setConfirmDelete({ id: customer.id, name: customer.name })
+                                    setConfirmText('')
                                   }}
                                 >
-                                  <input type="hidden" name="intent" value="delete" />
-                                  <input type="hidden" name="customerId" value={customer.id} />
-                                  <button
-                                    type="submit"
-                                    className="text-red-600 hover:text-red-800 p-1"
-                                    title="Delete customer"
-                                  >
-                                    <Icon name="trash" className="h-4 w-4" />
-                                  </button>
-                                </Form>
+                                  <Icon name="trash" className="h-4 w-4" />
+                                </button>
                               ) : (
                                 <span className="text-gray-400">—</span>
                               )}
@@ -1057,6 +1061,106 @@ export default function AdminCustomersPage() {
           </Form>
         )}
       </Drawer>
+
+      <CustomersDeleteModal
+        confirmDelete={confirmDelete}
+        setConfirmDelete={setConfirmDelete}
+        confirmText={confirmText}
+        setConfirmText={setConfirmText}
+      />
     </>
+  )
+}
+
+// Delete Confirmation Modal (GitHub-style: type exact name)
+export function CustomersDeleteModal({
+  confirmDelete,
+  setConfirmDelete,
+  confirmText,
+  setConfirmText,
+}: {
+  confirmDelete: { id: string; name: string } | null
+  setConfirmDelete: (v: { id: string; name: string } | null) => void
+  confirmText: string
+  setConfirmText: (v: string) => void
+}) {
+  const navigation = useNavigation()
+  const isDeleting = navigation.state === 'submitting' && navigation.formData?.get('intent') === 'delete'
+  if (!confirmDelete) return null
+  const match = confirmText.trim() === confirmDelete.name
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center">
+      <div className="absolute inset-0 bg-black/40" onClick={() => { if (!isDeleting) setConfirmDelete(null) }} />
+      <div role="dialog" aria-modal="true" aria-busy={isDeleting || undefined} className="relative z-10 w-full max-w-lg mx-4 rounded-lg bg-white shadow-xl ring-1 ring-black/10">
+        <div className="px-6 pt-5 pb-4">
+          <div className="flex items-start gap-3">
+            <div className="mt-1 text-red-600">
+              <Icon name="warning-triangle" className="h-6 w-6" />
+            </div>
+            <div>
+              <h3 className="text-lg font-semibold text-gray-900">Delete customer</h3>
+              <p className="mt-1 text-sm text-gray-600">
+                You are about to permanently delete
+                <span className="font-semibold"> {confirmDelete.name}</span>.
+                This action cannot be undone and will remove all related data for this customer.
+              </p>
+              <p className="mt-3 text-sm text-gray-700">
+                Please type the customer name <span className="font-mono font-semibold">{confirmDelete.name}</span> to confirm.
+              </p>
+              <Form method="post" replace className="mt-3 space-y-3">
+                <input type="hidden" name="intent" value="delete" />
+                <input type="hidden" name="customerId" value={confirmDelete.id} />
+                <input
+                  type="text"
+                  autoFocus
+                  name="confirmName"
+                  value={confirmText}
+                  onChange={(e) => setConfirmText(e.target.value)}
+                  placeholder={confirmDelete.name}
+                  disabled={isDeleting}
+                  className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm text-gray-900 placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-red-500 disabled:bg-gray-100 disabled:text-gray-400"
+                />
+                <div className="flex items-center justify-end gap-2 pt-1">
+                  <button
+                    type="button"
+                    className={
+                      (isDeleting
+                        ? 'opacity-50 cursor-not-allowed'
+                        : 'hover:bg-gray-50') +
+                      ' inline-flex items-center rounded-md border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-700'
+                    }
+                    disabled={isDeleting}
+                    onClick={() => { if (!isDeleting) setConfirmDelete(null) }}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={!match || isDeleting}
+                    className={
+                      (match && !isDeleting
+                        ? 'bg-red-600 hover:bg-red-700 text-white'
+                        : 'bg-red-200 text-red-600 cursor-not-allowed') +
+                      ' inline-flex items-center rounded-md px-4 py-2 text-sm font-semibold shadow-sm'
+                    }
+                    title="Confirm deletion"
+                  >
+                    {isDeleting ? (
+                      <svg className="-ml-0.5 mr-2 h-4 w-4 animate-spin" viewBox="0 0 24 24" aria-hidden="true">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"></path>
+                      </svg>
+                    ) : (
+                      <Icon name="trash" className="-ml-0.5 mr-2 h-4 w-4" />
+                    )}
+                    {isDeleting ? 'Deleting…' : 'Permanently delete'}
+                  </button>
+                </div>
+              </Form>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
   )
 }

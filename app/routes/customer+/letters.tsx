@@ -424,14 +424,23 @@ export default function CustomerLettersPage() {
         return new Blob([bytes], { type: 'application/pdf' })
     }
 
-    // yyyy-MM-DD defaults: start = 30 days ago, end = today
-    const today = React.useMemo(() => new Date(), [])
-    const endDefault = React.useMemo(() => today.toISOString().slice(0, 10), [today])
-    const startDefault = React.useMemo(() => {
-        const d = new Date(today)
-        d.setDate(d.getDate() - 30)
-        return d.toISOString().slice(0, 10)
-    }, [today])
+    // yyyy-MM-DD defaults (America/New_York): start = 30 days ago, end = today (ET)
+    function etDateString(date: Date) {
+        const parts = new Intl.DateTimeFormat('en-US', {
+            timeZone: 'America/New_York',
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit',
+        }).formatToParts(date)
+        const get = (t: string) => String(parts.find(p => p.type === t)?.value ?? '')
+        const y = get('year')
+        const m = get('month')
+        const d = get('day')
+        return `${y}-${m}-${d}`
+    }
+    const now = React.useMemo(() => new Date(), [])
+    const endDefault = React.useMemo(() => etDateString(now), [now])
+    const startDefault = React.useMemo(() => etDateString(new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000)), [now])
 
     // ====== ET formatting + days-left (with colors) ======
     const etFormatter = React.useMemo(

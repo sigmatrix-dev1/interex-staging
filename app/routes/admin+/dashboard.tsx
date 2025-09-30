@@ -59,15 +59,15 @@ export async function loader({ request }: LoaderFunctionArgs) {
     })
   ])
 
-  return data({ 
-    user, 
+  return data({
+    user,
     stats: {
       totalUsers,
       totalCustomers,
       totalProviderGroups,
       totalProviders,
     },
-    customers
+    customers,
   })
 }
 
@@ -97,6 +97,7 @@ export async function action({ request }: ActionFunctionArgs) {
   }
 
   const customerId = formData.get('customerId')?.toString()
+  const confirmName = formData.get('confirmName')?.toString() ?? ''
   if (!customerId) {
     return data({ error: 'Missing customerId' }, { status: 400 })
   }
@@ -131,6 +132,15 @@ export async function action({ request }: ActionFunctionArgs) {
       type: 'error',
       title: 'Delete not allowed',
       description: 'Only customers marked as "Test-Customer" in the description can be deleted.',
+    })
+  }
+
+  // Extra guard: require exact name confirmation like GitHub
+  if (confirmName !== customer.name) {
+    return await redirectWithToast('/admin/dashboard', {
+      type: 'error',
+      title: 'Confirmation did not match',
+      description: `Type the exact customer name: ${customer.name}`,
     })
   }
 
@@ -311,7 +321,7 @@ export default function AdminDashboard() {
             <div className="flex items-center justify-between mb-4">
               <h3 className="text-lg leading-6 font-medium text-gray-900">Customer Management</h3>
               <Link
-                to="/admin/customers/new"
+                to="/admin/customers?action=add"
                 className="inline-flex items-center px-3 py-2 border border-transparent shadow-sm text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700"
               >
                 <Icon name="plus" className="-ml-1 mr-2 h-4 w-4" />
@@ -511,7 +521,7 @@ export default function AdminDashboard() {
                     This action cannot be undone and will remove all related data (letters, submissions, providers, groups) for this customer.
                   </p>
                   <p className="mt-3 text-sm text-gray-700">
-                    Please type <span className="font-mono font-semibold">DELETE</span> to confirm.
+                    Please type the customer name <span className="font-mono font-semibold">{confirmDelete.name}</span> to confirm.
                   </p>
                   <Form method="post" replace className="mt-3 space-y-3" onSubmit={() => setSubmittedDelete(true)}>
                     <input type="hidden" name="intent" value="delete-customer" />
@@ -519,9 +529,10 @@ export default function AdminDashboard() {
                     <input
                       type="text"
                       autoFocus
+                      name="confirmName"
                       value={confirmText}
                       onChange={(e) => setConfirmText(e.target.value)}
-                      placeholder="Type DELETE to confirm"
+                      placeholder={confirmDelete.name}
                       disabled={isDeleting}
                       className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm text-gray-900 placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-red-500 disabled:bg-gray-100 disabled:text-gray-400"
                     />
@@ -541,9 +552,9 @@ export default function AdminDashboard() {
                       </button>
                       <button
                         type="submit"
-                        disabled={confirmText.trim().toUpperCase() !== 'DELETE' || isDeleting}
+                        disabled={confirmText.trim() !== confirmDelete.name || isDeleting}
                         className={
-                          (confirmText.trim().toUpperCase() === 'DELETE' && !isDeleting
+                          (confirmText.trim() === confirmDelete.name && !isDeleting
                             ? 'bg-red-600 hover:bg-red-700 text-white'
                             : 'bg-red-200 text-red-600 cursor-not-allowed') +
                           ' inline-flex items-center rounded-md px-4 py-2 text-sm font-semibold shadow-sm'

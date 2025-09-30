@@ -26,8 +26,10 @@ function normalizeDate(value?: string): string | null {
   if (!value) return null
   const m = DATE_RE.exec(value)
   if (!m) return null
-  // Keep full date for now but we could down-scope to month only if needed:
-  return m[0]
+  // Down-scope to month to avoid DOB heuristic (YYYY-MM)
+  const full = m[0]
+  const yearMonth = full.slice(0, 7).replace(/\./g, '-').replace(/\//g, '-') // ensure separator
+  return yearMonth
 }
 
 /**
@@ -43,7 +45,7 @@ export function sanitizeLetterSyncMeta(input: LetterSyncMetaInput): SanitizedLet
   return {
     schemaVersion: 1 as const,
     types: input.types || [],
-    dateRange: { start, end, granularity: 'day' },
+    dateRange: { start, end, granularity: 'month' },
     counts: input.rawCountByType && Object.keys(input.rawCountByType).length ? input.rawCountByType : undefined,
     originalHash,
   }
