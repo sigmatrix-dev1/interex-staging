@@ -8,6 +8,7 @@ import { audit } from '#app/services/audit.server.ts'
 import { requireUserId } from '#app/utils/auth.server.ts'
 import { prisma } from '#app/utils/db.server.ts'
 import { INTEREX_ROLES } from '#app/utils/interex-roles.ts'
+import { generateTemporaryPassword, hashPassword } from '#app/utils/password.server.ts'
 import { requireRoles } from '#app/utils/role-redirect.server.ts'
 import { redirectWithToast } from '#app/utils/toast.server.ts'
 
@@ -164,8 +165,31 @@ export async function action({ request }: ActionFunctionArgs) {
       // Provider groups
       await tx.providerGroup.deleteMany({ where: { customerId } })
 
-      // Users that belong to this customer (will cascade password, sessions, notifications, etc.)
-      await tx.user.deleteMany({ where: { customerId } })
+      // Users: deactivate, clear sessions, randomize passwords, and detach from customer
+      const users = await tx.user.findMany({ where: { customerId }, select: { id: true } })
+      const userIds = users.map(u => u.id)
+      if (userIds.length) {
+        await tx.session.deleteMany({ where: { userId: { in: userIds } } })
+        // Randomize password per user
+        for (const id of userIds) {
+          const temp = generateTemporaryPassword()
+          await tx.password.upsert({
+            where: { userId: id },
+            update: { hash: hashPassword(temp) },
+            create: { userId: id, hash: hashPassword(temp) },
+          })
+        }
+        await tx.user.updateMany({
+          where: { id: { in: userIds } },
+          data: {
+            active: false,
+            deletedAt: new Date(),
+            customerId: null,
+            providerGroupId: null,
+            mustChangePassword: true,
+          },
+        })
+      }
 
       // Finally, the customer
       await tx.customer.delete({ where: { id: customer.id } })
@@ -187,7 +211,7 @@ export async function action({ request }: ActionFunctionArgs) {
     action: 'CUSTOMER_DELETE',
     entityType: 'Customer',
     entityId: customer.id,
-    summary: `Force-deleted Test-Customer: ${customer.name}`,
+    summary: `Force-deleted Test-Customer: ${customer.name}; deactivated and sanitized all users`,
     metadata: { name: customer.name },
   })
 

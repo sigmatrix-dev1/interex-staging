@@ -458,8 +458,30 @@ export async function action({ request }: ActionFunctionArgs) {
         // Provider groups
         await tx.providerGroup.deleteMany({ where: { customerId } })
 
-        // Users that belong to this customer (will cascade password, sessions, notifications, etc.)
-        await tx.user.deleteMany({ where: { customerId } })
+        // Users: deactivate, clear sessions, randomize passwords, and detach from customer
+        const users = await tx.user.findMany({ where: { customerId }, select: { id: true } })
+        const userIds = users.map(u => u.id)
+        if (userIds.length) {
+          await tx.session.deleteMany({ where: { userId: { in: userIds } } })
+          for (const id of userIds) {
+            const temp = generateTemporaryPassword()
+            await tx.password.upsert({
+              where: { userId: id },
+              update: { hash: hashPassword(temp) },
+              create: { userId: id, hash: hashPassword(temp) },
+            })
+          }
+          await tx.user.updateMany({
+            where: { id: { in: userIds } },
+            data: {
+              active: false,
+              deletedAt: new Date(),
+              customerId: null,
+              providerGroupId: null,
+              mustChangePassword: true,
+            },
+          })
+        }
 
         // Finally, the customer
         await tx.customer.delete({ where: { id: customerId } })
@@ -472,7 +494,7 @@ export async function action({ request }: ActionFunctionArgs) {
         customerId,
         entityType: 'Customer',
         entityId: customerId,
-        summary: `Force-deleted Test-Customer: ${customer.name}`,
+        summary: `Force-deleted Test-Customer: ${customer.name}; deactivated and sanitized all users`,
         status: 'SUCCESS',
       })
 
