@@ -43,14 +43,6 @@ export const AuditActionValues = [
     /* Optional: user & auth events (handy for later) */
     'AUTH_LOGIN',
     'AUTH_LOGOUT',
-    // Auth actions currently emitted by the app (ensure nice labels)
-    'LOGIN_SUCCESS',
-    'LOGIN_FAILURE',
-    'LOGOUT',
-    // Session management actions
-    'SESSION_LOGOUT_OTHERS',
-    'SESSION_REVOKE',
-    'LOGOUT_OTHERS_ON_LOGIN',
     'USER_CREATE',
     'USER_CREATE_ATTEMPT',
     'USER_UPDATE',
@@ -62,14 +54,10 @@ export const AuditActionValues = [
     'USER_SET_ACTIVE_ATTEMPT',
     'USER_RESET_PASSWORD',
     'USER_RESET_PASSWORD_ATTEMPT',
+    'UNLOCK_AND_ROTATE_PASSWORD',
     'USER_ASSIGN_NPIS',
     'USER_ASSIGN_NPIS_ATTEMPT',
     'USER_DISABLE',
-
-    /* Account lockouts */
-    'ACCOUNT_SOFT_LOCKED',
-    'ACCOUNT_HARD_LOCKED',
-    'ACCOUNT_UNLOCKED',
 
     /* Admin: Provider Groups */
     'PROVIDER_GROUP_CREATE',
@@ -139,12 +127,6 @@ export const AuditActionLabels: Record<AuditAction, string> = {
 
     AUTH_LOGIN: 'Auth: Login',
     AUTH_LOGOUT: 'Auth: Logout',
-    LOGIN_SUCCESS: 'Auth: Login (Success)',
-    LOGIN_FAILURE: 'Auth: Login (Failure)',
-    LOGOUT: 'Auth: Logout',
-    SESSION_LOGOUT_OTHERS: 'Session: Sign Out Other Sessions',
-    SESSION_REVOKE: 'Session: Revoke',
-    LOGOUT_OTHERS_ON_LOGIN: 'Auth: Logout Others on Login',
     USER_CREATE: 'User: Create',
     USER_CREATE_ATTEMPT: 'User: Create (Attempt)',
     USER_UPDATE: 'User: Update',
@@ -156,13 +138,10 @@ export const AuditActionLabels: Record<AuditAction, string> = {
     USER_SET_ACTIVE_ATTEMPT: 'User: Set Active (Attempt)',
     USER_RESET_PASSWORD: 'User: Reset Password',
     USER_RESET_PASSWORD_ATTEMPT: 'User: Reset Password (Attempt)',
+    UNLOCK_AND_ROTATE_PASSWORD: 'User: Unlock & Rotate Password',
     USER_ASSIGN_NPIS: 'User: Assign NPIs',
     USER_ASSIGN_NPIS_ATTEMPT: 'User: Assign NPIs (Attempt)',
     USER_DISABLE: 'User: Disable',
-
-    ACCOUNT_SOFT_LOCKED: 'Auth: Account Soft-Locked',
-    ACCOUNT_HARD_LOCKED: 'Auth: Account Hard-Locked',
-    ACCOUNT_UNLOCKED: 'Auth: Account Unlocked',
 
     PROVIDER_GROUP_CREATE: 'Provider Group: Create',
     PROVIDER_GROUP_CREATE_ATTEMPT: 'Provider Group: Create (Attempt)',

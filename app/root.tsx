@@ -1,4 +1,5 @@
 import { OpenImgContextProvider } from 'openimg/react'
+import React, { useEffect } from 'react'
 import {
 	data,
 	Link,
@@ -226,6 +227,26 @@ function App() {
 			currentPath === '/verify' ||
 			currentPath === '/reset-password' ||
 			currentPath === '/change-password'
+
+
+	// Disable browser back button on auth-related routes (login, 2FA verify, reset, forced change)
+	useEffect(() => {
+		const currentPath = matches[matches.length - 1]?.pathname || ''
+		const isAuthGuardedPath =
+			currentPath === '/login' ||
+			currentPath === '/verify' ||
+			currentPath === '/reset-password' ||
+			currentPath === '/change-password'
+		if (!isAuthGuardedPath) return
+		const onPop = () => {
+			// Immediately re-advance to prevent navigating back
+			history.go(1)
+		}
+		// Create an extra history entry so that back lands here
+		history.pushState(null, '', window.location.href)
+		window.addEventListener('popstate', onPop)
+		return () => window.removeEventListener('popstate', onPop)
+	}, [matches])
 
 	return (
 		<OpenImgContextProvider

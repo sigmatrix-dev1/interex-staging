@@ -1,6 +1,7 @@
 import * as React from 'react'
-import { Outlet } from 'react-router'
+import { Outlet, useLocation } from 'react-router'
 import { InterexHeader } from '#app/components/interex-header.tsx'
+import { useBackGuard } from '#app/hooks/use-back-guard.ts'
 import { type User } from '#app/utils/role-redirect.server.ts'
 
 interface InterexLayoutProps {
@@ -16,12 +17,16 @@ interface InterexLayoutProps {
 
     /** Enable banking-style back-button guard for this screen */
     backGuardEnabled?: boolean
+    /** Choose behavior: 'logout' (default) or 'block' (stay on page and show a notice) */
+    backGuardMode?: 'logout' | 'block'
     /** POST endpoint that destroys the session (defaults to your /logout route) */
     backGuardLogoutUrl?: string
     /** Where to send the user after logout (client-side redirect). Defaults to "/". */
     backGuardRedirectTo?: string
     /** Customize the confirm dialog message */
     backGuardMessage?: string
+    /** Customize the notification description in 'block' mode */
+    backGuardBlockMessage?: string
 }
 
 export function InterexLayout({
@@ -35,18 +40,22 @@ export function InterexLayout({
                                   currentPath,
                                   hideBrandBar = false,
 
-                                  backGuardEnabled = false,
+                                  backGuardEnabled = true,
+                                  backGuardMode = 'logout',
                                   backGuardLogoutUrl = '/logout',
-                                  backGuardRedirectTo = '/',
+                                  backGuardRedirectTo = '/login',
                                   backGuardMessage = 'For security, going back will log you out. Do you want to continue?',
+                                  backGuardBlockMessage = 'Back navigation is disabled on this screen.',
                               }: InterexLayoutProps) {
     return (
         <div className="min-h-screen w-full bg-gray-50">
             <BackGuard
                 enabled={backGuardEnabled}
+                mode={backGuardMode}
                 logoutUrl={backGuardLogoutUrl}
                 redirectTo={backGuardRedirectTo}
                 message={backGuardMessage}
+                blockMessage={backGuardBlockMessage}
             />
 
             <InterexHeader
@@ -65,65 +74,23 @@ export function InterexLayout({
 }
 
 /** Bank-style Back-button interceptor */
-function BackGuard({
-                       enabled,
-                       logoutUrl,
-                       redirectTo,
-                       message,
-                   }: {
-    enabled: boolean
-    logoutUrl: string
-    redirectTo: string
-    message: string
+function BackGuard({ enabled, mode = 'logout', logoutUrl, redirectTo, message, blockMessage }: {
+  enabled: boolean
+  mode?: 'logout' | 'block'
+  logoutUrl: string
+  redirectTo: string
+  message: string
+  blockMessage?: string
 }) {
-    React.useEffect(() => {
-        if (!enabled) return
+    const location = useLocation()
+    const path = location.pathname
+    // Auto-block on submission creation/review/upload steps to avoid logout confirm
+    const isSubmissionStep =
+        path === '/customer/submissions/new' ||
+        /\/customer\/submissions\/[^/]+\/(review|upload)$/.test(path)
 
-        // Seed a state so the first Back triggers popstate
-        try {
-            history.pushState({ _guard: true }, '', window.location.href)
-        } catch {
-            // ignore
-        }
+    const effectiveMode = isSubmissionStep ? 'block' : mode
 
-        const onPopState = () => {
-            // Immediately push a new state so we remain on the page while asking
-            try {
-                history.pushState({ _guard: true }, '', window.location.href)
-            } catch {
-                // ignore
-            }
-
-            const ok = window.confirm(message)
-            if (!ok) return
-
-            // Fire a POST to /logout using Beacon (works during navigation/unload)
-            const fd = new FormData()
-            fd.append('intent', 'logout')
-            const sent =
-                (navigator.sendBeacon && navigator.sendBeacon(logoutUrl, fd)) || false
-
-            if (!sent) {
-                // Fallback if Beacon unavailable/blocked
-                // Mark the promise as intentionally not awaited to satisfy no-floating-promises
-                void fetch(logoutUrl, {
-                    method: 'POST',
-                    body: fd,
-                    credentials: 'include',
-                }).finally(() => {
-                    window.location.assign(redirectTo)
-                })
-            } else {
-                // Beacon sent—navigate immediately
-                window.location.assign(redirectTo)
-            }
-        }
-
-        window.addEventListener('popstate', onPopState)
-        return () => {
-            window.removeEventListener('popstate', onPopState)
-        }
-    }, [enabled, logoutUrl, redirectTo, message])
-
-    return null
+    useBackGuard({ enabled, mode: effectiveMode, message, blockMessage, logoutUrl, redirectTo })
+  return null
 }

@@ -35,12 +35,9 @@ const schema = z.object({
     PCGF_CLIENT_SECRET: z.string().optional(),
     PCGF_SCOPE: z.string().optional(),
 
-    // Security policy flags
-    REQUIRE_2FA_ON_LOGIN: z.enum(['true', 'false']).optional(),
-
-    // Privacy: how to record client IPs in audit logs: 'raw' | 'masked' | 'hash'
-    LOG_IP_MODE: z.enum(['raw', 'masked', 'hash']).optional(),
-    IP_HASH_SALT: z.string().optional(),
+    // Account lockout tunables (optional; numbers encoded as strings)
+    LOCKOUT_MAX_ATTEMPTS: z.string().optional(),
+    LOCKOUT_WINDOW_SECONDS: z.string().optional(),
 })
 
 declare global {
@@ -65,7 +62,6 @@ export function getEnv() {
         MODE: process.env.NODE_ENV,
         SENTRY_DSN: process.env.SENTRY_DSN,
         ALLOW_INDEXING: process.env.ALLOW_INDEXING,
-        LOG_IP_MODE: process.env.LOG_IP_MODE,
     }
 }
 
@@ -80,56 +76,27 @@ declare global {
 }
 
 /* -------------------------------------------------------------------------- */
-/*        PCG CONFIG — TEMPORARILY FORCE HARDCODED VALUES IN PRODUCTION       */
+/*                     HARD-CODED PCG CONFIG (for debugging)                  */
 /* -------------------------------------------------------------------------- */
 
-export const PCG_ENV = (() => {
-    // Single source of truth for the known-good endpoints/creds while we debug prod
-    const HARDCODED = {
-        BASE_URL: 'https://drfpimpl.cms.gov/pcgfhir/hih/api',
-        TOKEN_URL: 'https://drfpimpl.cms.gov/token',
-        CLIENT_ID: '0oayc2ysgssSksF81297',
-        CLIENT_SECRET:
-            'fNrlPQqDmjwMCdyxW1OicnR_nuJ0TzUA9nyaHryJbJGdi1F_OcN3616p_NGva8HY',
-        SCOPE: 'UserGroup',
-    } as const
-
-    // In production, ignore environment variables and use hardcoded values
-    if (process.env.NODE_ENV === 'production') {
-        return HARDCODED
-    }
-
-    // In development/test, allow env overrides for flexibility
-    return {
-        BASE_URL: process.env.PCGF_BASE_URL || HARDCODED.BASE_URL,
-        TOKEN_URL: process.env.PCGF_TOKEN_URL || HARDCODED.TOKEN_URL,
-        CLIENT_ID: process.env.PCGF_CLIENT_ID || HARDCODED.CLIENT_ID,
-        CLIENT_SECRET:
-            process.env.PCGF_CLIENT_SECRET || HARDCODED.CLIENT_SECRET,
-        SCOPE: process.env.PCGF_SCOPE || HARDCODED.SCOPE,
-    } as const
-})()
+export const PCG_ENV = {
+    BASE_URL: process.env.PCGF_BASE_URL,
+    TOKEN_URL: process.env.PCGF_TOKEN_URL,
+    CLIENT_ID: process.env.PCGF_CLIENT_ID,
+    CLIENT_SECRET: process.env.PCGF_CLIENT_SECRET,
+    SCOPE: process.env.PCGF_SCOPE,
+} as const
 
 // (Optional) tiny boot log to confirm which host you're hitting
 try {
     if (process.env.NODE_ENV !== 'production') {
-        console.info(
-            'PCG env configured',
-            JSON.stringify({ tokenUrlHost: new URL(PCG_ENV.TOKEN_URL).host, scope: PCG_ENV.SCOPE }),
-        )
-    }
-    // In production, emit a warning if BASE_URL seems incomplete (common cause of 404: "no Route matched")
-    if (process.env.NODE_ENV === 'production') {
-        try {
-            const u = new URL(PCG_ENV.BASE_URL)
-            const p = u.pathname.replace(/\/+$/, '')
-            const hasHihApi = p.includes('/pcgfhir') && p.includes('/hih') && p.includes('/api')
-            if (!hasHihApi) {
-                console.warn(
-                    'PCG BASE_URL may be misconfigured. Expected path to include /pcgfhir/hih/api. Current:',
-                    PCG_ENV.BASE_URL,
-                )
+        const tokenUrlHost = (() => {
+            try {
+                return PCG_ENV.TOKEN_URL ? new URL(PCG_ENV.TOKEN_URL).host : 'unset'
+            } catch {
+                return 'invalid'
             }
-        } catch {}
+        })()
+        console.info('PCG env configured', JSON.stringify({ tokenUrlHost, scope: PCG_ENV.SCOPE ?? 'unset' }))
     }
 } catch {}

@@ -3,7 +3,7 @@
 import { getFormProps, getInputProps, useForm } from '@conform-to/react'
 import { getZodConstraint, parseWithZod } from '@conform-to/zod'
 import { useState, useEffect } from 'react'
-import { data, useLoaderData, Form, useSearchParams, useActionData, type LoaderFunctionArgs, type ActionFunctionArgs , Link, useNavigation  } from 'react-router'
+import { data, useLoaderData, Form, useSearchParams, useActionData, type LoaderFunctionArgs, type ActionFunctionArgs , Link  } from 'react-router'
 import { z } from 'zod'
 import { Field, ErrorList } from '#app/components/forms.tsx'
 import { InterexLayout } from '#app/components/interex-layout.tsx'
@@ -11,7 +11,6 @@ import { useToast } from '#app/components/toaster.tsx'
 import { Drawer } from '#app/components/ui/drawer.tsx'
 import { Icon } from '#app/components/ui/icon.tsx'
 import { StatusButton } from '#app/components/ui/status-button.tsx'
-import { audit } from '#app/services/audit.server.ts'
 import { requireUserId } from '#app/utils/auth.server.ts'
 import { prisma } from '#app/utils/db.server.ts'
 import { sendTemporaryPasswordEmail } from '#app/utils/emails/send-temporary-password.server.ts'
@@ -42,24 +41,9 @@ const AddAdminSchema = z.object({
   adminUsername: UsernameSchema,
 })
 
-const DeleteCustomerSchema = z.object({
-  intent: z.literal('delete'),
-  customerId: z.string().min(1, 'Customer ID is required'),
-  confirmName: z.string().min(1, 'Confirmation is required'),
-})
-
-const UpdateCustomerSchema = z.object({
-  intent: z.literal('update'),
-  customerId: z.string().min(1, 'Customer ID is required'),
-  name: z.string().min(1, 'Customer name is required'),
-  description: z.string().optional().default(''),
-})
-
 const ActionSchema = z.discriminatedUnion('intent', [
   CreateCustomerSchema,
   AddAdminSchema,
-  DeleteCustomerSchema,
-  UpdateCustomerSchema,
 ])
 
 export async function loader({ request }: LoaderFunctionArgs) {
@@ -355,175 +339,6 @@ export async function action({ request }: ActionFunctionArgs) {
     })
   }
 
-  // Handle update customer action
-  if (action.intent === 'update') {
-    const { customerId, name, description } = action
-
-    const existing = await prisma.customer.findUnique({ where: { id: customerId } })
-    if (!existing) {
-      return data({ error: 'Customer not found' }, { status: 404 })
-    }
-
-    // Enforce unique name constraint if changing name
-    if (name && name !== existing.name) {
-      const nameConflict = await prisma.customer.findFirst({
-        where: { name, NOT: { id: customerId } },
-      })
-      if (nameConflict) {
-        return data(
-          {
-            result: submission.reply({
-              fieldErrors: { name: ['Customer name already exists'] },
-            }),
-          },
-          { status: 400 },
-        )
-      }
-    }
-
-    await prisma.customer.update({
-      where: { id: customerId },
-      data: { name, description: description || '' },
-    })
-
-    await audit.admin({
-      action: 'CUSTOMER_UPDATE',
-      actorType: 'USER',
-      actorId: user.id,
-      customerId,
-      entityType: 'Customer',
-      entityId: customerId,
-      summary: `Updated customer: ${existing.name}${existing.name !== name ? ` -> ${name}` : ''}`,
-      status: 'SUCCESS',
-    })
-
-    return redirectWithToast('/admin/customers', {
-      type: 'success',
-      title: 'Customer updated',
-      description: `${name} has been saved.`,
-    })
-  }
-
-  // Handle delete customer action (with elevated override if description contains "Test-Customer")
-  if (action.intent === 'delete') {
-    const { customerId, confirmName } = action
-
-    // Fetch the customer with minimal fields we need
-    const customer = await prisma.customer.findUnique({
-      where: { id: customerId },
-      select: { id: true, name: true, description: true },
-    })
-    if (!customer) {
-      return data({ error: 'Customer not found' }, { status: 404 })
-    }
-
-    const isElevatedDelete = (customer.description || '').includes('Test-Customer')
-
-    // Extra guard: require exact name confirmation like GitHub
-    if (confirmName !== customer.name) {
-      return redirectWithToast('/admin/customers', {
-        type: 'error',
-        title: 'Confirmation did not match',
-        description: `Type the exact customer name: ${customer.name}`,
-      })
-    }
-
-    if (!isElevatedDelete) {
-      // New policy: only customers explicitly marked as "Test-Customer" can be deleted.
-      return redirectWithToast('/admin/customers', {
-        type: 'error',
-        title: 'Delete blocked',
-        description:
-          'Only customers marked as "Test-Customer" in the description can be deleted. You can edit the customer to add this marker if this is a test record.',
-      })
-    }
-
-    // Elevated delete: forcefully remove all related data regardless of dependencies
-    try {
-      await prisma.$transaction(async (tx) => {
-        // Submissions (will cascade submission documents & events)
-        await tx.submission.deleteMany({ where: { customerId } })
-
-        // Provider events for this customer
-        await tx.providerEvent.deleteMany({ where: { customerId } })
-
-        // Letters for this customer
-        await tx.prepayLetter.deleteMany({ where: { customerId } })
-        await tx.postpayLetter.deleteMany({ where: { customerId } })
-        await tx.postpayOtherLetter.deleteMany({ where: { customerId } })
-
-        // Providers (will cascade userNpis, provider list/registration snapshots)
-        await tx.provider.deleteMany({ where: { customerId } })
-
-        // Provider groups
-        await tx.providerGroup.deleteMany({ where: { customerId } })
-
-        // Users: deactivate, clear sessions, randomize passwords, and detach from customer
-        const users = await tx.user.findMany({ where: { customerId }, select: { id: true } })
-        const userIds = users.map(u => u.id)
-        if (userIds.length) {
-          await tx.session.deleteMany({ where: { userId: { in: userIds } } })
-          for (const id of userIds) {
-            const temp = generateTemporaryPassword()
-            await tx.password.upsert({
-              where: { userId: id },
-              update: { hash: hashPassword(temp) },
-              create: { userId: id, hash: hashPassword(temp) },
-            })
-          }
-          await tx.user.updateMany({
-            where: { id: { in: userIds } },
-            data: {
-              active: false,
-              deletedAt: new Date(),
-              customerId: null,
-              providerGroupId: null,
-              mustChangePassword: true,
-            },
-          })
-        }
-
-        // Finally, the customer
-        await tx.customer.delete({ where: { id: customerId } })
-      })
-
-      await audit.admin({
-        action: 'CUSTOMER_DELETE_FORCE',
-        actorType: 'USER',
-        actorId: user.id,
-        customerId,
-        entityType: 'Customer',
-        entityId: customerId,
-        summary: `Force-deleted Test-Customer: ${customer.name}; deactivated and sanitized all users`,
-        status: 'SUCCESS',
-      })
-
-      return redirectWithToast('/admin/customers', {
-        type: 'success',
-        title: 'Customer force-deleted',
-        description: `${customer.name} (Test-Customer) and all dependent data have been removed.`,
-      })
-    } catch (error) {
-      console.error('Force delete customer failed', error)
-      await audit.admin({
-        action: 'CUSTOMER_DELETE_FORCE',
-        actorType: 'USER',
-        actorId: user.id,
-        customerId,
-        entityType: 'Customer',
-        entityId: customerId,
-        summary: `Force delete failed for: ${customer.name}`,
-        status: 'FAILURE',
-        message: error instanceof Error ? error.message : String(error),
-      })
-      return redirectWithToast('/admin/customers', {
-        type: 'error',
-        title: 'Delete failed',
-        description: 'Could not delete the customer. Please check server logs.',
-      })
-    }
-  }
-
   return data({ error: 'Invalid action' }, { status: 400 })
 }
 
@@ -532,14 +347,12 @@ export default function AdminCustomersPage() {
   const actionData = useActionData<typeof action>()
   const [searchParams, setSearchParams] = useSearchParams()
   const isPending = useIsPending()
-  const [confirmDelete, setConfirmDelete] = useState<{ id: string; name: string } | null>(null)
-  const [confirmText, setConfirmText] = useState('')
   
   useToast(toast)
   
   const [drawerState, setDrawerState] = useState<{
     isOpen: boolean
-    mode: 'create' | 'add-admin' | 'edit'
+    mode: 'create' | 'add-admin'
     customerId?: string
   }>({ isOpen: false, mode: 'create' })
 
@@ -552,16 +365,14 @@ export default function AdminCustomersPage() {
       setDrawerState({ isOpen: true, mode: 'create' })
     } else if (action === 'add-admin' && customerId) {
       setDrawerState({ isOpen: true, mode: 'add-admin', customerId })
-    } else if (action === 'edit' && customerId) {
-      setDrawerState({ isOpen: true, mode: 'edit', customerId })
     } else {
       setDrawerState({ isOpen: false, mode: 'create' })
     }
   }, [searchParams])
 
-  const openDrawer = (mode: 'create' | 'add-admin' | 'edit', customerId?: string) => {
+  const openDrawer = (mode: 'create' | 'add-admin', customerId?: string) => {
     const newParams = new URLSearchParams(searchParams)
-    newParams.set('action', mode === 'create' ? 'add' : mode === 'add-admin' ? 'add-admin' : 'edit')
+    newParams.set('action', mode === 'create' ? 'add' : 'add-admin')
     if (customerId) newParams.set('customerId', customerId)
     setSearchParams(newParams)
   }
@@ -592,15 +403,6 @@ export default function AdminCustomersPage() {
     lastResult: actionData && 'result' in actionData ? actionData.result : undefined,
     onValidate({ formData }) {
       return parseWithZod(formData, { schema: AddAdminSchema })
-    },
-  })
-
-  const [editForm, editFields] = useForm({
-    id: 'edit-customer-form',
-    constraint: getZodConstraint(UpdateCustomerSchema),
-    lastResult: actionData && 'result' in actionData ? actionData.result : undefined,
-    onValidate({ formData }) {
-      return parseWithZod(formData, { schema: UpdateCustomerSchema })
     },
   })
 
@@ -655,7 +457,7 @@ export default function AdminCustomersPage() {
               </div>
 
               {/* Customers List */}
-              <div className="bg-white shadow rounded-lg flex flex-col">
+              <div className="bg-white shadow rounded-lg">
                 <div className="px-6 py-4 border-b border-gray-200">
                   <div className="flex justify-between items-center">
                     <div>
@@ -693,33 +495,27 @@ export default function AdminCustomersPage() {
                     </button>
                   </div>
                 ) : (
-                  <div className="overflow-auto max-h-[70vh]">
+                  <div className="overflow-hidden">
                     <table className="min-w-full divide-y divide-gray-200">
-                      <thead>
+                      <thead className="bg-gray-50">
                         <tr>
-                          <th className="sticky top-0 z-10 bg-blue-900 px-6 py-3 text-left text-xs font-medium uppercase tracking-wider">
+                          <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                             Customer
                           </th>
-                          <th className="sticky top-0 z-10 bg-blue-900 px-6 py-3 text-left text-xs font-medium uppercase tracking-wider">
+                          <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                             BAA Number
                           </th>
-                          <th className="sticky top-0 z-10 bg-blue-900 px-6 py-3 text-left text-xs font-medium uppercase tracking-wider">
+                          <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                             Admins  
                           </th>
-                          <th className="sticky top-0 z-10 bg-blue-900 px-6 py-3 text-left text-xs font-medium uppercase tracking-wider">
+                          <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                             Created
                           </th>
-                          <th className="sticky top-0 z-10 bg-blue-900 px-6 py-3 text-left text-xs font-medium uppercase tracking-wider">
+                          <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                             Status
                           </th>
-                          <th className="sticky top-0 z-10 bg-blue-900 px-6 py-3 text-left text-xs font-medium uppercase tracking-wider">
-                            Add Admin
-                          </th>
-                          <th className="sticky top-0 z-10 bg-blue-900 px-6 py-3 text-left text-xs font-medium uppercase tracking-wider">
-                            Edit
-                          </th>
-                          <th className="sticky top-0 z-10 bg-blue-900 px-6 py-3 text-left text-xs font-medium uppercase tracking-wider">
-                            Delete
+                          <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                            Actions
                           </th>
                         </tr>
                       </thead>
@@ -728,14 +524,7 @@ export default function AdminCustomersPage() {
                           <tr key={customer.id} className="hover:bg-gray-50">
                             <td className="px-6 py-4 whitespace-nowrap">
                               <div>
-                                <div className="flex items-center gap-2">
-                                  <div className="text-sm font-medium text-gray-900">{customer.name}</div>
-                                  {customer.description?.includes('Test-Customer') ? (
-                                    <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium bg-red-100 text-red-800 border border-red-200">
-                                      Test-Customer
-                                    </span>
-                                  ) : null}
-                                </div>
+                                <div className="text-sm font-medium text-gray-900">{customer.name}</div>
                                 <div className="text-sm text-gray-500">{customer.description}</div>
                               </div>
                             </td>
@@ -764,39 +553,15 @@ export default function AdminCustomersPage() {
                               </span>
                             </td>
                             <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
-                              <button
-                                onClick={() => openDrawer('add-admin', customer.id)}
-                                className="text-green-600 hover:text-green-800 p-1"
-                                title="Add admin"
-                              >
-                                <Icon name="plus" className="h-4 w-4" />
-                              </button>
-                            </td>
-                            <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
-                              <button
-                                onClick={() => openDrawer('edit', customer.id)}
-                                className="text-blue-600 hover:text-blue-800 p-1"
-                                title="Edit customer"
-                              >
-                                <Icon name="pencil-2" className="h-4 w-4" />
-                              </button>
-                            </td>
-                            <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
-                              {customer.description?.includes('Test-Customer') ? (
+                              <div className="flex items-center space-x-2">
                                 <button
-                                  type="button"
-                                  className="text-red-600 hover:text-red-800 p-1"
-                                  title="Delete customer"
-                                  onClick={() => {
-                                    setConfirmDelete({ id: customer.id, name: customer.name })
-                                    setConfirmText('')
-                                  }}
+                                  onClick={() => openDrawer('add-admin', customer.id)}
+                                  className="text-green-600 hover:text-green-800 p-1"
+                                  title="Add admin"
                                 >
-                                  <Icon name="trash" className="h-4 w-4" />
+                                  <Icon name="plus" className="h-4 w-4" />
                                 </button>
-                              ) : (
-                                <span className="text-gray-400">—</span>
-                              )}
+                              </div>
                             </td>
                           </tr>
                         ))}
@@ -1024,165 +789,6 @@ export default function AdminCustomersPage() {
           </Form>
         )}
       </Drawer>
-
-      {/* Edit Customer Drawer */}
-      <Drawer
-        isOpen={drawerState.isOpen && drawerState.mode === 'edit'}
-        onClose={closeDrawer}
-        title={`Edit ${selectedCustomer?.name || 'Customer'}`}
-        size="lg"
-      >
-        {selectedCustomer && (
-          <Form method="post" {...getFormProps(editForm)}>
-            <input type="hidden" name="intent" value="update" />
-            <input type="hidden" name="customerId" value={selectedCustomer.id} />
-            <div className="space-y-6">
-              <div className="border-b border-gray-200 pb-4">
-                <h3 className="text-lg font-medium text-gray-900">Customer Details</h3>
-                <p className="text-sm text-gray-500">Update the customer information below.</p>
-              </div>
-
-              <Field
-                labelProps={{ children: 'Customer Name' }}
-                inputProps={{
-                  ...getInputProps(editFields.name, { type: 'text' }),
-                  defaultValue: selectedCustomer.name,
-                }}
-                errors={editFields.name.errors}
-              />
-
-              <Field
-                labelProps={{ children: 'Description (Optional)' }}
-                inputProps={{
-                  ...getInputProps(editFields.description, { type: 'text' }),
-                  defaultValue: selectedCustomer.description ?? '',
-                }}
-                errors={editFields.description.errors}
-              />
-
-              <ErrorList id={editForm.errorId} errors={editForm.errors} />
-
-              <div className="flex justify-end space-x-3 pt-6 border-t border-gray-200">
-                <button
-                  type="button"
-                  onClick={closeDrawer}
-                  className="inline-flex justify-center py-2 px-4 border border-gray-300 shadow-sm text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
-                >
-                  Cancel
-                </button>
-                <StatusButton
-                  type="submit"
-                  disabled={isPending}
-                  status={isPending ? 'pending' : 'idle'}
-                  className="inline-flex justify-center py-2 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
-                >
-                  Save Changes
-                </StatusButton>
-              </div>
-            </div>
-          </Form>
-        )}
-      </Drawer>
-
-      <CustomersDeleteModal
-        confirmDelete={confirmDelete}
-        setConfirmDelete={setConfirmDelete}
-        confirmText={confirmText}
-        setConfirmText={setConfirmText}
-      />
     </>
-  )
-}
-
-// Delete Confirmation Modal (GitHub-style: type exact name)
-export function CustomersDeleteModal({
-  confirmDelete,
-  setConfirmDelete,
-  confirmText,
-  setConfirmText,
-}: {
-  confirmDelete: { id: string; name: string } | null
-  setConfirmDelete: (v: { id: string; name: string } | null) => void
-  confirmText: string
-  setConfirmText: (v: string) => void
-}) {
-  const navigation = useNavigation()
-  const isDeleting = navigation.state === 'submitting' && navigation.formData?.get('intent') === 'delete'
-  if (!confirmDelete) return null
-  const match = confirmText.trim() === confirmDelete.name
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center">
-      <div className="absolute inset-0 bg-black/40" onClick={() => { if (!isDeleting) setConfirmDelete(null) }} />
-      <div role="dialog" aria-modal="true" aria-busy={isDeleting || undefined} className="relative z-10 w-full max-w-lg mx-4 rounded-lg bg-white shadow-xl ring-1 ring-black/10">
-        <div className="px-6 pt-5 pb-4">
-          <div className="flex items-start gap-3">
-            <div className="mt-1 text-red-600">
-              <Icon name="warning-triangle" className="h-6 w-6" />
-            </div>
-            <div>
-              <h3 className="text-lg font-semibold text-gray-900">Delete customer</h3>
-              <p className="mt-1 text-sm text-gray-600">
-                You are about to permanently delete
-                <span className="font-semibold"> {confirmDelete.name}</span>.
-                This action cannot be undone and will remove all related data for this customer.
-              </p>
-              <p className="mt-3 text-sm text-gray-700">
-                Please type the customer name <span className="font-mono font-semibold">{confirmDelete.name}</span> to confirm.
-              </p>
-              <Form method="post" replace className="mt-3 space-y-3">
-                <input type="hidden" name="intent" value="delete" />
-                <input type="hidden" name="customerId" value={confirmDelete.id} />
-                <input
-                  type="text"
-                  autoFocus
-                  name="confirmName"
-                  value={confirmText}
-                  onChange={(e) => setConfirmText(e.target.value)}
-                  placeholder={confirmDelete.name}
-                  disabled={isDeleting}
-                  className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm text-gray-900 placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-red-500 disabled:bg-gray-100 disabled:text-gray-400"
-                />
-                <div className="flex items-center justify-end gap-2 pt-1">
-                  <button
-                    type="button"
-                    className={
-                      (isDeleting
-                        ? 'opacity-50 cursor-not-allowed'
-                        : 'hover:bg-gray-50') +
-                      ' inline-flex items-center rounded-md border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-700'
-                    }
-                    disabled={isDeleting}
-                    onClick={() => { if (!isDeleting) setConfirmDelete(null) }}
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    type="submit"
-                    disabled={!match || isDeleting}
-                    className={
-                      (match && !isDeleting
-                        ? 'bg-red-600 hover:bg-red-700 text-white'
-                        : 'bg-red-200 text-red-600 cursor-not-allowed') +
-                      ' inline-flex items-center rounded-md px-4 py-2 text-sm font-semibold shadow-sm'
-                    }
-                    title="Confirm deletion"
-                  >
-                    {isDeleting ? (
-                      <svg className="-ml-0.5 mr-2 h-4 w-4 animate-spin" viewBox="0 0 24 24" aria-hidden="true">
-                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"></path>
-                      </svg>
-                    ) : (
-                      <Icon name="trash" className="-ml-0.5 mr-2 h-4 w-4" />
-                    )}
-                    {isDeleting ? 'Deleting…' : 'Permanently delete'}
-                  </button>
-                </div>
-              </Form>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
   )
 }

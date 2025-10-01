@@ -2,7 +2,7 @@
 
 import { getFormProps, getInputProps, useForm } from '@conform-to/react'
 import { getZodConstraint, parseWithZod } from '@conform-to/zod'
-import { EyeIcon, EyeSlashIcon } from '@heroicons/react/24/outline'
+import { EyeIcon, EyeSlashIcon, ExclamationTriangleIcon, LockClosedIcon, InformationCircleIcon } from '@heroicons/react/24/outline'
 import { type SEOHandle } from '@nasa-gcn/remix-seo'
 import { useState } from 'react'
 import { data, Form, Link, useSearchParams } from 'react-router'
@@ -11,14 +11,12 @@ import { z } from 'zod'
 import { GeneralErrorBoundary } from '#app/components/error-boundary.tsx'
 import { CheckboxField, ErrorList, Field } from '#app/components/forms.tsx'
 import { Spacer } from '#app/components/spacer.tsx'
-import { Icon } from '#app/components/ui/icon.tsx'
+import { Alert } from '#app/components/ui/alert.tsx'
 import { StatusButton } from '#app/components/ui/status-button.tsx'
-import { audit } from '#app/services/audit.server.ts'
-import { login, requireAnonymous, verifyUserPassword } from '#app/utils/auth.server.ts'
+import { login, requireAnonymous, updateFailedLoginAttempt, remainingAttemptsMessage } from '#app/utils/auth.server.ts'
 import { prisma } from '#app/utils/db.server.ts'
 import { checkHoneypot } from '#app/utils/honeypot.server.ts'
 import { useIsPending } from '#app/utils/misc.tsx'
-import { extractRequestContext } from '#app/utils/request-context.server.ts'
 import { PasswordSchema, UsernameSchema } from '#app/utils/user-validation.ts'
 import { handleNewSession } from './login.server.ts'
 
@@ -32,8 +30,6 @@ const LoginFormSchema = z.object({
 	password: PasswordSchema,
 	redirectTo: z.string().optional(),
 	remember: z.coerce.boolean().optional(),
-  // When true, user acknowledges that logging in here will sign out other sessions
-  confirmLogoutOthers: z.coerce.boolean().optional(),
 })
 
 // Passkey auth temporarily removed pending re-introduction with updated UX
@@ -59,177 +55,46 @@ export async function action({ request }: { request: Request }) {
 		)
 	}
 
-	const { username, password, remember, redirectTo, confirmLogoutOthers } = submission.value
+	const { username, password, remember, redirectTo } = submission.value
 
-	// Preload user to apply lockout policy
-	const user = await (prisma as any).user.findUnique({
-		where: { username },
-		select: { id: true, customerId: true, failedLoginCount: true, softLocked: true, hardLocked: true },
-	})
-
-	// Enforce hard/soft locks
-	if (user?.hardLocked) {
+	// Pre-check lockout flags to short-circuit
+	const lockUser = await (prisma as any).user.findUnique({ where: { username }, select: { id: true, hardLocked: true, softLocked: true } })
+	if (lockUser?.hardLocked) {
 		return data(
 			{
-				result: submission.reply({
-					formErrors: ['Your account is locked due to suspicious activity. Please contact your administrator.'],
-					hideFields: ['password'],
-				}),
+				lockBanner: { kind: 'hard' as const, message: 'Your account is locked. Contact an administrator to unlock.' },
+				result: submission.reply({ hideFields: ['password'] }),
 			},
 			{ status: 423 },
 		)
 	}
-	if (user?.softLocked) {
+	if (lockUser?.softLocked) {
 		return data(
 			{
-				result: submission.reply({
-					formErrors: ['Too many failed attempts. Please reset your password to unlock your account.'],
-					hideFields: ['password'],
-				}),
+				lockBanner: { kind: 'soft' as const, message: 'Your account is temporarily locked. Please reset your password to unlock.' },
+				result: submission.reply({ hideFields: ['password'] }),
 			},
 			{ status: 423 },
 		)
 	}
 
-	// First, verify credentials without creating a session so we can decide UX
-	const verified = await verifyUserPassword(user ? { id: user.id } : { username }, password)
-	if (!verified) {
-		// Track failure and consider lockouts for known users
-		const ctx = await extractRequestContext(request, { requireUser: false })
-		await audit.auth({
-			action: 'LOGIN_FAILURE',
-			actorType: 'USER',
-			actorId: user?.id,
-			actorDisplay: username,
-			actorIp: ctx.ip ?? null,
-			actorUserAgent: ctx.userAgent ?? null,
-			customerId: user?.customerId ?? null,
-			requestId: ctx.requestId,
-			traceId: ctx.traceId,
-			spanId: ctx.spanId,
-			metadata: { username, reason: 'INVALID_CREDENTIALS' },
-			summary: 'Login failed',
-			status: 'FAILURE',
-		})
-
-		if (user) {
-			const newCount = (user.failedLoginCount ?? 0) + 1
-			await (prisma as any).user.update({ where: { id: user.id }, data: { failedLoginCount: newCount } })
-
-			// Rapid attempt hard-lock: 3 in 30 seconds
-			const since = new Date(Date.now() - 30_000)
-			const windowFailures = await prisma.auditEvent.count({
-				where: {
-					category: 'AUTH',
-					action: 'LOGIN_FAILURE',
-					status: 'FAILURE',
-					actorDisplay: username,
-					createdAt: { gte: since },
-				},
-			})
-			if (windowFailures >= 3) {
-				await (prisma as any).user.update({ where: { id: user.id }, data: { hardLocked: true, hardLockedAt: new Date() } })
-				await audit.security({
-					action: 'ACCOUNT_HARD_LOCKED',
-					actorType: 'USER',
-					actorId: user.id,
-					actorIp: ctx.ip ?? null,
-					actorUserAgent: ctx.userAgent ?? null,
-					customerId: user.customerId ?? null,
-					entityType: 'USER',
-					entityId: user.id,
-					summary: 'Account locked after rapid failed login attempts',
-					metadata: { username, windowSeconds: 30, failures: windowFailures },
-				})
-				return data(
-					{
-						result: submission.reply({
-							formErrors: ['Your account has been locked due to suspicious activity. Please contact your administrator.'],
-							hideFields: ['password'],
-						}),
-					},
-					{ status: 423 },
-				)
-			}
-
-			// Soft lock on 3 consecutive failures
-			if (newCount >= 3) {
-				await (prisma as any).user.update({ where: { id: user.id }, data: { softLocked: true } })
-				await audit.security({
-					action: 'ACCOUNT_SOFT_LOCKED',
-					actorType: 'USER',
-					actorId: user.id,
-					actorIp: ctx.ip ?? null,
-					actorUserAgent: ctx.userAgent ?? null,
-					customerId: user.customerId ?? null,
-					entityType: 'USER',
-					entityId: user.id,
-					summary: 'Account soft-locked after failed login attempts',
-					metadata: { username, failures: newCount },
-				})
-				return data(
-					{
-						result: submission.reply({
-							formErrors: ['Too many failed attempts. Please reset your password to unlock your account.'],
-							hideFields: ['password'],
-						}),
-					},
-					{ status: 423 },
-				)
-			}
-
-			const attemptsLeft = Math.max(0, 3 - newCount)
-			const msg = attemptsLeft > 0
-				? `Invalid username or password. ${attemptsLeft} attempt${attemptsLeft === 1 ? '' : 's'} remaining.`
-				: 'Invalid username or password.'
-			return data(
-				{ result: submission.reply({ formErrors: [msg] }) },
-				{ status: 400 },
-			)
-		}
-
-		// Unknown user: generic failure
-		return data(
-			{ result: submission.reply({ formErrors: ['Invalid username or password'] }) },
-			{ status: 400 },
-		)
-	}
-
-	// Successful verification; reset failed counter best-effort
-	if (user && (user.failedLoginCount ?? 0) > 0) {
-		await (prisma as any).user.update({ where: { id: user.id }, data: { failedLoginCount: 0 } }).catch(() => {})
-	}
-
-	// Check if user already has active sessions
-	const activeCount = await prisma.session.count({
-		where: { userId: verified.id, expirationDate: { gt: new Date() } },
-	})
-
-	if (activeCount > 0 && !confirmLogoutOthers) {
-		// Ask user to confirm proceeding. Do NOT hide password so they can continue without retyping.
-		return data(
-			{
-				warnExistingSessions: activeCount,
-				result: submission.reply({
-					formErrors: [
-						activeCount === 1
-							? 'There is already an active session for this account. Logging in here will sign out the other session.'
-							: `There are ${activeCount} active sessions for this account. Logging in here will sign out all other sessions.`,
-					],
-				}),
-			},
-			{ status: 200 },
-		)
-	}
-
-	// Proceed: create new session and then sign out other sessions
 	const session = await login(request, { username, password })
 	if (!session) {
-		// Very unlikely (race), but handle just in case
+		// Track failure and surface remaining attempts / lock messages
+		const res = await updateFailedLoginAttempt(username)
+		const banner =
+			res.status === 'soft'
+				? { kind: 'soft' as const, message: 'Too many attempts. Your account is temporarily locked. Please reset your password to unlock.' }
+				: res.status === 'hard'
+					? { kind: 'hard' as const, message: 'Too many rapid attempts. Your account is locked. Contact an administrator to unlock.' }
+					: undefined
+		const extra = res.status === 'normal' && res.remainingAttempts > 0 ? remainingAttemptsMessage(res.remainingAttempts) : null
 		return data(
 			{
+				lockBanner: banner,
+				remainingInfo: extra,
 				result: submission.reply({
-					formErrors: ['Login failed. Please try again.'],
+					formErrors: ['Invalid username or password'],
 					hideFields: ['password'],
 				}),
 			},
@@ -245,7 +110,6 @@ export async function action({ request }: { request: Request }) {
 		session,
 		remember: remember ?? false,
 		redirectTo,
-	    logoutOthers: true,
 	})
 }
 
@@ -268,13 +132,6 @@ export default function LoginPage({ actionData }: { actionData: any }) {
 	// 👁️ Show/Hide password toggle
 	const [showPassword, setShowPassword] = useState(false)
 
-	const showSessionWarning = Boolean(actionData?.warnExistingSessions)
-		const formErrors = (form.errors ?? []) as string[]
-		const showBigAlert = formErrors.length > 0
-		const primaryError = showBigAlert ? String(formErrors[0] ?? '') : ''
-	const isHardLock = /locked/i.test(primaryError) && /suspicious/i.test(primaryError)
-	const isSoftLock = /too many failed attempts/i.test(primaryError)
-
 	return (
 		<div className="flex min-h-full flex-col justify-center pt-20 pb-32 bg-gray-50">
 			<div className="mx-auto w-full max-w-md px-4 sm:px-0">
@@ -289,51 +146,23 @@ export default function LoginPage({ actionData }: { actionData: any }) {
 						</div>
 						<Spacer size="xs" />
 
-						{/* Prominent alert for errors (e.g., lockouts) */}
-						{showBigAlert && (
-							<div
-								role="alert"
-								aria-live="polite"
-								className={`${isHardLock ? 'border-red-300 bg-red-50 text-red-900' : isSoftLock ? 'border-yellow-300 bg-yellow-50 text-yellow-900' : 'border-amber-300 bg-amber-50 text-amber-900'} mb-4 rounded-lg border p-4`}
-							>
-								<div className="flex items-start gap-3">
-																			<Icon
-																				name={isHardLock ? 'hero:warning' : isSoftLock ? 'hero:lock-closed' : 'hero:info'}
-																				className={`${isHardLock ? 'text-red-600' : isSoftLock ? 'text-yellow-600' : 'text-amber-600'} h-5 w-5 mt-0.5`}
-																			/>
-									<div className="space-y-1">
-										<div className="font-semibold">
-											{isHardLock ? 'Account locked' : isSoftLock ? 'Too many failed attempts' : 'There was a problem'}
-										</div>
-										<div className="text-sm leading-5">
-											{primaryError}
-										</div>
-										{isSoftLock && (
-											<div className="text-xs">
-												Reset your password to unlock your account.{' '}
-												<Link to="/forgot-password" className="font-semibold underline">
-													Reset password
-												</Link>
-											</div>
-										)}
-										{isHardLock && (
-											<div className="text-xs">
-												Please contact your administrator to regain access.
-											</div>
-										)}
-									</div>
-								</div>
-							</div>
-						)}
+						{/* Lockout banners (accessible, prominent) */}
+						{actionData?.lockBanner?.kind === 'hard' ? (
+							<Alert className="mb-3" variant="error" heading="Account locked" role="alert" icon={<LockClosedIcon className="mt-0.5 h-5 w-5 text-red-600" aria-hidden="true" />}>
+								{actionData.lockBanner.message}
+							</Alert>
+						) : actionData?.lockBanner?.kind === 'soft' ? (
+							<Alert className="mb-3" variant="warning" heading="Too many attempts" role="alert" icon={<ExclamationTriangleIcon className="mt-0.5 h-5 w-5 text-amber-600" aria-hidden="true" />}>
+								{actionData.lockBanner.message}
+							</Alert>
+						) : null}
 
-            {showSessionWarning && (
-              <div className="mb-3 rounded border border-amber-300 bg-amber-50 text-amber-900 p-3 text-sm">
-                <div className="font-medium">You’re already signed in elsewhere</div>
-                <div>
-                  Logging in here will sign out your other active session{actionData?.warnExistingSessions > 1 ? 's' : ''}.
-                </div>
-              </div>
-            )}
+						{/* Remaining attempts info */}
+						{actionData?.remainingInfo ? (
+							<Alert className="mb-3" variant="info" size="sm" role="status" icon={<InformationCircleIcon className="mt-0.5 h-4 w-4 text-blue-600" aria-hidden="true" />}>
+								{actionData.remainingInfo}
+							</Alert>
+						) : null}
 
 						<Form method="POST" {...getFormProps(form)}>
 							<input type="hidden" name="intent" value="submit" />
@@ -414,23 +243,18 @@ export default function LoginPage({ actionData }: { actionData: any }) {
 							<input
 								{...getInputProps(fields.redirectTo, { type: 'hidden' })}
 							/>
-							<ErrorList errors={showBigAlert ? [] : form.errors} id={form.errorId} />
-
-							{/* Confirmation flag so second submit proceeds and logs out others */}
-							{showSessionWarning && (
-								<input type="hidden" name="confirmLogoutOthers" value="true" />
-							)}
+							<ErrorList errors={form.errors} id={form.errorId} />
 
 							<div className="flex items-center justify-between gap-6 pt-3">
 								<StatusButton
 									className="w-full rounded-md bg-gray-900 text-white shadow-sm
-													 hover:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500
-													 focus:ring-offset-2 transition"
+												 hover:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500
+												 focus:ring-offset-2 transition"
 									status={isPending ? 'pending' : (form.status ?? 'idle')}
 									type="submit"
 									disabled={isPending}
 								>
-									{showSessionWarning ? 'Continue and sign out others' : 'Log in'}
+									Log in
 								</StatusButton>
 							</div>
 						</Form>

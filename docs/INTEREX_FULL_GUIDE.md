@@ -34,7 +34,6 @@ This single document consolidates all key information about the InterEx applicat
 - [10) Testing Strategy](#10-testing-strategy)
 - [11) Page Catalog: Tables, Columns, Actions, Guardrails](#11-page-catalog-tables-columns-actions-guardrails)
 - [12) Security Appendix (2FA)](#12-security-appendix-2fa)
- - [12b) Security Appendix (Account Lockout)](#12b-security-appendix-account-lockout)
 - [13) Glossary](#13-glossary)
 - [14) Roadmap and Deferred Items](#14-roadmap-and-deferred-items)
 - [15) Quick Links](#15-quick-links)
@@ -137,30 +136,9 @@ Tip: For local development, a `MOCKS=true` flag can enable mock responses in dev
 - 2FA: Time-based OTP using `@epic-web/totp`; required for users who enable it; enforcement during login
 - Password policy: 12–24 chars, mixed character classes, breach/common password check
 - Forced password change: Gate access until a compliant password is set when flagged
-- Account lockout: Soft lock after 3 consecutive failures (self-unlock via reset), Hard lock after 3 rapid failures within 30s (admin unlock required). See Appendix 12b.
 - RBAC: Role checks at route boundaries; requires authentication for protected routes
 - PHI minimization: Strict audit logging heuristics; explicit opt-in required to log PHI
 - Session management: HttpOnly cookies; expiration and destruction on logout or admin resets
-
-### Sessions UI (Active Sessions)
-
-- Location: Profile → Active Sessions
-- Features:
-	- List all active sessions for the signed-in user, including:
-		- Device label with icon (phone for mobile UAs, laptop for desktop)
-		- Browser and OS summary (e.g., “Chrome 140 on macOS 10.15”)
-		- Signed in timestamp in Eastern Time with timezone label (EST/EDT)
-		- Last active timestamp (derived from session activity)
-		- IP address display following privacy mode
-	- Actions:
-		- Per-session Sign out to revoke a specific device
-		- “Sign Out Other Sessions” to log out everywhere else
-- Privacy modes for IP (configure via environment):
-	- `LOG_IP_MODE=raw` — store/show full IP
-	- `LOG_IP_MODE=masked` — store/show masked IP (/24 for IPv4, /48 for IPv6)
-	- `LOG_IP_MODE=hash` — store/show salted SHA-256 hash (set `IP_HASH_SALT`)
-- Notes:
-	- In local dev without proxy headers, IP may appear as “Unknown IP”. In production (Fly/Cloudflare), IP is taken from `fly-client-ip` or `cf-connecting-ip` (fallback to first `x-forwarded-for`).
 
 See: 2FA Implementation (full content included below in Appendix) and sections below
 
@@ -567,15 +545,6 @@ Highlights:
 ---
 
 ## 12) Security Appendix (2FA)
-## 12b) Security Appendix (Account Lockout)
-
-See `docs/ACCOUNT_LOCKOUT.md` for the complete policy and operational details.
-
-Highlights
-- Soft lock threshold: 3 consecutive invalid attempts; user unlocks via Reset Password
-- Hard lock threshold: 3 invalid attempts within 30 seconds; admin unlock only
-- Audits: ACCOUNT_SOFT_LOCKED, ACCOUNT_HARD_LOCKED, ACCOUNT_UNLOCKED
-
 
 - TOTP-based 2FA; secrets stored server-side on the `User`
 - Setup via `/me/2fa`; login flow prompts for code when enabled

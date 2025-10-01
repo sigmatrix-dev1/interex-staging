@@ -55,6 +55,7 @@ import {
     getRecipientByOid,
     categoryForOid,
 } from '#app/domain/submission-enums.ts'
+import { useBackGuard } from '#app/hooks/use-back-guard.ts'
 import { audit } from '#app/services/audit.server.ts'
 import { buildCreateSubmissionPayload, pcgUpdateSubmission, pcgGetStatus } from '#app/services/pcg-hih.server.ts'
 import { requireUserId } from '#app/utils/auth.server.ts'
@@ -932,6 +933,9 @@ export default function ReviewSubmission() {
             document.body.style.overflow = prev || ''
         }
     }, [])
+
+    // Block browser back on Step 2 without logging out
+    useBackGuard({ enabled: true, mode: 'block', blockMessage: 'Back navigation is disabled during submission review.' })
 
     return (
         <>

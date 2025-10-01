@@ -11,7 +11,7 @@ import { Icon } from '#app/components/ui/icon.tsx'
 import { StatusButton } from '#app/components/ui/status-button.tsx'
 import { ManualPasswordSection } from '#app/components/user-management/manual-password-section.tsx'
 import { audit as auditEvent } from '#app/services/audit.server.ts'
-import { requireUserId, isPasswordReused, captureCurrentPasswordToHistory } from '#app/utils/auth.server.ts'
+import { requireUserId, isPasswordReused, captureCurrentPasswordToHistory, adminUnlockAccount } from '#app/utils/auth.server.ts'
 import { prisma } from '#app/utils/db.server.ts'
 import { sendUserRegistrationEmail } from '#app/utils/emails/send-user-registration.server.ts'
 import { INTEREX_ROLES } from '#app/utils/interex-roles.ts'
@@ -74,6 +74,10 @@ const SetActiveSchema = z.object({
   userId: z.string().min(1),
   status: z.enum(['active', 'inactive']),
 })
+const UnlockUserSchema = z.object({
+  intent: z.literal('unlock-user'),
+  userId: z.string().min(1),
+})
 
 // New: Unassign all NPIs and deactivate in one atomic action
 const DeactivateAndUnassignSchema = z.object({
@@ -89,6 +93,7 @@ const ActionSchema = z.discriminatedUnion('intent', [
   AssignNpisSchema,
   CheckAvailabilitySchema,
   SetActiveSchema,
+  UnlockUserSchema,
   DeactivateAndUnassignSchema,
 ])
 
@@ -156,29 +161,12 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
             { username: { contains: searchTerm } },
           ]
         } : {},
-        select: {
-          id: true,
-          name: true,
-          email: true,
-          username: true,
-          active: true,
-          createdAt: true,
-          roles: {
-            select: { name: true }
-          },
-          providerGroup: {
-            select: { id: true, name: true }
-          },
+        include: {
+          roles: { select: { name: true } },
+          providerGroup: { select: { id: true, name: true } },
           userNpis: {
-            select: {
-              provider: {
-                select: {
-                  id: true,
-                  npi: true,
-                  name: true,
-                  providerGroupId: true
-                }
-              }
+            include: {
+              provider: { select: { id: true, npi: true, name: true, providerGroupId: true } }
             }
           }
         },
@@ -245,6 +233,7 @@ export async function action({ request, params }: ActionFunctionArgs) {
       | 'USER_RESET_PASSWORD' | 'USER_RESET_PASSWORD_ATTEMPT'
       | 'USER_ASSIGN_NPIS' | 'USER_ASSIGN_NPIS_ATTEMPT'
       | 'USER_DEACTIVATE_AND_UNASSIGN' | 'USER_DEACTIVATE_AND_UNASSIGN_ATTEMPT'
+      | 'UNLOCK_AND_ROTATE_PASSWORD'
     targetUserId?: string | null
     success: boolean
     message?: string | null
@@ -587,6 +576,62 @@ export async function action({ request, params }: ActionFunctionArgs) {
     await prisma.user.update({ where: { id: targetUserId }, data: { active: status === 'active' } })
     if (status === 'inactive') await prisma.session.deleteMany({ where: { userId: targetUserId } })
     return redirectWithToast(`/admin/customer-manage/${customerId}/users`, { type: 'success', title: status === 'inactive' ? 'User deactivated' : 'User activated', description: 'Status updated.' })
+  }
+
+  // Unlock user (clear soft/hard locks & counters)
+  if (action.intent === 'unlock-user') {
+    const targetUserId = action.userId
+    const target = await prisma.user.findFirst({ where: { id: targetUserId, customerId }, select: { id: true, email: true, name: true, username: true, customer: { select: { name: true } } } })
+    if (!target) {
+      return redirectWithToast(`/admin/customer-manage/${customerId}/users`, { type: 'error', title: 'User not found', description: 'Unable to unlock this user.' })
+    }
+    await adminUnlockAccount(targetUserId, userId)
+    // Rotate password and email the user
+    let emailSent = false
+    try {
+      let newPassword = generateTemporaryPassword()
+      {
+        const { validatePasswordComplexity } = await import('#app/utils/password-policy.server.ts')
+        for (let i = 0; i < 5; i++) {
+          const { ok } = validatePasswordComplexity(newPassword)
+          if (ok) break
+          newPassword = generateTemporaryPassword()
+        }
+      }
+      // Guard against reusing any of the last 5 passwords (very unlikely but enforced)
+      for (let i = 0; i < 5; i++) {
+        if (!(await isPasswordReused(targetUserId, newPassword))) break
+        newPassword = generateTemporaryPassword()
+      }
+      await captureCurrentPasswordToHistory(targetUserId)
+      const passwordHash = hashPassword(newPassword)
+      await prisma.password.upsert({ where: { userId: targetUserId }, create: { userId: targetUserId, hash: passwordHash }, update: { hash: passwordHash } })
+      await prisma.session.deleteMany({ where: { userId: targetUserId } })
+      await (prisma as any).user.update({ where: { id: targetUserId }, data: { mustChangePassword: true } })
+      const loginUrl = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/login`
+      await sendUserRegistrationEmail({
+        to: (target as any).email,
+        userName: (target as any).name || (target as any).username,
+        userRole: 'user',
+        customerName: target.customer?.name || '',
+        tempPassword: newPassword,
+        loginUrl,
+        username: (target as any).username,
+        providerGroupName: undefined,
+      })
+      emailSent = true
+    } catch (e) { console.error('Unlock rotation/email failed', e) }
+    // distinct audit event for unlock + rotate
+    try {
+      await writeAudit({
+        action: 'UNLOCK_AND_ROTATE_PASSWORD',
+        success: true,
+        targetUserId,
+        message: 'Account unlocked and password rotated',
+        metadata: { email: target.email, username: target.username, emailSent }
+      })
+    } catch {}
+    return redirectWithToast(`/admin/customer-manage/${customerId}/users`, { type: 'success', title: 'Account unlocked', description: 'Password reset and email sent. The user can log in again.' })
   }
 
   // Deactivate and Unassign all NPIs (single-click flow)
@@ -994,6 +1039,7 @@ export default function CustomerUsersManagementPage() {
                             Status
                           </th>
                           <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
+                          <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Unlock</th>
                           <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Reset</th>
                           <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Assign NPIs</th>
                         </tr>
@@ -1018,6 +1064,21 @@ export default function CustomerUsersManagementPage() {
                                   </span>
                                 ) : null}
                               </div>
+                            </td>
+                            <td className="px-6 py-4 whitespace-nowrap text-sm">
+                              {(() => {
+                                const isLocked = Boolean((userItem as any).softLocked || (userItem as any).hardLocked)
+                                return isLocked ? (
+                                  <Form method="post" className="inline">
+                                    <input type="hidden" name="intent" value="unlock-user" />
+                                    <input type="hidden" name="userId" value={userItem.id} />
+                                    <StatusButton type="submit" status={isPending ? 'pending' : 'idle'} className="inline-flex items-center px-2.5 py-1 rounded-md text-amber-700 hover:text-amber-900 hover:bg-amber-50">
+                                      <Icon name="lock-open-1" className="h-4 w-4 mr-1" />
+                                      Unlock
+                                    </StatusButton>
+                                  </Form>
+                                ) : <span className="text-gray-300">—</span>
+                              })()}
                             </td>
                             <td className="px-6 py-4 whitespace-nowrap">
                               <div className="text-sm text-gray-900">{userItem.email}</div>
@@ -1044,16 +1105,23 @@ export default function CustomerUsersManagementPage() {
                               </div>
                             </td>
                             <td className="px-6 py-4 whitespace-nowrap">
-                              <span
-                                className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
-                                userItem.active 
-                                  ? 'bg-green-100 text-green-800' 
-                                  : 'bg-gray-100 text-gray-800'
-                              }`}
-                                title={userItem.active ? 'Active — click the lock icon to deactivate.' : 'Inactive — activate to re-enable actions (delete disabled).'}
-                              >
-                                {userItem.active ? 'Active' : 'Inactive'}
-                              </span>
+                              <div className="flex items-center gap-2">
+                                <span
+                                  className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
+                                  userItem.active 
+                                    ? 'bg-green-100 text-green-800' 
+                                    : 'bg-gray-100 text-gray-800'
+                                }`}
+                                  title={userItem.active ? 'Active — click the lock icon to deactivate.' : 'Inactive — activate to re-enable actions (delete disabled).'}
+                                >
+                                  {userItem.active ? 'Active' : 'Inactive'}
+                                </span>
+                                {userItem.hardLocked ? (
+                                  <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium bg-red-100 text-red-800 border border-red-200">Hard-locked</span>
+                                ) : userItem.softLocked ? (
+                                  <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium bg-amber-100 text-amber-800 border border-amber-200">Soft-locked</span>
+                                ) : null}
+                              </div>
                             </td>
                             <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
                               <div className="flex items-center gap-2">

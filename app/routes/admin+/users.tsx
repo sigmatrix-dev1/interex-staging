@@ -2,7 +2,7 @@
 
 import { getFormProps, getInputProps, useForm } from '@conform-to/react'
 import { getZodConstraint, parseWithZod } from '@conform-to/zod'
-import { useState, useEffect, type Dispatch, type SetStateAction } from 'react'
+import { useState, useEffect } from 'react'
 import {
     type LoaderFunctionArgs,
     type ActionFunctionArgs,
@@ -21,7 +21,6 @@ import { Drawer } from '#app/components/ui/drawer.tsx'
 import { Icon } from '#app/components/ui/icon.tsx'
 import { StatusButton } from '#app/components/ui/status-button.tsx'
 import { prepareVerification } from '#app/routes/_auth+/verify.server.ts'
-import { audit } from '#app/services/audit.server.ts'
 import { requireUserId, checkIsCommonPassword } from '#app/utils/auth.server.ts'
 import { prisma } from '#app/utils/db.server.ts'
 import { sendAdminPasswordManualResetEmail } from '#app/utils/emails/send-admin-password-manual-reset.server.ts'
@@ -61,30 +60,6 @@ const ResetTwoFASchema = z.object({
     userId: z.string().min(1, 'User ID is required'),
 })
 
-// Unlock account (clear lockouts)
-const UnlockAccountSchema = z.object({
-    intent: z.literal('unlock-account'),
-    userId: z.string().min(1, 'User ID is required'),
-})
-
-// Delete flow (GitHub-style confirm by username)
-const DeleteUserSchema = z.object({
-    intent: z.literal('delete'),
-    userId: z.string().min(1, 'User ID is required'),
-    confirm: z.string().min(1, 'Confirmation required'),
-})
-
-// Optional helpers used in blocked-delete guidance
-const SetActiveSchema = z.object({
-    intent: z.literal('set-active'),
-    userId: z.string().min(1),
-    status: z.enum(['active', 'inactive']),
-})
-const DeactivateAndUnassignSchema = z.object({
-    intent: z.literal('deactivate-and-unassign'),
-    userId: z.string().min(1),
-})
-
 // --- FIX: make each branch a ZodObject with 'intent' key (no .and / intersection)
 const CreateUserActionSchema = CreateUserSchema.extend({
     intent: z.literal('create'),
@@ -96,10 +71,6 @@ const ActionSchema = z.discriminatedUnion('intent', [
     SendResetLinkSchema,
     ManualResetSchema,
     ResetTwoFASchema,
-    UnlockAccountSchema,
-    DeleteUserSchema,
-    SetActiveSchema,
-    DeactivateAndUnassignSchema,
 ])
 
 function CreateUserForm({
@@ -274,7 +245,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
     // Get customers and roles for dropdowns (needed for drawer)
     // System admins cannot create other system admins
     const [users, customers, roles] = await Promise.all([
-        (prisma as any).user.findMany({
+        prisma.user.findMany({
             select: {
                 id: true,
                 name: true,
@@ -282,8 +253,6 @@ export async function loader({ request }: LoaderFunctionArgs) {
                 username: true,
                 createdAt: true,
                 active: true,
-                softLocked: true,
-                hardLocked: true,
                 twoFactorEnabled: true,
                 customer: {
                     select: {
@@ -329,13 +298,12 @@ export async function loader({ request }: LoaderFunctionArgs) {
 
 export async function action({ request }: ActionFunctionArgs) {
     const adminUserId = await requireUserId(request)
-    const admin = await (prisma as any).user.findUnique({
+    const admin = await prisma.user.findUnique({
         where: { id: adminUserId },
         select: {
             id: true,
             name: true,
             email: true,
-            customer: { select: { id: true } },
             roles: { select: { name: true } },
         },
     })
@@ -600,7 +568,7 @@ export async function action({ request }: ActionFunctionArgs) {
 
         const targetUser = await prisma.user.findUnique({
             where: { id: userId },
-            select: { id: true, email: true, name: true, username: true, customer: { select: { id: true, name: true } } },
+            select: { id: true, email: true, name: true, username: true, customer: { select: { name: true } } },
         })
 
         if (!targetUser) {
@@ -611,7 +579,7 @@ export async function action({ request }: ActionFunctionArgs) {
             })
         }
 
-    // Disable 2FA via helper, clear secret and flag
+        // Disable 2FA via helper, clear secret and flag
         await disableTwoFactorForUser(userId)
 
         // Delete any existing verification records of type '2fa' to fully reset
@@ -626,207 +594,21 @@ export async function action({ request }: ActionFunctionArgs) {
         // Invalidate all sessions for extra security
         await prisma.session.deleteMany({ where: { userId } })
 
-        // Audit: Admin initiated 2FA reset
-        await audit.admin({
-            action: 'TWO_FACTOR_RESET',
-            actorType: 'USER',
-            actorId: adminUserId,
-            actorDisplay: admin.name || admin.email || null,
-            customerId: targetUser.customer?.id ?? null,
-            chainKey: targetUser.customer?.id || 'global',
-            entityType: 'User',
-            entityId: targetUser.id,
-            summary: `Admin reset 2FA for user ${targetUser.username}`,
-            metadata: { targetUser: { id: targetUser.id, email: targetUser.email, username: targetUser.username } },
+        await prisma.securityEvent.create({
+            data: {
+                kind: 'TWO_FACTOR_RESET',
+                message: 'Admin reset user 2FA',
+                userId: targetUser.id,
+                userEmail: targetUser.email,
+                success: true,
+                reason: 'ADMIN_TRIGGERED',
+            },
         })
 
         return redirectWithToast('/admin/users', {
             type: 'success',
             title: '2FA reset',
             description: `2FA has been reset for ${targetUser.name || targetUser.username}.`,
-        })
-    }
-
-    // ====== UNLOCK ACCOUNT (clear lock state) ======
-    if (submission.value.intent === 'unlock-account') {
-        const { userId } = submission.value
-
-        const targetUser = await (prisma as any).user.findUnique({
-            where: { id: userId },
-            select: {
-                id: true,
-                email: true,
-                username: true,
-                name: true,
-                customer: { select: { id: true, name: true } },
-                roles: { select: { name: true } },
-                hardLocked: true,
-                softLocked: true,
-            },
-        })
-
-        if (!targetUser) {
-            return redirectWithToast('/admin/users', {
-                type: 'error',
-                title: 'User not found',
-                description: 'Unable to unlock account. Please refresh and try again.',
-            })
-        }
-
-        // Authorization: System Admin can unlock any. Customer Admin can unlock within their customer, but not other customer-admins.
-    const isSystemAdmin = (admin.roles as Array<{ name: string }>).some((r) => r.name === 'system-admin')
-    const isCustomerAdmin = (admin.roles as Array<{ name: string }>).some((r) => r.name === 'customer-admin')
-        if (!isSystemAdmin) {
-            if (!isCustomerAdmin || !admin.customer?.id || targetUser.customer?.id !== admin.customer.id) {
-                return redirectWithToast('/admin/users', {
-                    type: 'error',
-                    title: 'Not authorized',
-                    description: 'You do not have permission to unlock this account.',
-                })
-            }
-            const targetIsCustomerAdmin = (targetUser.roles as Array<{ name: string }>).some((r) => r.name === 'customer-admin')
-            if (targetIsCustomerAdmin) {
-                return redirectWithToast('/admin/users', {
-                    type: 'error',
-                    title: 'Not authorized',
-                    description: 'Only system administrators can unlock customer-admin accounts.',
-                })
-            }
-        }
-
-        await (prisma as any).user.update({
-            where: { id: userId },
-            data: { hardLocked: false, softLocked: false, hardLockedAt: null, failedLoginCount: 0 },
-        })
-
-        await audit.security({
-            action: 'ACCOUNT_UNLOCKED',
-            actorType: 'USER',
-            actorId: admin.id,
-            actorDisplay: admin.name || admin.email || null,
-            customerId: targetUser.customer?.id ?? null,
-            entityType: 'USER',
-            entityId: targetUser.id,
-            summary: `Admin unlocked account for ${targetUser.username}`,
-            metadata: { targetUser: { id: targetUser.id, username: targetUser.username, email: targetUser.email } },
-        })
-
-        return redirectWithToast('/admin/users', {
-            type: 'success',
-            title: 'Account unlocked',
-            description: `${targetUser.name || targetUser.username}'s account has been unlocked.`,
-        })
-    }
-
-    // ====== SET ACTIVE / INACTIVE (used by delete-block guidance) ======
-    if (submission.value.intent === 'set-active') {
-        const { userId, status } = submission.value
-        const target = await prisma.user.findUnique({
-            where: { id: userId },
-            select: { id: true },
-        })
-        if (!target) {
-            return redirectWithToast('/admin/users', { type: 'error', title: 'User not found', description: 'Unable to update status.' })
-        }
-        await prisma.user.update({ where: { id: userId }, data: { active: status === 'active' } })
-        if (status === 'inactive') await prisma.session.deleteMany({ where: { userId } })
-        return redirectWithToast('/admin/users', { type: 'success', title: status === 'inactive' ? 'User deactivated' : 'User activated', description: 'Status updated.' })
-    }
-
-    // ====== DEACTIVATE AND UNASSIGN ALL NPIs ======
-    if (submission.value.intent === 'deactivate-and-unassign') {
-        const { userId } = submission.value
-        const target = await prisma.user.findUnique({
-            where: { id: userId },
-            select: { id: true },
-        })
-        if (!target) {
-            return redirectWithToast('/admin/users', { type: 'error', title: 'User not found', description: 'Unable to deactivate.' })
-        }
-        await prisma.$transaction([
-            prisma.userNpi.deleteMany({ where: { userId } }),
-            prisma.user.update({ where: { id: userId }, data: { active: false } }),
-            prisma.session.deleteMany({ where: { userId } }),
-        ])
-        return redirectWithToast('/admin/users', { type: 'success', title: 'User deactivated', description: 'All NPIs unassigned and user marked inactive.' })
-    }
-
-    // ====== DELETE USER (GitHub-style confirmation) ======
-    if (submission.value.intent === 'delete') {
-        const { userId: targetUserId, confirm } = submission.value
-
-        // Fetch target with roles and customer linkage
-        const targetUser = await prisma.user.findUnique({
-            where: { id: targetUserId },
-            include: { roles: { select: { name: true } }, customer: { select: { id: true, name: true } } },
-        })
-
-        if (!targetUser) {
-            return data({ error: 'User not found' }, { status: 404 })
-        }
-
-        // Prevent deleting system admins
-        const isTargetSystemAdmin = targetUser.roles.some(r => r.name === 'system-admin')
-        if (isTargetSystemAdmin) {
-            return redirectWithToast('/admin/users', {
-                type: 'error',
-                title: 'Cannot delete user',
-                description: 'Cannot delete system administrators.',
-            })
-        }
-
-        // No self-delete
-        if (targetUserId === adminUserId) {
-            return redirectWithToast('/admin/users', { type: 'error', title: 'Cannot delete self', description: 'You cannot delete your own account.' })
-        }
-
-        // Must confirm exact username
-        if (confirm.toLowerCase() !== (targetUser.username || '').toLowerCase()) {
-            return redirectWithToast('/admin/users', { type: 'error', title: 'Confirmation mismatch', description: 'Type the exact username to confirm deletion.' })
-        }
-
-        // If customer-admin, ensure not the last for their customer
-        const isCustomerAdmin = targetUser.roles.some(r => r.name === 'customer-admin')
-        if (isCustomerAdmin && targetUser.customer?.id) {
-            const remainingAdminCount = await prisma.user.count({
-                where: { customerId: targetUser.customer.id, id: { not: targetUserId }, roles: { some: { name: 'customer-admin' } } },
-            })
-            if (remainingAdminCount === 0) {
-                return redirectWithToast('/admin/users', { type: 'error', title: 'Cannot delete last admin', description: 'Assign another customer-admin before deleting this one.' })
-            }
-        }
-
-        // Preflight FK usage across system
-        const displayName = targetUser.name || targetUser.username
-        const [submissionCount, uploadCount, eventCount] = await Promise.all([
-            prisma.submission.count({ where: { creatorId: targetUserId } }),
-            prisma.submissionDocument.count({ where: { uploaderId: targetUserId } }),
-            prisma.providerEvent.count({ where: { actorId: targetUserId } }),
-        ])
-
-        if (submissionCount > 0 || uploadCount > 0 || eventCount > 0) {
-            return data({
-                deleteBlocked: {
-                    userId: targetUserId,
-                    userName: displayName,
-                    submissions: submissionCount,
-                    documents: uploadCount,
-                    events: eventCount,
-                    cause: 'fk-refs' as const,
-                },
-            })
-        }
-
-        // Hard delete: remove sessions then delete user
-        await prisma.$transaction([
-            prisma.session.deleteMany({ where: { userId: targetUserId } }),
-            prisma.user.delete({ where: { id: targetUserId } }),
-        ])
-
-        return redirectWithToast('/admin/users', {
-            type: 'success',
-            title: 'User deleted',
-            description: `${displayName} has been permanently removed.`,
         })
     }
 
@@ -842,8 +624,6 @@ export default function AdminUsers() {
     const { user, users, customers, roles } = useLoaderData<typeof loader>()
     const actionData = useActionData<typeof action>()
     const [searchParams, setSearchParams] = useSearchParams()
-    const isPending = useIsPending()
-    const [deleteModal, setDeleteModal] = useState<{ isOpen: boolean; userId?: string; username?: string; name?: string; confirmValue: string }>({ isOpen: false, confirmValue: '' })
 
     // Get current customer filter from URL
     const filterCustomerId = searchParams.get('filter')
@@ -896,15 +676,6 @@ export default function AdminUsers() {
         newParams.delete('customerId')
         setSearchParams(newParams)
     }
-
-    // Auto-close delete modal after successful deletion (user id disappears from users list)
-    useEffect(() => {
-        if (!deleteModal.isOpen || !deleteModal.userId) return
-        const stillExists = (users as any[]).some((u: any) => u.id === deleteModal.userId)
-        if (!stillExists) {
-            setDeleteModal(s => ({ ...s, isOpen: false, confirmValue: '' }))
-        }
-    }, [users, deleteModal.isOpen, deleteModal.userId])
 
     return (
         <InterexLayout
@@ -1103,19 +874,11 @@ export default function AdminUsers() {
                                                 </div>
                                             </div>
 
-                                            {/* Right-hand column: joined date + admin actions */}
+                                            {/* Right-hand column: joined date + new admin actions */}
                                             <div className="flex items-center space-x-3">
                                                 <p className="text-sm text-gray-500">
                                                     Joined {new Date(userItem.createdAt).toLocaleDateString()}
                                                 </p>
-
-                                                {/* Lock status indicators */}
-                                                {(userItem.softLocked || userItem.hardLocked) && (
-                                                    <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${userItem.hardLocked ? 'bg-red-100 text-red-800' : 'bg-amber-100 text-amber-800'}`} title={userItem.hardLocked ? 'Hard locked' : 'Soft locked'}>
-                                                        <Icon name={userItem.hardLocked ? 'lock-closed' : 'lock'} className="h-4 w-4 mr-1" />
-                                                        {userItem.hardLocked ? 'Hard Locked' : 'Soft Locked'}
-                                                    </span>
-                                                )}
 
                                                 {/* Admin: Send reset link */}
                                                 <Form method="post" className="inline">
@@ -1131,27 +894,6 @@ export default function AdminUsers() {
                                                         Send reset link
                                                     </button>
                                                 </Form>
-
-                                                {/* Admin: Unlock account */}
-                                                {(userItem.hardLocked || userItem.softLocked) && (
-                                                    <Form method="post" className="inline">
-                                                        <input type="hidden" name="intent" value="unlock-account" />
-                                                        <input type="hidden" name="userId" value={userItem.id} />
-                                                        <button
-                                                            type="submit"
-                                                            className="inline-flex items-center px-3 py-1.5 border border-transparent rounded-md shadow-sm text-xs font-medium text-white bg-green-600 hover:bg-green-700 focus:outline-none"
-                                                            title="Unlock this account"
-                                                            onClick={e => {
-                                                                if (!confirm(`Unlock account for \"${userItem.name || userItem.username}\"?`)) {
-                                                                    e.preventDefault()
-                                                                }
-                                                            }}
-                                                        >
-                                                            <Icon name="lock-open-1" className="h-4 w-4 mr-1" />
-                                                            Unlock
-                                                        </button>
-                                                    </Form>
-                                                )}
 
                                                 {/* Admin: Manual reset (temp password) */}
                                                 <Form method="post" className="inline">
@@ -1199,34 +941,6 @@ export default function AdminUsers() {
                                                         Reset 2FA
                                                     </button>
                                                 </Form>
-
-                                                {/* Admin: Delete user (GitHub-style confirm) */}
-                                                {(() => {
-                                                    const isSystemAdmin = userItem.roles.some((r: any) => r.name === 'system-admin')
-                                                    const isSelf = userItem.id === user.id
-                                                    const disabledReason = isSystemAdmin
-                                                        ? 'Cannot delete system administrators'
-                                                        : !userItem.active
-                                                            ? 'Cannot delete inactive users'
-                                                            : isSelf
-                                                                ? 'You cannot delete your own account'
-                                                                : null
-                                                    return (
-                                                        <button
-                                                            type="button"
-                                                            onClick={() => {
-                                                                if (disabledReason) return
-                                                                setDeleteModal({ isOpen: true, userId: userItem.id, username: userItem.username, name: userItem.name || userItem.username, confirmValue: '' })
-                                                            }}
-                                                            className={`inline-flex items-center px-3 py-1.5 border border-transparent rounded-md shadow-sm text-xs font-medium ${disabledReason ? 'text-gray-300 cursor-not-allowed' : 'text-white bg-red-600 hover:bg-red-700'}`}
-                                                            title={disabledReason || 'Delete user'}
-                                                            aria-disabled={disabledReason ? 'true' : 'false'}
-                                                        >
-                                                            <Icon name="trash" className="h-4 w-4 mr-1" />
-                                                            Delete
-                                                        </button>
-                                                    )
-                                                })()}
                                             </div>
                                         </div>
                                     </div>
@@ -1248,121 +962,6 @@ export default function AdminUsers() {
                     closeDrawer={closeDrawer}
                 />
             </Drawer>
-            <AdminUsersDeleteModal state={deleteModal} setState={setDeleteModal as unknown as Dispatch<SetStateAction<{ isOpen: boolean; userId?: string; username?: string; name?: string; confirmValue: string }>>} allUsers={filteredUsers as any[]} actionData={actionData} isPending={isPending} />
         </InterexLayout>
-    )
-}
-
-export function AdminUsersDeleteModal({
-    state,
-    setState,
-    allUsers,
-    actionData,
-    isPending,
-}: {
-    state: { isOpen: boolean; userId?: string; username?: string; name?: string; confirmValue: string }
-    setState: Dispatch<SetStateAction<{ isOpen: boolean; userId?: string; username?: string; name?: string; confirmValue: string }>>
-    allUsers: any[]
-    actionData: any
-    isPending: boolean
-}) {
-    if (!state.isOpen) return null
-    const userWithNpis = state.userId ? allUsers.find(u => u.id === state.userId) : undefined
-    const blocked = actionData && (actionData as any).deleteBlocked
-    const blockedForThis = blocked && blocked.userId === state.userId ? blocked : null
-    const targetMatch = state.username ? state.confirmValue.toLowerCase() === state.username.toLowerCase() : false
-    const disabled = !targetMatch || isPending || !state.userId || Boolean(blockedForThis)
-    return (
-        <div className="fixed inset-0 z-50" role="dialog" aria-modal="true" aria-labelledby="delete-user-title">
-            <div className="absolute inset-0 bg-black/40" onClick={() => setState(s => ({ ...s, isOpen: false, confirmValue: '' }))} />
-            <div className="absolute inset-0 flex items-center justify-center p-4">
-                <Form method="post" replace className="w-full max-w-md rounded-lg bg-white shadow-xl flex flex-col">
-                    <input type="hidden" name="intent" value="delete" />
-                    {state.userId && <input type="hidden" name="userId" value={state.userId} />}
-                    <div className="px-5 py-4 border-b border-gray-200">
-                        <h3 id="delete-user-title" className="text-sm font-semibold text-red-700 flex items-center gap-2">
-                            <Icon name="warning" className="h-4 w-4" /> Delete User
-                        </h3>
-                    </div>
-                    <div className="px-5 py-4 text-sm space-y-4">
-                        <p>
-                            You are about to permanently delete <strong>{state.name}</strong>. This action cannot be undone.
-                        </p>
-                        <ul className="list-disc pl-5 space-y-1 text-gray-600 text-xs">
-                            <li>All sessions will be terminated.</li>
-                            <li>NPI assignments will be removed.</li>
-                            <li>If this is the last customer admin, deletion is blocked.</li>
-                        </ul>
-                        <div>
-                            <label className="block text-xs font-medium text-gray-700 mb-1" htmlFor="delete-confirm-input">Type the username to confirm</label>
-                            <input
-                                id="delete-confirm-input"
-                                name="confirm"
-                                type="text"
-                                autoFocus
-                                value={state.confirmValue}
-                                onChange={e => {
-                                    const v = e.currentTarget.value
-                                    setState(s => ({ ...s, confirmValue: v }))
-                                }}
-                                className="w-full border rounded-md px-3 py-2 text-sm"
-                                placeholder={state.username}
-                            />
-                        </div>
-                        {blockedForThis ? (
-                            <div className="rounded-md border border-yellow-300 bg-yellow-50 p-3">
-                                <div className="flex">
-                                    <div className="flex-shrink-0"><Icon name="warning" className="h-4 w-4 text-yellow-600" /></div>
-                                    <div className="ml-2 text-xs">
-                                        <p className="text-yellow-800"><strong>Cannot delete {blockedForThis.userName}</strong></p>
-                                        <p className="text-yellow-700 mt-1">
-                                            Deletion is blocked because this user has {(() => {
-                                                const pieces: string[] = []
-                                                if (blockedForThis.submissions) pieces.push(`${blockedForThis.submissions} submission${blockedForThis.submissions === 1 ? '' : 's'}`)
-                                                if (blockedForThis.documents) pieces.push(`${blockedForThis.documents} uploaded document${blockedForThis.documents === 1 ? '' : 's'}`)
-                                                if (blockedForThis.events) pieces.push(`${blockedForThis.events} provider event${blockedForThis.events === 1 ? '' : 's'}`)
-                                                return pieces.length ? pieces.join(', ') : 'linked records'
-                                            })()}.
-                                            Please deactivate the user instead.
-                                        </p>
-                                        <div className="mt-2 flex gap-2">
-                                            {userWithNpis?.userNpis?.length ? (
-                                                <Form method="post" className="inline">
-                                                    <input type="hidden" name="intent" value="deactivate-and-unassign" />
-                                                    <input type="hidden" name="userId" value={blockedForThis.userId} />
-                                                    <StatusButton status={isPending ? 'pending' : 'idle'} type="submit" className="bg-yellow-600 hover:bg-yellow-700 text-white px-3 py-1 rounded-md">Unassign NPIs & Deactivate</StatusButton>
-                                                </Form>
-                                            ) : (
-                                                <Form method="post" className="inline">
-                                                    <input type="hidden" name="intent" value="set-active" />
-                                                    <input type="hidden" name="userId" value={blockedForThis.userId} />
-                                                    <input type="hidden" name="status" value="inactive" />
-                                                    <StatusButton status={isPending ? 'pending' : 'idle'} type="submit" className="bg-yellow-600 hover:bg-yellow-700 text-white px-3 py-1 rounded-md">Deactivate user</StatusButton>
-                                                </Form>
-                                            )}
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-                        ) : null}
-                        {state.username && state.confirmValue && state.confirmValue.toLowerCase() !== state.username.toLowerCase() && (
-                            <p className="text-xs text-red-600">Entered value does not match <code>{state.username}</code>.</p>
-                        )}
-                    </div>
-                    <div className="px-5 py-3 border-t border-gray-200 flex justify-end gap-3">
-                        <button
-                            type="button"
-                            onClick={() => setState(s => ({ ...s, isOpen: false, confirmValue: '' }))}
-                            className="inline-flex justify-center py-2 px-3 rounded-md border border-gray-300 text-sm bg-white text-gray-700 hover:bg-gray-50"
-                        >
-                            Cancel
-                        </button>
-                        <StatusButton type="submit" disabled={disabled} status={isPending ? 'pending' : 'idle'} className="inline-flex justify-center py-2 px-4 rounded-md text-sm text-white bg-red-600 hover:bg-red-700 disabled:opacity-40">
-                            Delete User
-                        </StatusButton>
-                    </div>
-                </Form>
-            </div>
-        </div>
     )
 }

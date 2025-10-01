@@ -38,7 +38,7 @@ export async function getUserId(request: Request) {
     if (!sessionId) return null
 
     const session = await prisma.session.findUnique({
-        select: { id: true, userId: true, expirationDate: true },
+        select: { userId: true, expirationDate: true },
         where: { id: sessionId, expirationDate: { gt: new Date() } },
     })
 
@@ -64,11 +64,6 @@ export async function getUserId(request: Request) {
                 'set-cookie': await authSessionStorage.destroySession(authSession),
             },
         })
-    }
-
-    // Update last active (updatedAt) best-effort and ignore failures
-    if (session?.id) {
-        void prisma.session.update({ where: { id: session.id }, data: { updatedAt: new Date() } }).catch(() => {})
     }
 
     return session.userId
@@ -124,8 +119,6 @@ export async function login(
             actorType: 'USER',
             actorId: undefined,
             actorDisplay: username,
-            actorIp: ctx.ip ?? null,
-            actorUserAgent: ctx.userAgent ?? null,
             customerId: null,
             requestId: ctx.requestId,
             traceId: ctx.traceId,
@@ -136,6 +129,15 @@ export async function login(
         })
         return null
     }
+
+    // On success, reset any soft lock / counters before creating session
+    try {
+        await (prisma as any).user.update({
+            where: { id: verified.id },
+            data: { failedLoginCount: 0, softLocked: false },
+            select: { id: true },
+        })
+    } catch {}
 
     const session = await prisma.session.create({
         select: { id: true, expirationDate: true, userId: true },
@@ -150,13 +152,11 @@ export async function login(
         actorType: 'USER',
         actorId: verified.id,
         actorDisplay: username,
-        actorIp: ctx.ip ?? null,
-        actorUserAgent: ctx.userAgent ?? null,
         customerId: ctx.customerId ?? null,
         requestId: ctx.requestId,
         traceId: ctx.traceId,
         spanId: ctx.spanId,
-        metadata: { username, sessionId: session.id, ip: ctx.ip, userAgent: ctx.userAgent },
+        metadata: { username, sessionId: session.id },
         summary: 'Login successful',
         status: 'SUCCESS',
     })
@@ -301,13 +301,11 @@ export async function logout(
         actorType: 'USER',
         actorId: actorId,
         actorDisplay: ctx.actorDisplay,
-        actorIp: ctx.ip ?? null,
-        actorUserAgent: ctx.userAgent ?? null,
         customerId: ctx.customerId ?? null,
         requestId: ctx.requestId,
         traceId: ctx.traceId,
         spanId: ctx.spanId,
-        metadata: { sessionId, redirectTo, ip: ctx.ip, userAgent: ctx.userAgent },
+        metadata: { sessionId, redirectTo },
         summary: 'User logout',
         status: 'SUCCESS',
     })
@@ -324,51 +322,6 @@ export async function logout(
 export async function getPasswordHash(password: string) {
     const hash = await bcrypt.hash(password, 10)
     return hash
-}
-
-// Password policy helpers: history + expiry
-export const PASSWORD_MAX_AGE_DAYS = 60
-export const PASSWORD_HISTORY_LIMIT = 5
-
-export async function isPasswordReused(userId: string, newPlainPassword: string) {
-    // Compare against current and last 5 history hashes
-    const current = await prisma.password.findUnique({ where: { userId } })
-    if (current && await bcrypt.compare(newPlainPassword, current.hash)) return true
-    const history = await (prisma as any).passwordHistory.findMany({
-        where: { userId },
-        orderBy: { createdAt: 'desc' },
-        take: PASSWORD_HISTORY_LIMIT,
-        select: { hash: true },
-    })
-    for (const h of history) {
-        if (await bcrypt.compare(newPlainPassword, (h as { hash: string }).hash)) return true
-    }
-    return false
-}
-
-export async function captureCurrentPasswordToHistory(userId: string) {
-    // Push current hash into history and keep only last PASSWORD_HISTORY_LIMIT entries
-    const current = await prisma.password.findUnique({ where: { userId }, select: { hash: true } })
-    if (current?.hash) {
-        await (prisma as any).passwordHistory.create({ data: { userId, hash: current.hash } })
-        // Trim extras beyond limit
-        const extra = await (prisma as any).passwordHistory.findMany({
-            where: { userId },
-            orderBy: { createdAt: 'desc' },
-            skip: PASSWORD_HISTORY_LIMIT,
-            select: { id: true },
-        })
-        if (extra.length) {
-            await (prisma as any).passwordHistory.deleteMany({ where: { id: { in: (extra as Array<{ id: string }>).map((e) => e.id) } } })
-        }
-    }
-}
-
-export function isPasswordExpired(passwordChangedAt: Date | null | undefined) {
-    if (!passwordChangedAt) return true
-    const ageMs = Date.now() - passwordChangedAt.getTime()
-    const maxMs = PASSWORD_MAX_AGE_DAYS * 24 * 60 * 60 * 1000
-    return ageMs > maxMs
 }
 
 export async function verifyUserPassword(
@@ -394,6 +347,190 @@ export async function verifyUserPassword(
     }
 
     return { id: userWithPassword.id }
+}
+
+// ============================================================
+// Account lockout helpers
+// - Soft lock: 3 consecutive invalid password attempts
+// - Hard lock: 3 invalid attempts within 10 seconds
+//   (We reuse hardLockedAt as the window start before lock; on lock, it's set to now.)
+// ============================================================
+
+export const LOCKOUT_MAX_ATTEMPTS = (() => {
+    const raw = process.env.LOCKOUT_MAX_ATTEMPTS
+    const n = raw ? Number(raw) : NaN
+    return Number.isFinite(n) && n > 0 ? Math.floor(n) : 3
+})()
+export const LOCKOUT_WINDOW_MS = (() => {
+    const raw = process.env.LOCKOUT_WINDOW_SECONDS
+    const n = raw ? Number(raw) : NaN
+    const sec = Number.isFinite(n) && n > 0 ? n : 10
+    return Math.floor(sec * 1000)
+})()
+
+export type FailedLoginResult =
+    | { status: 'normal'; remainingAttempts: number }
+    | { status: 'soft'; remainingAttempts: 0 }
+    | { status: 'hard'; remainingAttempts: 0 }
+
+export function remainingAttemptsMessage(remaining: number) {
+    if (remaining <= 0) return null
+    const plural = remaining === 1 ? '' : 's'
+    return `${remaining} attempt${plural} remaining before lock.`
+}
+
+/**
+ * Applies failed-login updates for a known username and returns the resulting state.
+ * If the user does not exist, it no-ops and returns normal.
+ */
+export async function updateFailedLoginAttempt(username: string): Promise<FailedLoginResult> {
+    const now = new Date()
+    const user = await (prisma as any).user.findUnique({
+        where: { username },
+        select: {
+            id: true,
+            failedLoginCount: true,
+            softLocked: true,
+            hardLocked: true,
+            hardLockedAt: true,
+        },
+    })
+    if (!user) return { status: 'normal', remainingAttempts: 0 }
+    if (user.hardLocked) return { status: 'hard', remainingAttempts: 0 }
+
+    // Determine window start for rapid attempts (used only to decide HARD vs SOFT lock)
+    let windowStart = user.hardLockedAt ? new Date(user.hardLockedAt) : null
+    const windowActive = !!(windowStart && now.getTime() - windowStart.getTime() <= LOCKOUT_WINDOW_MS)
+    if (!windowActive) {
+        windowStart = now
+    }
+
+    // Always increment the consecutive failed counter (do NOT reset when window expires)
+    const newCount = (user.failedLoginCount ?? 0) + 1
+
+    // Decide outcome
+    if (newCount >= LOCKOUT_MAX_ATTEMPTS) {
+        if (windowActive) {
+            // Hard lock
+            await (prisma as any).user.update({
+                where: { id: user.id },
+                data: {
+                    failedLoginCount: newCount,
+                    hardLocked: true,
+                    softLocked: false,
+                    hardLockedAt: now,
+                },
+            })
+            try {
+                await audit.auth({
+                    action: 'ACCOUNT_HARD_LOCKED',
+                    actorType: 'USER',
+                    actorId: user.id,
+                    actorDisplay: username,
+                    customerId: null,
+                    requestId: undefined,
+                    traceId: undefined,
+                    spanId: undefined,
+                    metadata: { username, failedLoginCount: newCount, windowMs: LOCKOUT_WINDOW_MS },
+                    summary: 'Account hard locked due to rapid failed logins',
+                    status: 'FAILURE',
+                })
+            } catch {}
+            return { status: 'hard', remainingAttempts: 0 }
+        } else {
+            // Soft lock (consecutive failures reached outside rapid window)
+            await (prisma as any).user.update({
+                where: { id: user.id },
+                data: {
+                    failedLoginCount: newCount,
+                    softLocked: true,
+                    // set/refresh window start for subsequent rapid calculations
+                    hardLockedAt: windowStart,
+                },
+            })
+            try {
+                await audit.auth({
+                    action: 'ACCOUNT_SOFT_LOCKED',
+                    actorType: 'USER',
+                    actorId: user.id,
+                    actorDisplay: username,
+                    customerId: null,
+                    requestId: undefined,
+                    traceId: undefined,
+                    spanId: undefined,
+                    metadata: { username, failedLoginCount: newCount },
+                    summary: 'Account soft locked after multiple failed logins',
+                    status: 'WARNING',
+                })
+            } catch {}
+            return { status: 'soft', remainingAttempts: 0 }
+        }
+    } else {
+        // Normal failed increment: keep consecutive count growing; update/refresh window start
+        await (prisma as any).user.update({
+            where: { id: user.id },
+            data: { failedLoginCount: newCount, hardLockedAt: windowStart },
+        })
+        const remaining = Math.max(0, LOCKOUT_MAX_ATTEMPTS - newCount)
+        return { status: 'normal', remainingAttempts: remaining }
+    }
+}
+
+/**
+ * Clears soft lock and failed counter. Does not clear hard lock (admin only).
+ */
+export async function clearSoftLockAndCounter(userId: string) {
+    try {
+        await (prisma as any).user.update({
+            where: { id: userId },
+            data: { failedLoginCount: 0, softLocked: false, hardLockedAt: null },
+        })
+        try {
+            await audit.auth({
+                action: 'ACCOUNT_UNLOCKED',
+                actorType: 'USER',
+                actorId: userId,
+                actorDisplay: undefined,
+                customerId: null,
+                requestId: undefined,
+                traceId: undefined,
+                spanId: undefined,
+                metadata: { reason: 'PASSWORD_RESET_OR_SUCCESSFUL_LOGIN' },
+                summary: 'Account unlocked (soft lock cleared)',
+                status: 'SUCCESS',
+            })
+        } catch {}
+    } catch {}
+}
+
+/**
+ * Admin-only: Clears ALL lock state for a user (soft + hard) and resets counters.
+ * Optionally records the admin who performed the unlock.
+ */
+export async function adminUnlockAccount(targetUserId: string, adminUserId?: string) {
+    try {
+        await (prisma as any).user.update({
+            where: { id: targetUserId },
+            data: { failedLoginCount: 0, softLocked: false, hardLocked: false, hardLockedAt: null },
+        })
+        try {
+            await audit.auth({
+                action: 'ACCOUNT_UNLOCKED_BY_ADMIN',
+                actorType: 'USER',
+                actorId: adminUserId ?? null,
+                actorDisplay: undefined,
+                customerId: null,
+                requestId: undefined,
+                traceId: undefined,
+                spanId: undefined,
+                entityType: 'USER',
+                entityId: targetUserId,
+                metadata: { reason: 'ADMIN_UNLOCK' },
+                summary: 'Account unlocked by administrator',
+                status: 'SUCCESS',
+            })
+        } catch {}
+    } catch {}
 }
 
 export function getPasswordHashParts(password: string) {
@@ -429,5 +566,69 @@ export async function checkIsCommonPassword(password: string) {
 
         console.warn('Unknown error during password check', error)
         return false
+    }
+}
+
+// ============================================================
+// Password history & reuse helpers
+// Policy: Disallow using any of the last 5 passwords (including current)
+// ============================================================
+
+/**
+ * Returns true if the provided candidate password matches the user's current
+ * password or any of the last 5 historical passwords.
+ */
+export async function isPasswordReused(userId: string, candidate: string) {
+    if (!userId || !candidate) return false
+    // Check current password hash first
+    const current = await prisma.password.findUnique({ where: { userId }, select: { hash: true } })
+    if (current?.hash) {
+        const sameAsCurrent = await bcrypt.compare(candidate, current.hash)
+        if (sameAsCurrent) return true
+    }
+    // Check last 5 from history (if table/model exists)
+    try {
+        const histories: Array<{ id: string; hash: string }> = await (prisma as any).passwordHistory.findMany({
+            where: { userId },
+            select: { id: true, hash: true },
+            orderBy: { createdAt: 'desc' },
+            take: 5,
+        })
+        for (const row of histories) {
+            if (row?.hash && (await bcrypt.compare(candidate, row.hash))) {
+                return true
+            }
+        }
+    } catch {
+        // If the PasswordHistory table is not present or client not generated, fail open on history but we already checked current
+        // console.warn('PasswordHistory lookup failed', e)
+    }
+    return false
+}
+
+/**
+ * Captures the user's CURRENT password hash into PasswordHistory, then trims
+ * history to keep only the 5 most recent entries.
+ */
+export async function captureCurrentPasswordToHistory(userId: string) {
+    if (!userId) return
+    const current = await prisma.password.findUnique({ where: { userId }, select: { hash: true } })
+    if (!current?.hash) return
+    try {
+        // Insert current hash into history
+        await (prisma as any).passwordHistory.create({ data: { userId, hash: current.hash } })
+        // Trim to last 5
+        const allIds: Array<{ id: string }> = await (prisma as any).passwordHistory.findMany({
+            where: { userId },
+            select: { id: true },
+            orderBy: { createdAt: 'desc' },
+        })
+        const extras = allIds.slice(5)
+        if (extras.length > 0) {
+            await (prisma as any).passwordHistory.deleteMany({ where: { id: { in: extras.map((r) => r.id) } } })
+        }
+    } catch {
+        // If table not present, skip silently (policy enforcement still relies on current hash check)
+        // console.warn('PasswordHistory capture failed', e)
     }
 }

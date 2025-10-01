@@ -25,10 +25,10 @@ model User {
   mustChangePassword Boolean   @default(false) // Force user to change password on next login
   passwordChangedAt  DateTime? // Timestamp of last successful password change
 
-  // Login security (lockout)
-  failedLoginCount Int      @default(0)  // consecutive failures since last success
-  softLocked       Boolean  @default(false) // user must self-reset password
-  hardLocked       Boolean  @default(false) // admin-only unlock after suspected attack
+  // Account lockout fields
+  failedLoginCount Int      @default(0)
+  softLocked       Boolean  @default(false)
+  hardLocked       Boolean  @default(false)
   hardLockedAt     DateTime?
 
   createdAt DateTime @default(now())
@@ -46,9 +46,6 @@ model User {
   sessions    Session[]
   connections Connection[]
   passkey     Passkey[]
-
-  // Password history entries (for reuse prevention)
-  passwordHistories PasswordHistory[]
 
   // Interex specific relationships
   customer        Customer?      @relation(fields: [customerId], references: [id])
@@ -122,18 +119,6 @@ model Password {
 
   user   User   @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: Cascade)
   userId String @unique
-}
-
-// Track password history for reuse prevention
-model PasswordHistory {
-  id        String   @id @default(cuid())
-  createdAt DateTime @default(now())
-
-  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: Cascade)
-  userId String
-  hash   String
-
-  @@index([userId, createdAt])
 }
 
 model Session {

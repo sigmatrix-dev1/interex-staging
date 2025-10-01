@@ -37,6 +37,7 @@ import { SubmissionActivityLog } from '#app/components/submission-activity-log.t
 import { Drawer } from '#app/components/ui/drawer.tsx'
 import { LoadingOverlay } from '#app/components/ui/loading-overlay.tsx'
 import { StatusButton } from '#app/components/ui/status-button.tsx'
+import { useBackGuard } from '#app/hooks/use-back-guard.ts'
 import { audit } from '#app/services/audit.server.ts'
 import { pcgUploadFiles, pcgGetStatus } from '#app/services/pcg-hih.server.ts'
 import { requireUserId } from '#app/utils/auth.server.ts'
@@ -474,6 +475,9 @@ export default function UploadSubmission() {
             document.body.style.overflow = prev || ''
         }
     }, [])
+
+    // Block browser back on Step 3 without logging out
+    useBackGuard({ enabled: true, mode: 'block', blockMessage: 'Back navigation is disabled during document upload.' })
 
     return (
         <>
