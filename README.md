@@ -38,6 +38,7 @@ npx epicli
 ### Project-specific docs
 
 - Complete Guide (single file, includes all docs inline): `docs/INTEREX_FULL_GUIDE.md`
+- Account Lockout Policy: `docs/ACCOUNT_LOCKOUT.md`
 
 ## Support
 

@@ -21,6 +21,7 @@ import { Drawer } from '#app/components/ui/drawer.tsx'
 import { Icon } from '#app/components/ui/icon.tsx'
 import { StatusButton } from '#app/components/ui/status-button.tsx'
 import { ManualPasswordSection } from '#app/components/user-management/manual-password-section.tsx'
+import { audit } from '#app/services/audit.server.ts'
 import { requireUserId } from '#app/utils/auth.server.ts'
 import { prisma } from '#app/utils/db.server.ts'
 import { sendAdminPasswordManualResetEmail } from '#app/utils/emails/send-admin-password-manual-reset.server.ts'
@@ -28,6 +29,7 @@ import { sendUserRegistrationEmail } from '#app/utils/emails/send-user-registrat
 import { INTEREX_ROLES } from '#app/utils/interex-roles.ts'
 import { useIsPending } from '#app/utils/misc.tsx'
 import { generateTemporaryPassword, hashPassword } from '#app/utils/password.server.ts'
+import { extractRequestContext } from '#app/utils/request-context.server.ts'
 import { requireRoles } from '#app/utils/role-redirect.server.ts'
 import { redirectWithToast, getToast } from '#app/utils/toast.server.ts'
 import {
@@ -76,6 +78,12 @@ const SetActiveSchema = z.object({
     status: z.enum(['active', 'inactive']),
 })
 
+// ✅ Unlock account (Customer Admin only)
+const UnlockAccountSchema = z.object({
+    intent: z.literal('unlock-account'),
+    userId: z.string().min(1, 'User ID is required'),
+})
+
 // Lightweight schema for live availability checks
 const CheckAvailabilitySchema = z.object({
     intent: z.literal('check-availability'),
@@ -90,6 +98,7 @@ const ActionSchema = z.discriminatedUnion('intent', [
     CheckAvailabilitySchema,
     ResetPasswordSchema,
     SetActiveSchema,
+    UnlockAccountSchema,
 ])
 
 export async function loader({ request }: LoaderFunctionArgs) {
@@ -578,7 +587,7 @@ export async function action({ request }: ActionFunctionArgs) {
         // Cast to any in case generated Prisma types not yet updated in this environment
         await (prisma as any).user.update({
             where: { id: targetUserId },
-            data: { mustChangePassword: true },
+            data: { mustChangePassword: true, softLocked: false, failedLoginCount: 0 },
             select: { id: true },
         })
 
@@ -597,6 +606,105 @@ export async function action({ request }: ActionFunctionArgs) {
             type: 'success',
             title: 'Password reset',
             description: `A new ${mode === 'auto' ? 'temporary' : 'manual'} password was emailed to ${targetUser.email}.`,
+        })
+    }
+
+    // ✅ Unlock account (Customer Admin only)
+    if (action.intent === 'unlock-account') {
+        if (!isCustomerAdmin) {
+            return data({ error: 'Only customer administrators can unlock accounts.' }, { status: 403 })
+        }
+        const { userId: targetUserId } = action
+
+        const targetUser = await (prisma as any).user.findFirst({
+            where: { id: targetUserId, customerId: user.customerId },
+            select: { id: true, name: true, username: true, email: true, hardLocked: true, softLocked: true },
+        })
+        if (!targetUser) {
+            return data({ error: 'User not found or not in your customer.' }, { status: 404 })
+        }
+
+        // No-op if not locked
+        if (!((targetUser as any).hardLocked || (targetUser as any).softLocked)) {
+            return redirectWithToast('/customer/users', {
+                type: 'message',
+                title: 'Nothing to unlock',
+                description: `${targetUser.name ?? targetUser.username} is not currently locked.`,
+            })
+        }
+
+        // 1) Clear lock flags and counters
+        await (prisma as any).user.update({
+            where: { id: targetUserId },
+            data: { hardLocked: false, softLocked: false, hardLockedAt: null, failedLoginCount: 0 },
+            select: { id: true },
+        })
+
+        // 2) Generate a compliant temporary password (regenerate until complexity satisfied, max 5 tries)
+        let temporaryPassword = generateTemporaryPassword()
+        {
+            const { validatePasswordComplexity } = await import('#app/utils/password-policy.server.ts')
+            for (let i = 0; i < 5; i++) {
+                const { ok } = validatePasswordComplexity(temporaryPassword)
+                if (ok) break
+                temporaryPassword = generateTemporaryPassword()
+            }
+        }
+
+        // 3) Upsert new password hash and force change; kill all sessions
+        const passwordHash = hashPassword(temporaryPassword)
+        await prisma.password.upsert({
+            where: { userId: targetUserId },
+            create: { userId: targetUserId, hash: passwordHash },
+            update: { hash: passwordHash },
+        })
+        await prisma.session.deleteMany({ where: { userId: targetUserId } })
+        await (prisma as any).user.update({
+            where: { id: targetUserId },
+            data: { mustChangePassword: true },
+            select: { id: true },
+        })
+
+        // 4) Notify user via email
+        try {
+            const loginUrl = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/login`
+            await sendAdminPasswordManualResetEmail({
+                to: targetUser.email,
+                recipientName: targetUser.name || targetUser.username,
+                requestedByName: user.name ?? undefined,
+                customerName: undefined,
+                username: targetUser.username,
+                tempPassword: temporaryPassword,
+                loginUrl,
+            })
+        } catch (e) {
+            console.error('Failed sending unlock password email:', e)
+        }
+
+        // Audit
+        try {
+            const ctx = await extractRequestContext(request, { requireUser: false })
+            await audit.security({
+                action: 'ACCOUNT_UNLOCKED',
+                actorType: 'USER',
+                actorId: user.id,
+                actorDisplay: user.email ?? user.name ?? 'admin',
+                actorIp: ctx.ip ?? null,
+                actorUserAgent: ctx.userAgent ?? null,
+                customerId: user.customerId ?? null,
+                entityType: 'USER',
+                entityId: targetUserId,
+                summary: 'Account unlocked by customer administrator',
+                metadata: { target: { id: targetUserId, username: targetUser.username, email: targetUser.email } },
+            })
+        } catch (e) {
+            console.error('Audit error (ACCOUNT_UNLOCKED):', e)
+        }
+
+        return redirectWithToast('/customer/users', {
+            type: 'success',
+            title: 'Account unlocked',
+            description: `A temporary password was emailed to ${targetUser.email}. The user must change it on next login.`,
         })
     }
 
@@ -1063,6 +1171,12 @@ export default function CustomerUsersPage() {
                                                         Status
                                                     </th>
                                                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                                        Lockout
+                                                    </th>
+                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                                        Unlock
+                                                    </th>
+                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                                                         Edit
                                                     </th>
                                                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
@@ -1093,6 +1207,7 @@ export default function CustomerUsersPage() {
                                                         (viewerIsProviderGroupAdmin && !isTargetCustomerAdmin && inViewerGroup)
 
                                                     const isBasic = userItem.roles.some(r => r.name === 'basic-user')
+                                                    const u = userItem as any
 
                                                     return (
                                                         <tr
@@ -1158,6 +1273,51 @@ export default function CustomerUsersPage() {
                                   >
                                     {userItem.active ? 'Active' : 'Inactive'}
                                   </span>
+                                                            </td>
+
+                                                            {/* Lockout pill(s) */}
+                                                            <td className="px-6 py-4 whitespace-nowrap">
+                                                                {u.hardLocked ? (
+                                                                    <span
+                                                                        className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-800"
+                                                                        title={u.hardLockedAt ? `Hard locked at ${new Date(u.hardLockedAt as any).toLocaleString()}` : 'Hard locked'}
+                                                                    >
+                                                                        Hard lock
+                                                                    </span>
+                                                                ) : u.softLocked ? (
+                                                                    <span
+                                                                        className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-yellow-100 text-yellow-800"
+                                                                        title="Soft lock"
+                                                                    >
+                                                                        Soft lock
+                                                                    </span>
+                                                                ) : (
+                                                                    <span className="text-xs text-gray-400">—</span>
+                                                                )}
+                                                            </td>
+
+                                                            {/* Unlock column (Customer Admin only) */}
+                                                            <td className="px-6 py-4 whitespace-nowrap text-sm">
+                                                                {(() => {
+                                                                    const u = userItem as any
+                                                                    const isLocked = Boolean(u?.hardLocked || u?.softLocked)
+                                                                    if (!isLocked) return <span className="text-gray-300">—</span>
+                                                                    if (!viewerIsCustomerAdmin || userItem.id === user.id) return <span className="text-gray-300">—</span>
+                                                                    return (
+                                                                        <Form method="post">
+                                                                            <input type="hidden" name="intent" value="unlock-account" />
+                                                                            <input type="hidden" name="userId" value={userItem.id} />
+                                                                            <button
+                                                                                type="submit"
+                                                                                className="inline-flex items-center px-2.5 py-1 rounded-md text-orange-700 hover:text-orange-900 hover:bg-orange-50"
+                                                                                title="Unlock account"
+                                                                            >
+                                                                                <Icon name="hero:warning" className="h-4 w-4 mr-1" />
+                                                                                Unlock
+                                                                            </button>
+                                                                        </Form>
+                                                                    )
+                                                                })()}
                                                             </td>
 
                                                             {/* Edit column */}

@@ -11,11 +11,14 @@ import { z } from 'zod'
 import { GeneralErrorBoundary } from '#app/components/error-boundary.tsx'
 import { CheckboxField, ErrorList, Field } from '#app/components/forms.tsx'
 import { Spacer } from '#app/components/spacer.tsx'
+import { Icon } from '#app/components/ui/icon.tsx'
 import { StatusButton } from '#app/components/ui/status-button.tsx'
+import { audit } from '#app/services/audit.server.ts'
 import { login, requireAnonymous, verifyUserPassword } from '#app/utils/auth.server.ts'
 import { prisma } from '#app/utils/db.server.ts'
 import { checkHoneypot } from '#app/utils/honeypot.server.ts'
 import { useIsPending } from '#app/utils/misc.tsx'
+import { extractRequestContext } from '#app/utils/request-context.server.ts'
 import { PasswordSchema, UsernameSchema } from '#app/utils/user-validation.ts'
 import { handleNewSession } from './login.server.ts'
 
@@ -58,18 +61,143 @@ export async function action({ request }: { request: Request }) {
 
 	const { username, password, remember, redirectTo, confirmLogoutOthers } = submission.value
 
-	// First, verify credentials without creating a session so we can decide UX
-	const verified = await verifyUserPassword({ username }, password)
-	if (!verified) {
+	// Preload user to apply lockout policy
+	const user = await (prisma as any).user.findUnique({
+		where: { username },
+		select: { id: true, customerId: true, failedLoginCount: true, softLocked: true, hardLocked: true },
+	})
+
+	// Enforce hard/soft locks
+	if (user?.hardLocked) {
 		return data(
 			{
 				result: submission.reply({
-					formErrors: ['Invalid username or password'],
+					formErrors: ['Your account is locked due to suspicious activity. Please contact your administrator.'],
 					hideFields: ['password'],
 				}),
 			},
+			{ status: 423 },
+		)
+	}
+	if (user?.softLocked) {
+		return data(
+			{
+				result: submission.reply({
+					formErrors: ['Too many failed attempts. Please reset your password to unlock your account.'],
+					hideFields: ['password'],
+				}),
+			},
+			{ status: 423 },
+		)
+	}
+
+	// First, verify credentials without creating a session so we can decide UX
+	const verified = await verifyUserPassword(user ? { id: user.id } : { username }, password)
+	if (!verified) {
+		// Track failure and consider lockouts for known users
+		const ctx = await extractRequestContext(request, { requireUser: false })
+		await audit.auth({
+			action: 'LOGIN_FAILURE',
+			actorType: 'USER',
+			actorId: user?.id,
+			actorDisplay: username,
+			actorIp: ctx.ip ?? null,
+			actorUserAgent: ctx.userAgent ?? null,
+			customerId: user?.customerId ?? null,
+			requestId: ctx.requestId,
+			traceId: ctx.traceId,
+			spanId: ctx.spanId,
+			metadata: { username, reason: 'INVALID_CREDENTIALS' },
+			summary: 'Login failed',
+			status: 'FAILURE',
+		})
+
+		if (user) {
+			const newCount = (user.failedLoginCount ?? 0) + 1
+			await (prisma as any).user.update({ where: { id: user.id }, data: { failedLoginCount: newCount } })
+
+			// Rapid attempt hard-lock: 3 in 30 seconds
+			const since = new Date(Date.now() - 30_000)
+			const windowFailures = await prisma.auditEvent.count({
+				where: {
+					category: 'AUTH',
+					action: 'LOGIN_FAILURE',
+					status: 'FAILURE',
+					actorDisplay: username,
+					createdAt: { gte: since },
+				},
+			})
+			if (windowFailures >= 3) {
+				await (prisma as any).user.update({ where: { id: user.id }, data: { hardLocked: true, hardLockedAt: new Date() } })
+				await audit.security({
+					action: 'ACCOUNT_HARD_LOCKED',
+					actorType: 'USER',
+					actorId: user.id,
+					actorIp: ctx.ip ?? null,
+					actorUserAgent: ctx.userAgent ?? null,
+					customerId: user.customerId ?? null,
+					entityType: 'USER',
+					entityId: user.id,
+					summary: 'Account locked after rapid failed login attempts',
+					metadata: { username, windowSeconds: 30, failures: windowFailures },
+				})
+				return data(
+					{
+						result: submission.reply({
+							formErrors: ['Your account has been locked due to suspicious activity. Please contact your administrator.'],
+							hideFields: ['password'],
+						}),
+					},
+					{ status: 423 },
+				)
+			}
+
+			// Soft lock on 3 consecutive failures
+			if (newCount >= 3) {
+				await (prisma as any).user.update({ where: { id: user.id }, data: { softLocked: true } })
+				await audit.security({
+					action: 'ACCOUNT_SOFT_LOCKED',
+					actorType: 'USER',
+					actorId: user.id,
+					actorIp: ctx.ip ?? null,
+					actorUserAgent: ctx.userAgent ?? null,
+					customerId: user.customerId ?? null,
+					entityType: 'USER',
+					entityId: user.id,
+					summary: 'Account soft-locked after failed login attempts',
+					metadata: { username, failures: newCount },
+				})
+				return data(
+					{
+						result: submission.reply({
+							formErrors: ['Too many failed attempts. Please reset your password to unlock your account.'],
+							hideFields: ['password'],
+						}),
+					},
+					{ status: 423 },
+				)
+			}
+
+			const attemptsLeft = Math.max(0, 3 - newCount)
+			const msg = attemptsLeft > 0
+				? `Invalid username or password. ${attemptsLeft} attempt${attemptsLeft === 1 ? '' : 's'} remaining.`
+				: 'Invalid username or password.'
+			return data(
+				{ result: submission.reply({ formErrors: [msg] }) },
+				{ status: 400 },
+			)
+		}
+
+		// Unknown user: generic failure
+		return data(
+			{ result: submission.reply({ formErrors: ['Invalid username or password'] }) },
 			{ status: 400 },
 		)
+	}
+
+	// Successful verification; reset failed counter best-effort
+	if (user && (user.failedLoginCount ?? 0) > 0) {
+		await (prisma as any).user.update({ where: { id: user.id }, data: { failedLoginCount: 0 } }).catch(() => {})
 	}
 
 	// Check if user already has active sessions
@@ -141,6 +269,11 @@ export default function LoginPage({ actionData }: { actionData: any }) {
 	const [showPassword, setShowPassword] = useState(false)
 
 	const showSessionWarning = Boolean(actionData?.warnExistingSessions)
+		const formErrors = (form.errors ?? []) as string[]
+		const showBigAlert = formErrors.length > 0
+		const primaryError = showBigAlert ? String(formErrors[0] ?? '') : ''
+	const isHardLock = /locked/i.test(primaryError) && /suspicious/i.test(primaryError)
+	const isSoftLock = /too many failed attempts/i.test(primaryError)
 
 	return (
 		<div className="flex min-h-full flex-col justify-center pt-20 pb-32 bg-gray-50">
@@ -155,6 +288,43 @@ export default function LoginPage({ actionData }: { actionData: any }) {
 							</p>
 						</div>
 						<Spacer size="xs" />
+
+						{/* Prominent alert for errors (e.g., lockouts) */}
+						{showBigAlert && (
+							<div
+								role="alert"
+								aria-live="polite"
+								className={`${isHardLock ? 'border-red-300 bg-red-50 text-red-900' : isSoftLock ? 'border-yellow-300 bg-yellow-50 text-yellow-900' : 'border-amber-300 bg-amber-50 text-amber-900'} mb-4 rounded-lg border p-4`}
+							>
+								<div className="flex items-start gap-3">
+																			<Icon
+																				name={isHardLock ? 'hero:warning' : isSoftLock ? 'hero:lock-closed' : 'hero:info'}
+																				className={`${isHardLock ? 'text-red-600' : isSoftLock ? 'text-yellow-600' : 'text-amber-600'} h-5 w-5 mt-0.5`}
+																			/>
+									<div className="space-y-1">
+										<div className="font-semibold">
+											{isHardLock ? 'Account locked' : isSoftLock ? 'Too many failed attempts' : 'There was a problem'}
+										</div>
+										<div className="text-sm leading-5">
+											{primaryError}
+										</div>
+										{isSoftLock && (
+											<div className="text-xs">
+												Reset your password to unlock your account.{' '}
+												<Link to="/forgot-password" className="font-semibold underline">
+													Reset password
+												</Link>
+											</div>
+										)}
+										{isHardLock && (
+											<div className="text-xs">
+												Please contact your administrator to regain access.
+											</div>
+										)}
+									</div>
+								</div>
+							</div>
+						)}
 
             {showSessionWarning && (
               <div className="mb-3 rounded border border-amber-300 bg-amber-50 text-amber-900 p-3 text-sm">
@@ -244,7 +414,7 @@ export default function LoginPage({ actionData }: { actionData: any }) {
 							<input
 								{...getInputProps(fields.redirectTo, { type: 'hidden' })}
 							/>
-							<ErrorList errors={form.errors} id={form.errorId} />
+							<ErrorList errors={showBigAlert ? [] : form.errors} id={form.errorId} />
 
 							{/* Confirmation flag so second submit proceeds and logs out others */}
 							{showSessionWarning && (

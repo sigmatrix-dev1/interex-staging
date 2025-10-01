@@ -9,6 +9,7 @@ import {
 	ScrollRestoration,
 	useLoaderData,
 	useMatches,
+	redirect,
 } from 'react-router'
 import { HoneypotProvider } from 'remix-utils/honeypot/react'
 import { type Route } from './+types/root.ts'
@@ -67,6 +68,8 @@ export const meta: Route.MetaFunction = ({ data }) => {
 
 export async function loader({ request }: Route.LoaderArgs) {
 	const timings = makeTimings('root loader')
+	const url = new URL(request.url)
+	const path = url.pathname
 	const userId = await time(() => getUserId(request), {
 		timings,
 		type: 'getUserId',
@@ -81,6 +84,7 @@ export async function loader({ request }: Route.LoaderArgs) {
 							id: true,
 							name: true,
 							username: true,
+							mustChangePassword: true,
 							image: { select: { objectKey: true } },
 							roles: {
 								select: {
@@ -102,6 +106,12 @@ export async function loader({ request }: Route.LoaderArgs) {
 		// them in the database. Maybe they were deleted? Let's log them out.
 		await logout({ request, redirectTo: '/' })
 	}
+
+	// Enforce forced password change across app routes (except the change page itself)
+	if (user?.mustChangePassword && path !== '/change-password') {
+		throw redirect('/change-password')
+	}
+
 	const { toast, headers: toastHeaders } = await getToast(request)
 
 	// Load persisted notifications (best-effort, ignore errors)
@@ -203,13 +213,19 @@ function App() {
 	useToast(data.toast)
 
 	// Check if we're on an app page that uses InterexLayout (has its own header)
-	const currentPath = matches[matches.length - 1]?.pathname || ''
+		const currentPath = matches[matches.length - 1]?.pathname || ''
 	const isAppPage = currentPath.startsWith('/customer') || 
-	                  currentPath.startsWith('/admin') || 
-	                  currentPath.startsWith('/provider') || 
-	                  currentPath.startsWith('/submissions') ||
-	                  currentPath.startsWith('/settings') ||
-	                  currentPath === '/dashboard'
+					  currentPath.startsWith('/admin') || 
+					  currentPath.startsWith('/provider') || 
+					  currentPath.startsWith('/submissions') ||
+					  currentPath.startsWith('/settings') ||
+					  currentPath.startsWith('/basic') ||
+					  currentPath === '/dashboard'
+		const isAuthGuardedPath =
+			currentPath === '/login' ||
+			currentPath === '/verify' ||
+			currentPath === '/reset-password' ||
+			currentPath === '/change-password'
 
 	return (
 		<OpenImgContextProvider
@@ -221,7 +237,7 @@ function App() {
 				{!isAppPage && (
 					<header className="container py-6">
 						<nav className="flex flex-wrap items-center justify-between gap-4 sm:flex-nowrap md:gap-8">
-							<Logo />
+							<Logo disabled={isAuthGuardedPath} />
 
 
 							<div className="block w-full sm:hidden">{searchBar}</div>
@@ -240,15 +256,27 @@ function App() {
 	)
 }
 
-function Logo() {
-	return (
-		<Link to="/" className="group grid leading-snug">
+function Logo({ disabled = false }: { disabled?: boolean }) {
+	const content = (
+		<>
 			<span className="font-bold text-2xl transition group-hover:translate-x-1 transition-colors: text-blue-900">
 				InterEx
 			</span>
 			<span className="font-medium text-sm transition group-hover:translate-x-1 transition-colors: text-blue-900">
 				InterOperability Exchange
 			</span>
+		</>
+	)
+	if (disabled) {
+		return (
+			<div aria-disabled className="group grid leading-snug cursor-not-allowed select-none opacity-80">
+				{content}
+			</div>
+		)
+	}
+	return (
+		<Link to="/" className="group grid leading-snug">
+			{content}
 		</Link>
 	)
 }

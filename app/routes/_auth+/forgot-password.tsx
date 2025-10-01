@@ -9,6 +9,7 @@ import { HoneypotInputs } from 'remix-utils/honeypot/react'
 import { z } from 'zod'
 import { GeneralErrorBoundary } from '#app/components/error-boundary.tsx'
 import { ErrorList, Field } from '#app/components/forms.tsx'
+import { Icon } from '#app/components/ui/icon.tsx'
 import { StatusButton } from '#app/components/ui/status-button.tsx'
 import { prisma } from '#app/utils/db.server.ts'
 import { sendEmail } from '#app/utils/email.server.ts'
@@ -30,24 +31,32 @@ export async function action({ request }: Route.ActionArgs) {
 	await checkHoneypot(formData)
 	const submission = await parseWithZod(formData, {
 		schema: ForgotPasswordSchema.superRefine(async (data, ctx) => {
-			const user = await prisma.user.findFirst({
-				where: {
-					OR: [
-						{ email: data.usernameOrEmail },
-						{ username: data.usernameOrEmail },
-					],
-				},
-				select: { id: true },
-			})
-			if (!user) {
-				ctx.addIssue({
-					path: ['usernameOrEmail'],
-					code: z.ZodIssueCode.custom,
-					message: 'No user exists with this username or email',
+				const user = await (prisma as any).user.findFirst({
+					where: {
+						OR: [
+							{ email: data.usernameOrEmail },
+							{ username: data.usernameOrEmail },
+						],
+					},
+					select: { id: true, hardLocked: true },
 				})
-				return
-			}
-		}),
+				if (!user) {
+					ctx.addIssue({
+						path: ['usernameOrEmail'],
+						code: z.ZodIssueCode.custom,
+						message: 'No user exists with this username or email',
+					})
+					return
+				}
+				if (user.hardLocked) {
+					ctx.addIssue({
+						path: ['usernameOrEmail'],
+						code: z.ZodIssueCode.custom,
+						message: 'Password reset is disabled for this account. Please contact your administrator.',
+					})
+					return
+				}
+			}),
 		async: true,
 	})
 	if (submission.status !== 'success') {
@@ -58,10 +67,17 @@ export async function action({ request }: Route.ActionArgs) {
 	}
 	const { usernameOrEmail } = submission.value
 
-	const user = await prisma.user.findFirstOrThrow({
+	const user = await (prisma as any).user.findFirstOrThrow({
 		where: { OR: [{ email: usernameOrEmail }, { username: usernameOrEmail }] },
-		select: { email: true, username: true },
+		select: { email: true, username: true, hardLocked: true },
 	})
+
+	if (user.hardLocked) {
+		return data(
+			{ result: submission.reply({ formErrors: ['Password reset is disabled for this account. Please contact your administrator.'] }) },
+			{ status: 423 },
+		)
+	}
 
 	const { verifyUrl, redirectTo, otp } = await prepareVerification({
 		period: 10 * 60,
@@ -142,6 +158,39 @@ export default function ForgotPasswordRoute() {
 					</p>
 				</div>
 				<div className="mx-auto mt-16 max-w-sm min-w-full sm:min-w-[368px]">
+					{(() => {
+						const formErrors = (form.errors ?? []) as string[]
+						const usernameErrors = (fields.usernameOrEmail.errors ?? []) as string[]
+						const fieldHardLock = usernameErrors.find(e => /disabled|hard\s*lock|locked/i.test(String(e)))
+						const isHardLock = Boolean(fieldHardLock) || formErrors.some(e => /disabled|hard\s*lock|locked/i.test(String(e)))
+						const hasFormError = formErrors.length > 0
+						const showBanner = isHardLock || hasFormError
+						if (!showBanner) return null
+						const primaryError = hasFormError ? String(formErrors[0] ?? '') : String(fieldHardLock ?? '')
+						return (
+							<div
+								role="alert"
+								aria-live="polite"
+								className={`${isHardLock ? 'border-red-300 bg-red-50 text-red-900' : 'border-amber-300 bg-amber-50 text-amber-900'} mb-4 rounded-lg border p-4`}
+							>
+								<div className="flex items-start gap-3">
+									<Icon
+										name={isHardLock ? 'hero:warning' : 'hero:info'}
+										className={`${isHardLock ? 'text-red-600' : 'text-amber-600'} h-5 w-5 mt-0.5`}
+									/>
+									<div className="space-y-1">
+										<div className="font-semibold">
+											{isHardLock ? 'Password reset disabled' : 'There was a problem'}
+										</div>
+										<div className="text-sm leading-5">{primaryError}</div>
+										{isHardLock && (
+											<div className="text-xs">Please contact your administrator to regain access.</div>
+										)}
+									</div>
+								</div>
+							</div>
+						)
+					})()}
 					<forgotPassword.Form method="POST" {...getFormProps(form)}>
 						<HoneypotInputs />
 						<div>
@@ -154,10 +203,20 @@ export default function ForgotPasswordRoute() {
 									autoFocus: true,
 									...getInputProps(fields.usernameOrEmail, { type: 'text' }),
 								}}
-								errors={fields.usernameOrEmail.errors}
+							errors={(() => {
+								const usernameErrors = (fields.usernameOrEmail.errors ?? []) as string[]
+								const isHardLock = usernameErrors.some(e => /disabled|hard\s*lock|locked/i.test(String(e)))
+								return isHardLock ? [] : fields.usernameOrEmail.errors
+							})()}
 							/>
 						</div>
-						<ErrorList errors={form.errors} id={form.errorId} />
+						{(() => {
+							const formErrors = (form.errors ?? []) as string[]
+							const usernameErrors = (fields.usernameOrEmail.errors ?? []) as string[]
+							const isHardLock = usernameErrors.some(e => /disabled|hard\s*lock|locked/i.test(String(e))) || formErrors.some(e => /disabled|hard\s*lock|locked/i.test(String(e)))
+							const showBanner = isHardLock || formErrors.length > 0
+							return <ErrorList errors={showBanner ? [] : form.errors} id={form.errorId} />
+						})()}
 
 						<div className="mt-6">
 							<StatusButton

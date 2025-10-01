@@ -66,6 +66,11 @@ export const AuditActionValues = [
     'USER_ASSIGN_NPIS_ATTEMPT',
     'USER_DISABLE',
 
+    /* Account lockouts */
+    'ACCOUNT_SOFT_LOCKED',
+    'ACCOUNT_HARD_LOCKED',
+    'ACCOUNT_UNLOCKED',
+
     /* Admin: Provider Groups */
     'PROVIDER_GROUP_CREATE',
     'PROVIDER_GROUP_CREATE_ATTEMPT',
@@ -154,6 +159,10 @@ export const AuditActionLabels: Record<AuditAction, string> = {
     USER_ASSIGN_NPIS: 'User: Assign NPIs',
     USER_ASSIGN_NPIS_ATTEMPT: 'User: Assign NPIs (Attempt)',
     USER_DISABLE: 'User: Disable',
+
+    ACCOUNT_SOFT_LOCKED: 'Auth: Account Soft-Locked',
+    ACCOUNT_HARD_LOCKED: 'Auth: Account Hard-Locked',
+    ACCOUNT_UNLOCKED: 'Auth: Account Unlocked',
 
     PROVIDER_GROUP_CREATE: 'Provider Group: Create',
     PROVIDER_GROUP_CREATE_ATTEMPT: 'Provider Group: Create (Attempt)',

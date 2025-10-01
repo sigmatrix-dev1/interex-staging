@@ -25,6 +25,12 @@ model User {
   mustChangePassword Boolean   @default(false) // Force user to change password on next login
   passwordChangedAt  DateTime? // Timestamp of last successful password change
 
+  // Login security (lockout)
+  failedLoginCount Int      @default(0)  // consecutive failures since last success
+  softLocked       Boolean  @default(false) // user must self-reset password
+  hardLocked       Boolean  @default(false) // admin-only unlock after suspected attack
+  hardLockedAt     DateTime?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -65,6 +71,7 @@ model User {
   @@index([customerId])
   @@index([providerGroupId])
   @@index([deletedAt])
+  @@index([hardLocked])
 }
 
 model Note {

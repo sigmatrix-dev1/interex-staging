@@ -34,6 +34,7 @@ This single document consolidates all key information about the InterEx applicat
 - [10) Testing Strategy](#10-testing-strategy)
 - [11) Page Catalog: Tables, Columns, Actions, Guardrails](#11-page-catalog-tables-columns-actions-guardrails)
 - [12) Security Appendix (2FA)](#12-security-appendix-2fa)
+ - [12b) Security Appendix (Account Lockout)](#12b-security-appendix-account-lockout)
 - [13) Glossary](#13-glossary)
 - [14) Roadmap and Deferred Items](#14-roadmap-and-deferred-items)
 - [15) Quick Links](#15-quick-links)
@@ -136,6 +137,7 @@ Tip: For local development, a `MOCKS=true` flag can enable mock responses in dev
 - 2FA: Time-based OTP using `@epic-web/totp`; required for users who enable it; enforcement during login
 - Password policy: 12–24 chars, mixed character classes, breach/common password check
 - Forced password change: Gate access until a compliant password is set when flagged
+- Account lockout: Soft lock after 3 consecutive failures (self-unlock via reset), Hard lock after 3 rapid failures within 30s (admin unlock required). See Appendix 12b.
 - RBAC: Role checks at route boundaries; requires authentication for protected routes
 - PHI minimization: Strict audit logging heuristics; explicit opt-in required to log PHI
 - Session management: HttpOnly cookies; expiration and destruction on logout or admin resets
@@ -565,6 +567,15 @@ Highlights:
 ---
 
 ## 12) Security Appendix (2FA)
+## 12b) Security Appendix (Account Lockout)
+
+See `docs/ACCOUNT_LOCKOUT.md` for the complete policy and operational details.
+
+Highlights
+- Soft lock threshold: 3 consecutive invalid attempts; user unlocks via Reset Password
+- Hard lock threshold: 3 invalid attempts within 30 seconds; admin unlock only
+- Audits: ACCOUNT_SOFT_LOCKED, ACCOUNT_HARD_LOCKED, ACCOUNT_UNLOCKED
+
 
 - TOTP-based 2FA; secrets stored server-side on the `User`
 - Setup via `/me/2fa`; login flow prompts for code when enabled

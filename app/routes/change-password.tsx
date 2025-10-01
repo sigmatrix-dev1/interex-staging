@@ -7,7 +7,7 @@ import { type SEOHandle } from '@nasa-gcn/remix-seo'
 import React from 'react'
 import { data, Form, redirect } from 'react-router'
 import { GeneralErrorBoundary } from '#app/components/error-boundary.tsx'
-import { ErrorList, Field } from '#app/components/forms.tsx'
+import { ErrorList } from '#app/components/forms.tsx'
 import { Icon } from '#app/components/ui/icon.tsx'
 import { StatusButton } from '#app/components/ui/status-button.tsx'
 import { audit } from '#app/services/audit.server.ts'
@@ -105,6 +105,7 @@ export async function action({ request }: { request: Request }) {
 export default function ForcedChangePasswordPage({ actionData }: any) {
   const isPending = useIsPending()
   const [show, setShow] = React.useState(false)
+  const [showConfirm, setShowConfirm] = React.useState(false)
   const [pwd, setPwd] = React.useState('')
   // live checks mirror server complexity
   const checks = [
@@ -149,7 +150,7 @@ export default function ForcedChangePasswordPage({ actionData }: any) {
                 className="absolute inset-y-0 right-0 flex items-center pr-3 text-gray-500 hover:text-gray-700"
                 aria-label={show ? 'Hide password' : 'Show password'}
               >
-                <Icon name={show ? 'eye-closed' : 'eye'} className="h-5 w-5" />
+                <Icon name={show ? 'hero:eye' : 'hero:eye-slash'} className="h-5 w-5" />
               </button>
             </div>
             {fields.password.errors?.length ? (
@@ -172,11 +173,42 @@ export default function ForcedChangePasswordPage({ actionData }: any) {
               )}
             </ul>
           </div>
-          <Field
-            labelProps={{ htmlFor: fields.confirmPassword.id, children: 'Confirm Password' }}
-            inputProps={{ ...getInputProps(fields.confirmPassword, { type: 'password' }), autoComplete: 'new-password' }}
-            errors={fields.confirmPassword.errors}
-          />
+          <div className="space-y-2 mt-4">
+            <label className="text-sm font-medium text-gray-700" htmlFor={fields.confirmPassword.id}>Confirm Password</label>
+            <div className="relative">
+              <input
+                {...getInputProps(fields.confirmPassword, { type: showConfirm ? 'text' : 'password' })}
+                id={fields.confirmPassword.id}
+                autoComplete="new-password"
+                className="w-full rounded-md border border-gray-300 pr-10 py-2 px-3 focus:outline-none focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500"
+              />
+              <button
+                type="button"
+                onClick={() => setShowConfirm(s => !s)}
+                className="absolute inset-y-0 right-0 flex items-center pr-3 text-gray-500 hover:text-gray-700"
+                aria-label={showConfirm ? 'Hide password' : 'Show password'}
+              >
+                <Icon name={showConfirm ? 'hero:eye' : 'hero:eye-slash'} className="h-5 w-5" />
+              </button>
+            </div>
+            {fields.confirmPassword.errors?.length ? (
+              <ul className="text-xs text-red-600 space-y-0.5">
+                {fields.confirmPassword.errors.map(e => <li key={e}>{e}</li>)}
+              </ul>
+            ) : null}
+            {pwd ? (
+              <div className={
+                (fields.confirmPassword.value && fields.confirmPassword.value === pwd)
+                  ? 'text-[11px] text-green-600 mt-1 flex items-center gap-1'
+                  : 'text-[11px] text-gray-500 mt-1 flex items-center gap-1'
+              }>
+                {(fields.confirmPassword.value && fields.confirmPassword.value === pwd)
+                  ? <Icon name="check" className="h-3 w-3" />
+                  : <span className="text-xs">•</span>}
+                <span>{(fields.confirmPassword.value && fields.confirmPassword.value === pwd) ? 'Passwords match' : 'Passwords must match'}</span>
+              </div>
+            ) : null}
+          </div>
           <ErrorList errors={form.errors} id={form.errorId} />
           <StatusButton className="w-full mt-4" status={isPending ? 'pending' : (form.status ?? 'idle')} type="submit" disabled={isPending}>Update Password</StatusButton>
         </Form>

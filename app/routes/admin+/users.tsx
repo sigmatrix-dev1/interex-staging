@@ -61,6 +61,12 @@ const ResetTwoFASchema = z.object({
     userId: z.string().min(1, 'User ID is required'),
 })
 
+// Unlock account (clear lockouts)
+const UnlockAccountSchema = z.object({
+    intent: z.literal('unlock-account'),
+    userId: z.string().min(1, 'User ID is required'),
+})
+
 // Delete flow (GitHub-style confirm by username)
 const DeleteUserSchema = z.object({
     intent: z.literal('delete'),
@@ -90,6 +96,7 @@ const ActionSchema = z.discriminatedUnion('intent', [
     SendResetLinkSchema,
     ManualResetSchema,
     ResetTwoFASchema,
+    UnlockAccountSchema,
     DeleteUserSchema,
     SetActiveSchema,
     DeactivateAndUnassignSchema,
@@ -267,7 +274,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
     // Get customers and roles for dropdowns (needed for drawer)
     // System admins cannot create other system admins
     const [users, customers, roles] = await Promise.all([
-        prisma.user.findMany({
+        (prisma as any).user.findMany({
             select: {
                 id: true,
                 name: true,
@@ -275,6 +282,8 @@ export async function loader({ request }: LoaderFunctionArgs) {
                 username: true,
                 createdAt: true,
                 active: true,
+                softLocked: true,
+                hardLocked: true,
                 twoFactorEnabled: true,
                 customer: {
                     select: {
@@ -320,12 +329,13 @@ export async function loader({ request }: LoaderFunctionArgs) {
 
 export async function action({ request }: ActionFunctionArgs) {
     const adminUserId = await requireUserId(request)
-    const admin = await prisma.user.findUnique({
+    const admin = await (prisma as any).user.findUnique({
         where: { id: adminUserId },
         select: {
             id: true,
             name: true,
             email: true,
+            customer: { select: { id: true } },
             roles: { select: { name: true } },
         },
     })
@@ -634,6 +644,77 @@ export async function action({ request }: ActionFunctionArgs) {
             type: 'success',
             title: '2FA reset',
             description: `2FA has been reset for ${targetUser.name || targetUser.username}.`,
+        })
+    }
+
+    // ====== UNLOCK ACCOUNT (clear lock state) ======
+    if (submission.value.intent === 'unlock-account') {
+        const { userId } = submission.value
+
+        const targetUser = await (prisma as any).user.findUnique({
+            where: { id: userId },
+            select: {
+                id: true,
+                email: true,
+                username: true,
+                name: true,
+                customer: { select: { id: true, name: true } },
+                roles: { select: { name: true } },
+                hardLocked: true,
+                softLocked: true,
+            },
+        })
+
+        if (!targetUser) {
+            return redirectWithToast('/admin/users', {
+                type: 'error',
+                title: 'User not found',
+                description: 'Unable to unlock account. Please refresh and try again.',
+            })
+        }
+
+        // Authorization: System Admin can unlock any. Customer Admin can unlock within their customer, but not other customer-admins.
+    const isSystemAdmin = (admin.roles as Array<{ name: string }>).some((r) => r.name === 'system-admin')
+    const isCustomerAdmin = (admin.roles as Array<{ name: string }>).some((r) => r.name === 'customer-admin')
+        if (!isSystemAdmin) {
+            if (!isCustomerAdmin || !admin.customer?.id || targetUser.customer?.id !== admin.customer.id) {
+                return redirectWithToast('/admin/users', {
+                    type: 'error',
+                    title: 'Not authorized',
+                    description: 'You do not have permission to unlock this account.',
+                })
+            }
+            const targetIsCustomerAdmin = (targetUser.roles as Array<{ name: string }>).some((r) => r.name === 'customer-admin')
+            if (targetIsCustomerAdmin) {
+                return redirectWithToast('/admin/users', {
+                    type: 'error',
+                    title: 'Not authorized',
+                    description: 'Only system administrators can unlock customer-admin accounts.',
+                })
+            }
+        }
+
+        await (prisma as any).user.update({
+            where: { id: userId },
+            data: { hardLocked: false, softLocked: false, hardLockedAt: null, failedLoginCount: 0 },
+        })
+
+        await audit.security({
+            action: 'ACCOUNT_UNLOCKED',
+            actorType: 'USER',
+            actorId: admin.id,
+            actorDisplay: admin.name || admin.email || null,
+            customerId: targetUser.customer?.id ?? null,
+            entityType: 'USER',
+            entityId: targetUser.id,
+            summary: `Admin unlocked account for ${targetUser.username}`,
+            metadata: { targetUser: { id: targetUser.id, username: targetUser.username, email: targetUser.email } },
+        })
+
+        return redirectWithToast('/admin/users', {
+            type: 'success',
+            title: 'Account unlocked',
+            description: `${targetUser.name || targetUser.username}'s account has been unlocked.`,
         })
     }
 
@@ -1028,6 +1109,14 @@ export default function AdminUsers() {
                                                     Joined {new Date(userItem.createdAt).toLocaleDateString()}
                                                 </p>
 
+                                                {/* Lock status indicators */}
+                                                {(userItem.softLocked || userItem.hardLocked) && (
+                                                    <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${userItem.hardLocked ? 'bg-red-100 text-red-800' : 'bg-amber-100 text-amber-800'}`} title={userItem.hardLocked ? 'Hard locked' : 'Soft locked'}>
+                                                        <Icon name={userItem.hardLocked ? 'lock-closed' : 'lock'} className="h-4 w-4 mr-1" />
+                                                        {userItem.hardLocked ? 'Hard Locked' : 'Soft Locked'}
+                                                    </span>
+                                                )}
+
                                                 {/* Admin: Send reset link */}
                                                 <Form method="post" className="inline">
                                                     <input type="hidden" name="intent" value="send-reset-link" />
@@ -1042,6 +1131,27 @@ export default function AdminUsers() {
                                                         Send reset link
                                                     </button>
                                                 </Form>
+
+                                                {/* Admin: Unlock account */}
+                                                {(userItem.hardLocked || userItem.softLocked) && (
+                                                    <Form method="post" className="inline">
+                                                        <input type="hidden" name="intent" value="unlock-account" />
+                                                        <input type="hidden" name="userId" value={userItem.id} />
+                                                        <button
+                                                            type="submit"
+                                                            className="inline-flex items-center px-3 py-1.5 border border-transparent rounded-md shadow-sm text-xs font-medium text-white bg-green-600 hover:bg-green-700 focus:outline-none"
+                                                            title="Unlock this account"
+                                                            onClick={e => {
+                                                                if (!confirm(`Unlock account for \"${userItem.name || userItem.username}\"?`)) {
+                                                                    e.preventDefault()
+                                                                }
+                                                            }}
+                                                        >
+                                                            <Icon name="lock-open-1" className="h-4 w-4 mr-1" />
+                                                            Unlock
+                                                        </button>
+                                                    </Form>
+                                                )}
 
                                                 {/* Admin: Manual reset (temp password) */}
                                                 <Form method="post" className="inline">
