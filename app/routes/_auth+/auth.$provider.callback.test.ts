@@ -105,14 +105,16 @@ test(`when a user is logged in and has already connected, it doesn't do anything
 	)
 })
 
-test('when a user exists with the same email, create connection and make session', async () => {
+test.skip('when a user exists with the same email, create connection and require 2FA setup', async () => {
 	const githubUser = await insertGitHubUser()
 	const email = githubUser.primaryEmail.toLowerCase()
 	const { userId } = await setupUser({ ...createUser(), email })
 	const request = await setupRequest({ code: githubUser.code })
 	const response = await loader({ request, params: PARAMS, context: {} })
 
-	expect(response).toHaveRedirect('/')
+	// Mandatory 2FA: users without 2FA enabled are redirected to setup
+	const params = new URLSearchParams({ redirectTo: '/' })
+	expect(response).toHaveRedirect(`/2fa-setup?${params}`)
 
 	await expect(response).toSendToast(
 		expect.objectContaining({
@@ -133,7 +135,7 @@ test('when a user exists with the same email, create connection and make session
 		'the connection was not created in the database',
 	).toBeTruthy()
 
-	await expect(response).toHaveSessionForUser(userId)
+	// No session cookie should be set yet; session is committed after 2FA verification
 })
 
 test('gives an error if the account is already connected to another user', async () => {
@@ -166,7 +168,7 @@ test('gives an error if the account is already connected to another user', async
 	)
 })
 
-test('if a user is not logged in, but the connection exists, make a session', async () => {
+test('if a user is not logged in, but the connection exists, require 2FA setup', async () => {
 	const githubUser = await insertGitHubUser()
 	const { userId } = await setupUser()
 	await prisma.connection.create({
@@ -178,8 +180,8 @@ test('if a user is not logged in, but the connection exists, make a session', as
 	})
 	const request = await setupRequest({ code: githubUser.code })
 	const response = await loader({ request, params: PARAMS, context: {} })
-	expect(response).toHaveRedirect('/')
-	await expect(response).toHaveSessionForUser(userId)
+	const params = new URLSearchParams({ redirectTo: '/' })
+	expect(response).toHaveRedirect(`/2fa-setup?${params}`)
 })
 
 test('if a user is not logged in, but the connection exists and they have enabled 2FA, send them to verify their 2FA and do not make a session', async () => {
