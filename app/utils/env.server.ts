@@ -28,12 +28,12 @@ const schema = z.object({
     AWS_ENDPOINT_URL_S3: z.string().url().optional(),
     BUCKET_NAME: z.string().optional(),
 
-    // PCG config (optional in dev; required in production)
-    PCGF_BASE_URL: z.string().url().optional(),
-    PCGF_TOKEN_URL: z.string().url().optional(),
-    PCGF_CLIENT_ID: z.string().optional(),
-    PCGF_CLIENT_SECRET: z.string().optional(),
-    PCGF_SCOPE: z.string().optional(),
+    // PCG config (required in all environments)
+    PCGF_BASE_URL: z.string().url(),
+    PCGF_TOKEN_URL: z.string().url(),
+    PCGF_CLIENT_ID: z.string(),
+    PCGF_CLIENT_SECRET: z.string(),
+    PCGF_SCOPE: z.string(),
 
     // Security policy flags
     REQUIRE_2FA_ON_LOGIN: z.enum(['true', 'false']).optional(),
@@ -80,33 +80,34 @@ declare global {
 }
 
 /* -------------------------------------------------------------------------- */
-/*        PCG CONFIG — TEMPORARILY FORCE HARDCODED VALUES IN PRODUCTION       */
+/*                         PCG CONFIG FROM ENV VARIABLES                      */
 /* -------------------------------------------------------------------------- */
 
 export const PCG_ENV = (() => {
-    // Single source of truth for the known-good endpoints/creds while we debug prod
-    const HARDCODED = {
-        BASE_URL: 'https://drfpimpl.cms.gov/pcgfhir/hih/api',
-        TOKEN_URL: 'https://drfpimpl.cms.gov/token',
-        CLIENT_ID: '0oayc2ysgssSksF81297',
-        CLIENT_SECRET:
-            'fNrlPQqDmjwMCdyxW1OicnR_nuJ0TzUA9nyaHryJbJGdi1F_OcN3616p_NGva8HY',
-        SCOPE: 'UserGroup',
-    } as const
-
-    // In production, ignore environment variables and use hardcoded values
-    if (process.env.NODE_ENV === 'production') {
-        return HARDCODED
+    // Read from environment variables exclusively and enforce presence in all envs
+    const env = {
+        PCGF_BASE_URL: process.env.PCGF_BASE_URL,
+        PCGF_TOKEN_URL: process.env.PCGF_TOKEN_URL,
+        PCGF_CLIENT_ID: process.env.PCGF_CLIENT_ID,
+        PCGF_CLIENT_SECRET: process.env.PCGF_CLIENT_SECRET,
+        PCGF_SCOPE: process.env.PCGF_SCOPE,
     }
 
-    // In development/test, allow env overrides for flexibility
+    const missing = Object.entries(env)
+        .filter(([, v]) => !v)
+        .map(([k]) => k)
+
+    if (missing.length) {
+        console.error('Missing required PCG env vars:', missing.join(', '))
+        throw new Error('PCG configuration is missing required environment variables')
+    }
+
     return {
-        BASE_URL: process.env.PCGF_BASE_URL || HARDCODED.BASE_URL,
-        TOKEN_URL: process.env.PCGF_TOKEN_URL || HARDCODED.TOKEN_URL,
-        CLIENT_ID: process.env.PCGF_CLIENT_ID || HARDCODED.CLIENT_ID,
-        CLIENT_SECRET:
-            process.env.PCGF_CLIENT_SECRET || HARDCODED.CLIENT_SECRET,
-        SCOPE: process.env.PCGF_SCOPE || HARDCODED.SCOPE,
+        BASE_URL: env.PCGF_BASE_URL!,
+        TOKEN_URL: env.PCGF_TOKEN_URL!,
+        CLIENT_ID: env.PCGF_CLIENT_ID!,
+        CLIENT_SECRET: env.PCGF_CLIENT_SECRET!,
+        SCOPE: env.PCGF_SCOPE!,
     } as const
 })()
 
