@@ -251,6 +251,7 @@ export async function action({ request }: ActionFunctionArgs) {
       to: adminEmail,
       adminName,
       customerName: name,
+      username: adminUsername,
       tempPassword: temporaryPassword,
       loginUrl,
     })
@@ -336,6 +337,7 @@ export async function action({ request }: ActionFunctionArgs) {
       to: adminEmail,
       adminName,
       customerName: customer.name,
+      username: adminUsername,
       tempPassword: temporaryPassword,
       loginUrl,
     })

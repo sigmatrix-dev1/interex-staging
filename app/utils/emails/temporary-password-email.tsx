@@ -14,6 +14,7 @@ import {
 interface TemporaryPasswordEmailProps {
   adminName: string
   customerName: string
+  username: string
   tempPassword: string
   loginUrl: string
 }
@@ -21,6 +22,7 @@ interface TemporaryPasswordEmailProps {
 export function TemporaryPasswordEmail({
   adminName,
   customerName,
+  username,
   tempPassword,
   loginUrl,
 }: TemporaryPasswordEmailProps) {
@@ -42,10 +44,13 @@ export function TemporaryPasswordEmail({
               You have been assigned as a Customer Administrator for <strong>{customerName}</strong> in the Interex system.
             </Text>
             
-            <Text style={paragraph}>
-              Your login credentials are:
-            </Text>
-            
+            <Text style={paragraph}>Your login credentials are:</Text>
+
+            <Section style={credentialsBox}>
+              <Text style={credentialsLabel}>Username:</Text>
+              <Text style={credentialsValue}>{username}</Text>
+            </Section>
+
             <Section style={credentialsBox}>
               <Text style={credentialsLabel}>Temporary Password:</Text>
               <Text style={credentialsValue}>{tempPassword}</Text>

@@ -7,12 +7,14 @@ export async function sendTemporaryPasswordEmail({
   to,
   adminName,
   customerName,
+  username,
   tempPassword,
   loginUrl,
 }: {
   to: string
   adminName: string
   customerName: string
+  username: string
   tempPassword: string
   loginUrl: string
 }) {
@@ -23,6 +25,7 @@ export async function sendTemporaryPasswordEmail({
       react: TemporaryPasswordEmail({
         adminName,
         customerName,
+        username,
         tempPassword,
         loginUrl,
       }),
