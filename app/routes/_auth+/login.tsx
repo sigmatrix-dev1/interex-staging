@@ -12,10 +12,12 @@ import { GeneralErrorBoundary } from '#app/components/error-boundary.tsx'
 import { CheckboxField, ErrorList, Field } from '#app/components/forms.tsx'
 import { Spacer } from '#app/components/spacer.tsx'
 import { StatusButton } from '#app/components/ui/status-button.tsx'
+import { audit } from '#app/services/audit.server.ts'
 import { login, requireAnonymous, verifyUserPassword } from '#app/utils/auth.server.ts'
 import { prisma } from '#app/utils/db.server.ts'
 import { checkHoneypot } from '#app/utils/honeypot.server.ts'
 import { useIsPending } from '#app/utils/misc.tsx'
+import { extractRequestContext } from '#app/utils/request-context.server.ts'
 import { PasswordSchema, UsernameSchema } from '#app/utils/user-validation.ts'
 import { handleNewSession } from './login.server.ts'
 
@@ -57,10 +59,25 @@ export async function action({ request }: { request: Request }) {
 	}
 
 	const { username, password, remember, redirectTo, confirmLogoutOthers } = submission.value
+	const ctx = await extractRequestContext(request, { requireUser: false })
 
 	// First, verify credentials without creating a session so we can decide UX
 	const verified = await verifyUserPassword({ username }, password)
 	if (!verified) {
+		// Emit security/audit event for failed login
+		try {
+			await audit.security({
+				action: 'LOGIN_FAILURE',
+				actorType: 'USER',
+				actorId: null,
+				actorIp: ctx.ip ?? null,
+				actorUserAgent: ctx.userAgent ?? null,
+				status: 'FAILURE',
+				summary: 'Invalid username or password',
+				metadata: { usernameAttempt: username },
+				chainKey: 'global',
+			})
+		} catch {}
 		return data(
 			{
 				result: submission.reply({
@@ -108,6 +125,30 @@ export async function action({ request }: { request: Request }) {
 			{ status: 400 },
 		)
 	}
+
+	// Warn privileged users without 2FA (Phase 0 warn gate)
+	try {
+		if (session) {
+			const user = await prisma.user.findUnique({ where: { id: session.userId }, select: { twoFactorEnabled: true, roles: { select: { name: true } } } })
+			const warnEnabled = process.env.PRIVILEGED_2FA_WARN !== 'false'
+			if (warnEnabled && user && !user.twoFactorEnabled) {
+				const isPriv = user.roles.some(r => ['system-admin','customer-admin'].includes(r.name))
+				if (isPriv) {
+					await audit.security({
+						action: 'ADMIN_MFA_NOT_ENABLED_WARNING',
+						actorType: 'USER',
+						actorId: session.userId,
+						actorIp: ctx.ip ?? null,
+						actorUserAgent: ctx.userAgent ?? null,
+						status: 'INFO',
+						summary: 'Privileged user logged in without 2FA enabled',
+						metadata: { roles: user.roles.map(r=>r.name) },
+						chainKey: 'global',
+					})
+				}
+			}
+		}
+	} catch {}
 
 	// Hand off to the shared session flow which:
 	// - If 2FA is enabled, sets a verify session and redirects to /verify

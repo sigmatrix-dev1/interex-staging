@@ -37,6 +37,11 @@ const schema = z.object({
 
     // Security policy flags
     REQUIRE_2FA_ON_LOGIN: z.enum(['true', 'false']).optional(),
+    AUTH_RATE_LIMIT_ENABLED: z.enum(['true','false']).optional(),
+    AUTH_RATE_LIMIT_WINDOW_SEC: z.string().optional(),
+    AUTH_RATE_LIMIT_MAX: z.string().optional(),
+    PRIVILEGED_2FA_WARN: z.enum(['true','false']).optional(),
+    PRIVILEGED_2FA_ENFORCE: z.enum(['true','false']).optional(),
 
     // Privacy: how to record client IPs in audit logs: 'raw' | 'masked' | 'hash'
     LOG_IP_MODE: z.enum(['raw', 'masked', 'hash']).optional(),
@@ -66,6 +71,9 @@ export function getEnv() {
         SENTRY_DSN: process.env.SENTRY_DSN,
         ALLOW_INDEXING: process.env.ALLOW_INDEXING,
         LOG_IP_MODE: process.env.LOG_IP_MODE,
+        AUTH_RATE_LIMIT_ENABLED: process.env.AUTH_RATE_LIMIT_ENABLED,
+        PRIVILEGED_2FA_WARN: process.env.PRIVILEGED_2FA_WARN,
+        PRIVILEGED_2FA_ENFORCE: process.env.PRIVILEGED_2FA_ENFORCE,
     }
 }
 

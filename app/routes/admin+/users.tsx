@@ -618,7 +618,7 @@ export async function action({ request }: ActionFunctionArgs) {
 
         // Audit: Admin initiated 2FA reset
         await audit.admin({
-            action: 'TWO_FACTOR_RESET',
+            action: 'MFA_RESET',
             actorType: 'USER',
             actorId: adminUserId,
             actorDisplay: admin.name || admin.email || null,

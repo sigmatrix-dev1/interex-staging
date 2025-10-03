@@ -5,9 +5,9 @@ import { redirect } from 'react-router'
 import { safeRedirect } from 'remix-utils/safe-redirect'
 import { audit } from '#app/services/audit.server.ts'
 import { getUserId, sessionKey, isPasswordExpired } from '#app/utils/auth.server.ts'
-import { extractRequestContext } from '#app/utils/request-context.server.ts'
 import { prisma } from '#app/utils/db.server.ts'
 import { combineResponseInits } from '#app/utils/misc.tsx'
+import { extractRequestContext } from '#app/utils/request-context.server.ts'
 import { getDashboardUrl } from '#app/utils/role-redirect.server.ts'
 import { authSessionStorage } from '#app/utils/session.server.ts'
 import { redirectWithToast } from '#app/utils/toast.server.ts'
@@ -147,14 +147,15 @@ export async function handleNewSession(
 	const hasUserTwoFA = Boolean(userTwoFA?.twoFactorEnabled)
 
 	if (!hasUserTwoFA) {
-		// If policy requires 2FA on login, force enrollment before granting full session
-		// Default behavior: enforce in development and production to avoid accidental weak auth.
-		// In test, keep opt-in to avoid breaking existing tests unless explicitly enabled.
-		const requireOnLogin =
-			process.env.NODE_ENV === 'test'
-				? process.env.REQUIRE_2FA_ON_LOGIN === 'true'
-				: process.env.REQUIRE_2FA_ON_LOGIN !== 'false'
-		if (requireOnLogin) {
+		// HARD BLOCK policy: all non system-admin users must enable MFA (2FA) before full session.
+		// System-admin users are allowed through (warned separately via banner) to avoid locking out emergency access.
+		const roles = await prisma.role.findMany({
+			where: { users: { some: { id: session.userId } } },
+			select: { name: true },
+		})
+		const isSystemAdmin = roles.some(r => r.name === 'system-admin')
+		if (!isSystemAdmin) {
+			// Always enforce setup for non-system-admin
 			const verifySession = await verifySessionStorage.getSession(
 				request.headers.get('cookie'),
 			)
@@ -166,12 +167,29 @@ export async function handleNewSession(
 			if (redirectTo) params.set('redirectTo', redirectTo)
 			if (remember) params.set('remember', 'true')
 
+			// Audit enforcement event (idempotent-ish)
+			try {
+				const ctx = await extractRequestContext(request, { requireUser: false })
+				await audit.security({
+					action: 'MFA_ENFORCE_BLOCK',
+					actorType: 'USER',
+					actorId: session.userId,
+					actorIp: ctx.ip ?? null,
+					actorUserAgent: ctx.userAgent ?? null,
+					status: 'INFO',
+					summary: 'User redirected to mandatory MFA setup',
+					metadata: { reason: 'MFA_REQUIRED_FOR_NON_SYSTEM_ADMIN' },
+					chainKey: 'global',
+				})
+			} catch {}
+
 			return redirect(`/2fa-setup?${params.toString()}`, {
 				headers: {
 					'set-cookie': await verifySessionStorage.commitSession(verifySession),
 				},
 			})
 		}
+		// System-admin without MFA: allow through (commit and redirect); banner + optional warning handled elsewhere
 		return commitAndRedirect()
 	}
 

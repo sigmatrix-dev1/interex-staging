@@ -45,7 +45,7 @@ export async function loader({ request }: { request: Request }) {
   // Generate a temporary secret and QR for setup (not persisted until verified)
   const { secret, qrCode } = await generateTwoFactorSecret(user.username || 'user')
   await audit.security({
-    action: 'TWO_FACTOR_SETUP_START',
+    action: 'MFA_SETUP_START',
     status: 'INFO',
     actorType: 'USER',
     actorId: user.id,
@@ -94,7 +94,7 @@ export async function action({ request }: { request: Request }) {
   // Persist secret and enable 2FA
   await enableTwoFactorForUser(userId, secret)
   await audit.security({
-    action: 'TWO_FACTOR_ENABLE',
+    action: 'MFA_ENABLE',
     actorType: 'USER',
     actorId: userId,
     actorIp: ctx.ip ?? null,

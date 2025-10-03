@@ -23,6 +23,7 @@ type GetOrInsertUserOptions = {
 	username?: string
 	password?: string
 	email?: string
+	role?: 'basic-user' | 'system-admin' | 'customer-admin'
 }
 
 type User = {
@@ -37,6 +38,7 @@ async function getOrInsertUser({
 	username,
 	password,
 	email,
+	role,
 }: GetOrInsertUserOptions = {}): Promise<User> {
 	const select = { id: true, email: true, username: true, name: true }
 	if (id) {
@@ -49,13 +51,14 @@ async function getOrInsertUser({
 		username ??= userData.username
 		password ??= userData.username
 		email ??= userData.email
+		const roleName = role || 'basic-user'
 		return await prisma.user.create({
 			select,
 			data: {
 				...userData,
 				email,
 				username,
-				roles: { connect: { name: 'basic-user' } },
+				roles: { connect: { name: roleName } },
 				password: { create: { hash: await getPasswordHash(password) } },
 			},
 		})

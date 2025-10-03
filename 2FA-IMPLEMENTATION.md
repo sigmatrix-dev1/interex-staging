@@ -1,8 +1,8 @@
-# 2FA Implementation Summary
+# MFA (TOTP) Implementation & Enforcement Summary
 
 ## What was implemented
 
-Two-Factor Authentication (2FA) to the InterEx login system with the following features:
+Time-based One-Time Password Multi‑Factor Authentication ("MFA" – previously documented as 2FA) for the InterEx login system with the following features:
 
 ### Database Changes
 - Added `twoFactorSecret` and `twoFactorEnabled` fields to the User model
@@ -16,18 +16,18 @@ Two-Factor Authentication (2FA) to the InterEx login system with the following f
   - Get user 2FA status
 
 ### Frontend Implementation
-- **2FA Setup Page** (`/me/2fa`)
+- **User MFA Setup Page** (`/me/2fa`)
   - QR code generation for authenticator apps
   - Manual secret entry as backup
   - Code verification to enable 2FA
   - Disable 2FA functionality
 
-- **2FA Login Flow** (`/auth/2fa`)
+- **MFA Login Verification Flow** (`/2fa`)
   - Intercepts login when user has 2FA enabled
   - Prompts for 6-digit authenticator code
   - Maintains login context (remember me, redirect URL)
 
-- **Updated Login Process** (`/auth/login`)
+- **Updated Login Process** (`/login`)
   - Checks if user has 2FA enabled after password verification
   - Redirects to 2FA verification instead of completing login
   - Maintains all login parameters through the flow
@@ -40,10 +40,10 @@ Two-Factor Authentication (2FA) to the InterEx login system with the following f
 ## How to use
 
 ### For Users:
-1. **Enable 2FA**: Click on user dropdown → "Two-Factor Auth" → "Set up 2FA"
+1. **Enable MFA**: Click on user dropdown → "Two-Factor Auth" → "Set up 2FA"
 2. **Scan QR code** with authenticator app (Google Authenticator, Authy, 1Password, etc.)
 3. **Enter verification code** from app to enable 2FA
-4. **Login with 2FA**: Enter username/password → Enter 6-digit code from authenticator app
+4. **Login with MFA**: Enter username/password → Enter 6-digit code from authenticator app
 
 ### For Testing:
 1. Create a user account and set up 2FA
@@ -57,12 +57,28 @@ Two-Factor Authentication (2FA) to the InterEx login system with the following f
 - Microsoft Authenticator
 - Any TOTP-compatible app
 
-## Security Features
+## Security & Enforcement Features
 - Uses industry-standard TOTP (Time-based One-Time Password) 
 - 30-second time windows with 1-window tolerance for clock drift
 - Secure secret generation using cryptographically secure random
 - QR codes generated server-side for security
-- 2FA bypass prevention - cannot complete login without valid code
+- Non system‑admin users are HARD BLOCKED until MFA enabled (redirected to `/2fa-setup`).
+- System‑admin accounts may temporarily proceed without MFA but receive an in‑app warning banner and audit event (`ADMIN_MFA_NOT_ENABLED_WARNING`).
+- Enforcement audit events:
+  - `MFA_SETUP_START`, `MFA_ENABLE`, `MFA_VERIFY`, `MFA_VERIFY_FAILED`
+  - `MFA_ENFORCE_BLOCK` (redirect to setup because policy requires MFA)
+  - Admin reset: `MFA_RESET`
+
+## Environment Flags
+
+Flag | Purpose | Default Behavior
+-----|---------|-----------------
+`REQUIRE_2FA_ON_LOGIN` | (Legacy) Initial soft-enforcement toggle; superseded by hard block logic for non system-admins | Ignored for non system-admin (hard enforced); system-admin unaffected
+`PRIVILEGED_2FA_WARN` | Show banner warning for privileged accounts without MFA | true
+`PRIVILEGED_2FA_ENFORCE` | (Future) Hard block privileged accounts too | false
+`AUTH_RATE_LIMIT_ENABLED` | Enable auth endpoint rate limiting (login, 2fa, reset) | true (unless explicitly set false)
+`AUTH_RATE_LIMIT_WINDOW_SEC` | Auth limiter window (seconds) | 60
+`AUTH_RATE_LIMIT_MAX` | Requests per IP per window (login/etc) | 10
 
 ## Next Steps
 You can test the 2FA functionality by:
@@ -71,4 +87,4 @@ You can test the 2FA functionality by:
 3. Setting up 2FA from the user dropdown
 4. Testing the login flow
 
-The implementation is production-ready and follows security best practices!
+The implementation is production-ready; future phases will add recovery codes, encrypted secret storage, lockout, and adaptive / privileged enforcement escalation.

@@ -67,8 +67,7 @@ export default async function handleRequest(...args: DocRequestArgs) {
 					contentSecurity(responseHeaders, {
 						crossOriginEmbedderPolicy: false,
 						contentSecurityPolicy: {
-							// NOTE: Remove reportOnly when you're ready to enforce this CSP
-							reportOnly: true,
+							reportOnly: false,
 							directives: {
 								fetch: {
 									'connect-src': [
@@ -85,6 +84,8 @@ export default async function handleRequest(...args: DocRequestArgs) {
 										`'nonce-${nonce}'`,
 									],
 									'script-src-attr': [`'nonce-${nonce}'`],
+									// Additional hardening directives not directly supported by the helper's typed interface
+									// are enforced at reverse proxy or could be appended manually if library adds support.
 								},
 							},
 						},

@@ -51,7 +51,7 @@ export async function action({ request }: { request: Request }) {
 				const isValid = await verifyTwoFactorToken(data.secret, data.code)
 				if (!isValid) {
 					await audit.security({
-						action: 'TWO_FACTOR_VERIFY_FAILED',
+						action: 'MFA_VERIFY_FAILED',
 						status: 'FAILURE',
 						actorType: 'USER',
 						actorId: userId,
@@ -83,7 +83,7 @@ export async function action({ request }: { request: Request }) {
 
 		await enableTwoFactorForUser(userId, submission.value.secret)
 		await audit.security({
-			action: 'TWO_FACTOR_ENABLE',
+			action: 'MFA_ENABLE',
 			actorType: 'USER',
 			actorId: userId,
 			actorDisplay: reqCtx.actorDisplay ?? null,
@@ -117,7 +117,7 @@ export async function action({ request }: { request: Request }) {
 
 	const { secret, qrCode } = await generateTwoFactorSecret(userInfo.username)
 	await audit.security({
-		action: 'TWO_FACTOR_SETUP_START',
+		action: 'MFA_SETUP_START',
 		status: 'INFO',
 		actorType: 'USER',
 		actorId: userId,

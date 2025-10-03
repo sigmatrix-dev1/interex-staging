@@ -82,6 +82,8 @@ export async function loader({ request }: Route.LoaderArgs) {
 							name: true,
 							username: true,
 							image: { select: { objectKey: true } },
+							// Include 2FA enabled flag for privileged banner logic
+							twoFactorEnabled: true,
 							roles: {
 								select: {
 									name: true,
@@ -119,6 +121,20 @@ export async function loader({ request }: Route.LoaderArgs) {
 	return data(
 		{
 			user,
+			privilegedTwoFaWarning: (() => {
+				if (!user) return null
+				const roleNames = user.roles.map(r => r.name)
+				const isSystemAdmin = roleNames.includes('system-admin')
+				// Policy: All non system-admin users MUST have 2FA. If missing => logout enforced earlier or show hard warning.
+				const has2FA = !!user.twoFactorEnabled
+				if (!has2FA && isSystemAdmin) {
+					return {
+						message: 'System Admin account without 2FA – please enable Two-Factor Authentication immediately (Settings → Two-Factor).',
+						severity: 'warning' as const,
+					}
+				}
+				return null
+			})(),
 			notifications,
 			requestInfo: {
 				hints: getHints(request),
@@ -200,6 +216,9 @@ function App() {
 	const matches = useMatches()
 	const isOnSearchPage = matches.find((m) => m.id === 'routes/users+/index')
 	const searchBar = isOnSearchPage ? null : <SearchBar status="idle" />
+
+	// Show system-admin 2FA warning banner only if present
+	const privilegedWarning = data.privilegedTwoFaWarning
 	useToast(data.toast)
 
 	// Check if we're on an app page that uses InterexLayout (has its own header)
@@ -230,6 +249,13 @@ function App() {
 				)}
 
 				<div className="flex flex-1 flex-col">
+					{privilegedWarning && (
+						<div className="bg-amber-50 border-b border-amber-300 p-3 text-sm text-amber-900 flex items-start gap-3">
+							<span className="font-semibold">Security Notice:</span>
+							<span>{privilegedWarning.message}</span>
+							<Link to="/settings/profile/two-factor" className="underline font-medium">Enable now →</Link>
+						</div>
+					)}
 					<Outlet />
 				</div>
 

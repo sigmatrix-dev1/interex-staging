@@ -75,7 +75,7 @@ export async function action({ request }: { request: Request }) {
 						const sess = await prisma.session.findUnique({ where: { id: unverifiedId }, select: { userId: true } })
 						if (sess?.userId) {
 							await audit.security({
-								action: 'TWO_FACTOR_VERIFY_FAILED',
+								action: 'MFA_VERIFY_FAILED',
 								status: 'FAILURE',
 								actorType: 'USER',
 								actorId: sess.userId,
@@ -121,7 +121,7 @@ export async function action({ request }: { request: Request }) {
 	const remember = !!verifySession.get('remember')
 	const logoutOthers = !!verifySession.get('logout-others')
 	await audit.security({
-		action: 'TWO_FACTOR_VERIFY',
+		action: 'MFA_VERIFY',
 		actorType: 'USER',
 		actorId: session.userId,
 		actorIp: reqCtx.ip ?? null,

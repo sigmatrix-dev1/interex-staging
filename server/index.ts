@@ -134,6 +134,13 @@ const rateLimitDefault = {
 	},
 }
 
+// --- Auth focused rate limiter (Phase 0) ---
+// If AUTH_RATE_LIMIT_ENABLED !== 'false' (default ON unless explicitly false), apply a tighter limiter
+// to sensitive authentication endpoints. Falls back to legacy broad limiter for others.
+const authLimiterEnabled = process.env.AUTH_RATE_LIMIT_ENABLED !== 'false'
+const authWindowSec = Number(process.env.AUTH_RATE_LIMIT_WINDOW_SEC || '60')
+const authMax = Number(process.env.AUTH_RATE_LIMIT_MAX || '10') * maxMultiple
+
 const strongestRateLimit = rateLimit({
 	...rateLimitDefault,
 	windowMs: 60 * 1000,
@@ -147,7 +154,21 @@ const strongRateLimit = rateLimit({
 })
 
 const generalRateLimit = rateLimit(rateLimitDefault)
+
+// Authentication sensitive paths for dedicated limiter
+const authPaths = ['/login', '/2fa', '/2fa-setup', '/signup', '/reset-password', '/verify']
+const authLimiter = rateLimit({
+	windowMs: authWindowSec * 1000,
+	limit: authMax,
+	standardHeaders: true,
+	legacyHeaders: false,
+	keyGenerator: (req: express.Request) => req.get('fly-client-ip') ?? `${req.ip}`,
+})
+
 app.use((req, res, next) => {
+	if (authLimiterEnabled && authPaths.some(p => req.path.startsWith(p))) {
+		return authLimiter(req, res, next)
+	}
 	const strongPaths = [
 		'/login',
 		'/signup',
@@ -166,12 +187,9 @@ app.use((req, res, next) => {
 		return strongRateLimit(req, res, next)
 	}
 
-	// the verify route is a special case because it's a GET route that
-	// can have a token in the query string
 	if (req.path.includes('/verify')) {
 		return strongestRateLimit(req, res, next)
 	}
-
 	return generalRateLimit(req, res, next)
 })
 
