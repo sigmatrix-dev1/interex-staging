@@ -183,11 +183,19 @@ export async function handleNewSession(
 				})
 			} catch {}
 
-			return redirect(`/2fa-setup?${params.toString()}`, {
-				headers: {
-					'set-cookie': await verifySessionStorage.commitSession(verifySession),
-				},
-			})
+			return redirect(
+				`/2fa-setup?${params.toString()}`,
+				combineResponseInits(
+					{
+						headers: {
+							'set-cookie': await verifySessionStorage.commitSession(
+								verifySession,
+							),
+						},
+					},
+					responseInit,
+				),
+			)
 		}
 		// System-admin without MFA: allow through (commit and redirect); banner + optional warning handled elsewhere
 		return commitAndRedirect()
@@ -206,11 +214,19 @@ export async function handleNewSession(
 	if (redirectTo) params.set('redirectTo', redirectTo)
 	if (remember) params.set('remember', 'true')
 
-	return redirect(`/2fa?${params.toString()}`, {
-		headers: {
-			'set-cookie': await verifySessionStorage.commitSession(verifySession),
-		},
-	})
+	return redirect(
+		`/2fa?${params.toString()}`,
+		combineResponseInits(
+			{
+				headers: {
+					'set-cookie': await verifySessionStorage.commitSession(
+						verifySession,
+					),
+				},
+			},
+			responseInit,
+		),
+	)
 }
 
 export async function handleVerification({

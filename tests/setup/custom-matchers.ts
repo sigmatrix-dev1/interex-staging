@@ -76,6 +76,19 @@ expect.extend({
 				)} but got ${this.utils.printReceived(location)}`,
 		}
 	},
+	toRedirectToMfaSetup(response: unknown) {
+		if (!(response instanceof Response)) {
+			throw new Error('toRedirectToMfaSetup must be called with a Response')
+		}
+		const location = response.headers.get('location') || ''
+		const isRedirectStatusCode = response.status >= 300 && response.status < 400
+		const pass = isRedirectStatusCode && /^\/2fa-setup\?/.test(location)
+		return {
+			pass,
+			message: () =>
+				`Expected response ${this.isNot ? 'not ' : ''}to redirect to /2fa-setup?<...> but got ${location || '(no redirect)'} with status ${response.status}`,
+		}
+	},
 	async toHaveSessionForUser(response: Response, userId: string) {
 		const setCookies = response.headers.getSetCookie()
 		const sessionSetCookie = setCookies.find(
@@ -161,6 +174,7 @@ interface CustomMatchers<R = unknown> {
 	toHaveRedirect(redirectTo: string | null): R
 	toHaveSessionForUser(userId: string): Promise<R>
 	toSendToast(toast: ToastInput): Promise<R>
+	toRedirectToMfaSetup(): R
 }
 
 declare module 'vitest' {

@@ -105,14 +105,15 @@ test(`when a user is logged in and has already connected, it doesn't do anything
 	)
 })
 
-test('when a user exists with the same email, create connection and make session', async () => {
+test('when a user exists with the same email, create connection and start enforced MFA setup', async () => {
 	const githubUser = await insertGitHubUser()
 	const email = githubUser.primaryEmail.toLowerCase()
 	const { userId } = await setupUser({ ...createUser(), email })
 	const request = await setupRequest({ code: githubUser.code })
 	const response = await loader({ request, params: PARAMS, context: {} })
 
-	expect(response).toHaveRedirect('/')
+	// Mandatory MFA enforcement now redirects new (non-admin) users without MFA to /2fa-setup
+	expect(response).toRedirectToMfaSetup()
 
 	await expect(response).toSendToast(
 		expect.objectContaining({
@@ -128,12 +129,9 @@ test('when a user exists with the same email, create connection and make session
 			providerId: githubUser.profile.id.toString(),
 		},
 	})
-	expect(
-		connection,
-		'the connection was not created in the database',
-	).toBeTruthy()
+	expect(connection, 'the connection was not created in the database').toBeTruthy()
 
-	await expect(response).toHaveSessionForUser(userId)
+	// Session cookie is not yet the final auth session (stored in verify session); we only assert connection.
 })
 
 test('gives an error if the account is already connected to another user', async () => {
@@ -166,7 +164,7 @@ test('gives an error if the account is already connected to another user', async
 	)
 })
 
-test('if a user is not logged in, but the connection exists, make a session', async () => {
+test('if a user is not logged in, but the connection exists, start enforced MFA setup instead of home redirect', async () => {
 	const githubUser = await insertGitHubUser()
 	const { userId } = await setupUser()
 	await prisma.connection.create({
@@ -178,9 +176,11 @@ test('if a user is not logged in, but the connection exists, make a session', as
 	})
 	const request = await setupRequest({ code: githubUser.code })
 	const response = await loader({ request, params: PARAMS, context: {} })
-	expect(response).toHaveRedirect('/')
-	await expect(response).toHaveSessionForUser(userId)
+	expect(response).toRedirectToMfaSetup()
+	// Do not assert final session yet (session will complete after setup/verification)
 })
+
+// (Optional) Future enhancement: simulate completing MFA setup after enforced redirect
 
 test('if a user is not logged in, but the connection exists and they have enabled 2FA, send them to verify their 2FA and do not make a session', async () => {
 	const githubUser = await insertGitHubUser()
