@@ -47,7 +47,7 @@ export interface AuditEventResult {
   hashPrev?: string | null
 }
 
-const BUSY_RETRIES = 4
+const BUSY_RETRIES = 6
 const BUSY_BACKOFF_MS = 25
 
 async function sleep(ms: number) {
@@ -80,47 +80,47 @@ export async function logAuditEvent(input: AuditEventInput): Promise<AuditEventR
     }
   }
 
+  // Optimistic concurrency: fetch current tail seq/hashSelf outside of an explicit write transaction
+  // then attempt insert with (chainKey, seq) unique constraint. On conflict / busy, retry with fresh tail.
   let attempt = 0
-  while (true) {
+  while (attempt <= BUSY_RETRIES) {
     try {
-      return await prisma.$transaction(async (tx) => {
-        const tail = await tx.auditEvent.findFirst({
-          where: { chainKey },
-          orderBy: { seq: 'desc' },
-          select: { seq: true, hashSelf: true },
-        })
-        const nextSeq = (tail?.seq ?? 0) + 1
-        const hashPrev = tail?.hashSelf ?? null
-        const hashSelf = computeAuditHashSelf({
+      const tail = await prisma.auditEvent.findFirst({
+        where: { chainKey },
+        orderBy: { seq: 'desc' },
+        select: { seq: true, hashSelf: true },
+      })
+      const nextSeq = (tail?.seq ?? 0) + 1
+      const hashPrev = tail?.hashSelf ?? null
+      const hashSelf = computeAuditHashSelf({
+        chainKey,
+        seq: nextSeq,
+        category: input.category,
+        action: input.action,
+        status: input.status || 'SUCCESS',
+        actorType: input.actorType,
+        actorId: input.actorId ?? null,
+        entityType: input.entityType ?? null,
+        entityId: input.entityId ?? null,
+        summary: input.summary ?? null,
+        metadata: metadataJson ? JSON.parse(metadataJson) : undefined,
+        diff: diffJson ? JSON.parse(diffJson) : undefined,
+        hashPrev,
+      })
+      const created = await prisma.auditEvent.create({
+        data: {
+          id: randomUUID(),
           chainKey,
           seq: nextSeq,
-          category: input.category,
-          action: input.action,
-          status: input.status || 'SUCCESS',
+          hashPrev,
+          hashSelf,
           actorType: input.actorType,
           actorId: input.actorId ?? null,
-          entityType: input.entityType ?? null,
-          entityId: input.entityId ?? null,
-          summary: input.summary ?? null,
-          metadata: metadataJson ? JSON.parse(metadataJson) : undefined,
-          diff: diffJson ? JSON.parse(diffJson) : undefined,
-          hashPrev,
-        })
-
-        const created = await tx.auditEvent.create({
-          data: {
-            id: randomUUID(),
-            chainKey,
-            seq: nextSeq,
-            hashPrev,
-            hashSelf,
-            actorType: input.actorType,
-            actorId: input.actorId ?? null,
-            actorDisplay: input.actorDisplay ?? null,
-            actorIp: input.actorIp ?? null,
-            actorUserAgent: input.actorUserAgent ?? null,
-            customerId: input.customerId ?? null,
-            category: input.category,
+          actorDisplay: input.actorDisplay ?? null,
+          actorIp: input.actorIp ?? null,
+          actorUserAgent: input.actorUserAgent ?? null,
+          customerId: input.customerId ?? null,
+          category: input.category,
             action: input.action,
             status: input.status || 'SUCCESS',
             entityType: input.entityType ?? null,
@@ -133,21 +133,25 @@ export async function logAuditEvent(input: AuditEventInput): Promise<AuditEventR
             metadata: metadataJson ?? null,
             diff: diffJson ?? null,
             phi: phiDetected,
-          },
-          select: { id: true, seq: true, hashSelf: true, hashPrev: true },
-        })
-        return created
+        },
+        select: { id: true, seq: true, hashSelf: true, hashPrev: true },
       })
+      return created
     } catch (err: any) {
       const msg = String(err?.message || err)
-      if (/SQLITE_BUSY/.test(msg) && attempt < BUSY_RETRIES) {
-        attempt++
-        await sleep(BUSY_BACKOFF_MS * attempt)
-        continue
+      // Unique constraint violation (another writer inserted our target seq) OR busy => retry
+      if ((/unique constraint failed/i.test(msg) && /AuditEvent.*chainKey.*seq/i.test(msg)) || /P2002/.test(err?.code) || /SQLITE_BUSY/.test(msg)) {
+        if (attempt < BUSY_RETRIES) {
+          attempt++
+          const wait = BUSY_BACKOFF_MS * attempt + Math.floor(Math.random() * 15)
+          await sleep(wait)
+          continue
+        }
       }
       throw err
     }
   }
+  throw new Error('Failed to write audit event after retries')
 }
 
 // Convenience category wrappers

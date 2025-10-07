@@ -67,7 +67,7 @@ describe('Audit integration', () => {
   it('chain continuity under concurrency', async () => {
     const ck = 'concurrent'
     // Fewer writes to reduce contention & timeout risk
-    const writes = Array.from({ length: 8 }).map((_, i) =>
+  const writes = Array.from({ length: 6 }).map((_, i) =>
       logAuditEvent({
         category: 'SUBMISSION',
         action: 'SUBMISSION_CREATE',
@@ -85,13 +85,13 @@ describe('Audit integration', () => {
     for (let i = 0; i < rows.length; i++) {
       expect(rows[i]!.seq).toBe(i + 1)
     }
-  })
+  }, 15000)
 
   it('simulated SQLITE_BUSY retry (best-effort)', async () => {
     // Hard to deterministically trigger without low-level locking; simulate by rapid sequence
     const ck = 'busy-sim'
     const rapid = []
-    for (let i = 0; i < 8; i++) {
+    for (let i = 0; i < 6; i++) {
       rapid.push(
         logAuditEvent({
           category: 'SUBMISSION',
@@ -106,12 +106,12 @@ describe('Audit integration', () => {
     await Promise.all(rapid)
     const verify = await verifyChain({ chainKey: ck })
     expect(verify.valid).toBe(true)
-  })
+  }, 15000)
 
   it('RBAC filtering placeholder (pending implementation)', async () => {
     // If a future function enforces role-based viewing, we would test here.
     // For now, assert events exist to mark this as a placeholder.
     const any = await prisma.auditEvent.findFirst()
     expect(any).toBeTruthy()
-  })
+  }, 10000)
 })

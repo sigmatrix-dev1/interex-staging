@@ -379,7 +379,8 @@ model AuditEvent {
   reserved2 String?
 
   @@index([createdAt])
-  @@index([chainKey, seq])
+  // Enforce per-chain sequential uniqueness to allow optimistic concurrency without heavy write locks
+  @@unique([chainKey, seq])
   @@index([category, createdAt])
   @@index([actorId, createdAt])
   @@index([customerId, createdAt])
