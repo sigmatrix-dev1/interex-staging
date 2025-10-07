@@ -74,12 +74,13 @@ app.disable('x-powered-by')
 
 // Content Security Policy (Phase 0 enforcement): enforce a strict baseline. Adjust if external origins required.
 // Directives chosen to minimize XSS risk while allowing inline styles via Tailwind's injected style tags (unsafe-inline styles only).
+// (Temporarily disabled per-request nonce generation while reverting to simpler CSP for hydration reliability.)
 app.use((req, res, next) => {
-	// Skip CSP for asset files to reduce header bloat
 	if (req.path.startsWith('/assets')) return next()
+	// Simpler CSP (temporary): allow inline scripts for hydration + bootstrapping.
 	const csp = [
 		"default-src 'self'",
-		"script-src 'self'",
+		"script-src 'self' 'unsafe-inline'",
 		"style-src 'self' 'unsafe-inline'",
 		"img-src 'self' data:",
 		"font-src 'self' data:",
@@ -87,7 +88,6 @@ app.use((req, res, next) => {
 		"base-uri 'self'",
 		"frame-ancestors 'none'",
 		"form-action 'self'",
-		'upgrade-insecure-requests',
 	].join('; ')
 	res.setHeader('Content-Security-Policy', csp)
 	next()

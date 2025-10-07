@@ -250,18 +250,32 @@ export default function Submissions() {
         const viewId = searchParams.get('view')
         if (viewId) {
             const s = submissions.find((x: any) => x.id === viewId)
-            if (s) setDrawerState({ isOpen: true, selectedSubmission: s })
+            if (s) {
+                setDrawerState(prev => (prev.isOpen && prev.selectedSubmission?.id === s.id) ? prev : { isOpen: true, selectedSubmission: s })
+            }
         } else {
             setDrawerState({ isOpen: false, selectedSubmission: null })
         }
     }, [searchParams, submissions])
 
     const openViewDrawer = (s: any) => {
-        const p = new URLSearchParams(searchParams)
-        p.set('view', s.id)
-        setSearchParams(p)
+        // Optimistic open so the drawer appears immediately
+        setDrawerState({ isOpen: true, selectedSubmission: s })
+        try {
+            const p = new URLSearchParams(searchParams)
+            p.set('view', s.id)
+            setSearchParams(p)
+        } catch (e) {
+            if (process.env.NODE_ENV !== 'production') {
+                console.warn('[submissions] failed to update search param', e)
+            }
+        }
+        if (process.env.NODE_ENV !== 'production') {
+            console.log('[submissions] openViewDrawer', s.id)
+        }
     }
     const closeDrawer = () => {
+        setDrawerState({ isOpen: false, selectedSubmission: null })
         const p = new URLSearchParams(searchParams)
         p.delete('view')
         setSearchParams(p)

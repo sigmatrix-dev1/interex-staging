@@ -201,7 +201,8 @@ function Document({
 				{/* Expose root data (including csrf) prior to other scripts */}
 				<script
 					nonce={nonce}
-					dangerouslySetInnerHTML={{ __html: `window.__ROOT_DATA__=${JSON.stringify({})}` }}
+					// Expose minimal root data needed early (csrf). Avoid dumping full user object to minimize risk.
+					dangerouslySetInnerHTML={{ __html: `window.__ROOT_DATA__=${JSON.stringify({ csrf: (globalThis as any).__ROOT_CSRF__ || null })}` }}
 				/>
 				<script
 					nonce={nonce}
