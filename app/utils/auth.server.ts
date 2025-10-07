@@ -6,6 +6,7 @@ import bcrypt from 'bcryptjs'
 import { redirect } from 'react-router'
 import { safeRedirect } from 'remix-utils/safe-redirect'
 import { audit } from '#app/services/audit.server.ts'
+import { rateLimit } from '#app/utils/rate-limit.server.ts'
 import { extractRequestContext } from '#app/utils/request-context.server.ts'
 import { prisma } from './db.server.ts'
 import { combineHeaders } from './misc.tsx'
@@ -59,6 +60,75 @@ export async function getUserId(request: Request) {
     // Update last active (updatedAt) best-effort and ignore failures
     if (session?.id) {
         void prisma.session.update({ where: { id: session.id }, data: { updatedAt: new Date() } }).catch(() => {})
+    }
+
+    // 2FA enforcement consistency, periodic re-verification, and per-request password expiry enforcement (defense in depth)
+    try {
+        const url = new URL(request.url)
+        const pathname = url.pathname
+        // Allow-list auth & 2FA related endpoints to avoid redirect loops
+        const allowPrefixes = ['/login', '/logout', '/2fa', '/2fa-setup', '/resources', '/change-password']
+        const isAllowed = allowPrefixes.some(p => pathname === p || pathname.startsWith(p + '/'))
+        if (!isAllowed) {
+            // Fetch twoFactorEnabled field (reuse earlier user fetch if expanded in future; here we re-query lightweight)
+            const user2fa = await prisma.user.findUnique({ where: { id: session.userId }, select: { twoFactorEnabled: true, passwordChangedAt: true, mustChangePassword: true } })
+            const mustReverifyDays = Number(process.env.MFA_REVERIFY_INTERVAL_DAYS || 0)
+            const verifiedTime = authSession.get('verified-time') as number | undefined
+            const nowMs = Date.now()
+            let requireReverify = false
+            if (mustReverifyDays > 0 && verifiedTime) {
+                const maxAgeMs = mustReverifyDays * 24 * 60 * 60 * 1000
+                if (nowMs - verifiedTime > maxAgeMs) requireReverify = true
+            } else if (mustReverifyDays > 0 && !verifiedTime) {
+                // If policy enabled but no timestamp recorded, force verification
+                requireReverify = true
+            }
+
+            if (!user2fa?.twoFactorEnabled) {
+                // Enforce mandatory MFA enrollment if somehow session exists without it (e.g., policy change after session established)
+                throw redirect('/2fa-setup')
+            }
+            if (requireReverify) {
+                // Stash unverified session for reuse by 2FA route just like initial login
+                // (We intentionally do not destroy session; 2FA flow will re-set verified-time)
+                try {
+                    await (prisma as any).securityEvent.create({
+                        data: {
+                            kind: 'MFA_REVERIFY_REQUIRED',
+                            userId: session.userId,
+                            success: true,
+                            reason: 'MFA_REVERIFY_INTERVAL_EXCEEDED',
+                            data: { maxDays: mustReverifyDays },
+                        },
+                    })
+                } catch {}
+                throw redirect('/2fa')
+            }
+
+            // Always enforce per-request password expiry (hardcoded policy)
+            const expired = isPasswordExpired(user2fa?.passwordChangedAt)
+            if (expired && pathname !== '/change-password') {
+                if (user2fa && !(user2fa as any).mustChangePassword) {
+                    try { await prisma.user.update({ where: { id: session.userId }, data: { mustChangePassword: true } }) } catch {}
+                }
+                try {
+                    await (prisma as any).securityEvent.create({
+                        data: {
+                            kind: 'PASSWORD_EXPIRED_ENFORCED',
+                            userId: session.userId,
+                            success: true,
+                            reason: 'PASSWORD_EXPIRED_REQUEST',
+                            data: { onRequest: true },
+                        },
+                    })
+                } catch {}
+                throw redirect('/change-password')
+            }
+        }
+    } catch (e) {
+        if (e instanceof Response) throw e
+        // Swallow unexpected errors to avoid blocking normal auth; optionally log
+        // console.warn('2FA enforcement check failed', e)
     }
 
     return session.userId
@@ -164,6 +234,41 @@ export async function login(
                 },
             })
         } catch {}
+        return null
+    }
+
+    // Rate limiting: apply per IP and per username bucket before password verification.
+    const ipKey = ctx.ip ? `login:ip:${ctx.ip}` : null
+    const userKey = `login:user:${username.toLowerCase()}`
+    const limitCapacity = Number(process.env.LOGIN_RL_CAPACITY || 10)
+    const refillPerSec = Number(process.env.LOGIN_RL_REFILL_PER_SEC || 0.2) // 1 token per 5s default
+    function check(key: string | null) {
+        if (!key) return null
+        return rateLimit(key, { capacity: limitCapacity, refillPerSec })
+    }
+    const ipRes = check(ipKey)
+    const userRes = check(userKey)
+    if ((ipRes && !ipRes.allowed) || (userRes && !userRes.allowed)) {
+        const retryMs = Math.max(ipRes?.retryAfterMs || 0, userRes?.retryAfterMs || 0)
+        try {
+            await (prisma as any).securityEvent.create({
+                data: {
+                    kind: 'LOGIN_RATE_LIMITED',
+                    userId: null,
+                    ip: ctx.ip,
+                    userAgent: ctx.userAgent,
+                    success: false,
+                    reason: 'RATE_LIMIT',
+                    data: {
+                        username,
+                        retryAfterMs: retryMs,
+                        ipRemaining: ipRes?.remaining,
+                        userRemaining: userRes?.remaining,
+                    },
+                },
+            })
+        } catch {}
+        // Uniform response: behave like generic failure to avoid oracle.
         return null
     }
 
@@ -317,17 +422,41 @@ export async function resetUserPassword({
     username: string
     password: string
 }) {
+    const user = await prisma.user.findUnique({ where: { username: username.toLowerCase() }, select: { id: true, password: { select: { hash: true } } } })
+    if (!user) throw new Error('User not found')
+    const reused = await isPasswordReused(user.id, password)
+    if (reused) {
+        await audit.security({
+            action: 'PASSWORD_REUSE_BLOCKED',
+            actorType: 'USER',
+            actorId: user.id,
+            status: 'FAILURE',
+            summary: 'Attempted to set a previously used password',
+            metadata: { username, policy: { historyLimit: PASSWORD_HISTORY_LIMIT } },
+        })
+        return null
+    }
+    // capture current hash to history BEFORE overwriting
+    await captureCurrentPasswordToHistory(user.id)
     const hashedPassword = await getPasswordHash(password)
-    return prisma.user.update({
-        where: { username },
+    const updated = await prisma.user.update({
+        where: { id: user.id },
         data: {
-            password: {
-                update: {
-                    hash: hashedPassword,
-                },
-            },
+            passwordChangedAt: new Date(),
+            mustChangePassword: false,
+            password: { upsert: { update: { hash: hashedPassword }, create: { hash: hashedPassword } } },
         },
+        select: { id: true },
     })
+    await audit.security({
+        action: 'PASSWORD_RESET_SUCCESS',
+        actorType: 'USER',
+        actorId: user.id,
+        status: 'SUCCESS',
+        summary: 'Password reset',
+        metadata: { username },
+    })
+    return updated
 }
 
 export async function signup({
@@ -342,7 +471,14 @@ export async function signup({
     password: string
 }) {
     const hashedPassword = await getPasswordHash(password)
+    // No history check on signup (new user) but set passwordChangedAt for expiry tracking
 
+    // Ensure basic-user role exists for isolated test DBs (seed may not have run)
+    await prisma.role.upsert({
+        where: { name: 'basic-user' },
+        update: {},
+        create: { name: 'basic-user', description: 'Basic user (auto-created)' },
+    })
     const session = await prisma.session.create({
         data: {
             expirationDate: getSessionExpirationDate(),
@@ -352,11 +488,8 @@ export async function signup({
                     username: username.toLowerCase(),
                     name,
                     roles: { connect: { name: 'basic-user' } },
-                    password: {
-                        create: {
-                            hash: hashedPassword,
-                        },
-                    },
+                    password: { create: { hash: hashedPassword } },
+                    passwordChangedAt: new Date(),
                 },
             },
         },
@@ -423,7 +556,7 @@ export async function getPasswordHash(password: string) {
     return hash
 }
 
-// Password policy helpers: history + expiry
+// Password policy helpers: history + expiry (hardcoded)
 export const PASSWORD_MAX_AGE_DAYS = 60
 export const PASSWORD_HISTORY_LIMIT = 5
 

@@ -1,7 +1,6 @@
 import crypto from 'node:crypto'
 import { PassThrough } from 'node:stream'
 import { styleText } from 'node:util'
-import { contentSecurity } from '@nichtsam/helmet/content'
 import { createReadableStreamFromReadable } from '@react-router/node'
 import * as Sentry from '@sentry/react-router'
 import { isbot } from 'isbot'
@@ -64,32 +63,44 @@ export default async function handleRequest(...args: DocRequestArgs) {
 					responseHeaders.set('Content-Type', 'text/html')
 					responseHeaders.append('Server-Timing', timings.toString())
 
-					contentSecurity(responseHeaders, {
-						crossOriginEmbedderPolicy: false,
-						contentSecurityPolicy: {
-							reportOnly: false,
-							directives: {
-								fetch: {
-									'connect-src': [
-										MODE === 'development' ? 'ws:' : undefined,
-										process.env.SENTRY_DSN ? '*.sentry.io' : undefined,
-										"'self'",
-									],
-									'font-src': ["'self'"],
-									'frame-src': ["'self'"],
-									'img-src': ["'self'", 'data:'],
-									'script-src': [
-										"'strict-dynamic'",
-										"'self'",
-										`'nonce-${nonce}'`,
-									],
-									'script-src-attr': [`'nonce-${nonce}'`],
-									// Additional hardening directives not directly supported by the helper's typed interface
-									// are enforced at reverse proxy or could be appended manually if library adds support.
-								},
-							},
-						},
-					})
+					// Manual CSP assembly for fine-grained control. Using strict-dynamic + nonce eliminates need for hash whitelists.
+					// Tailwind is linked as a static stylesheet so we can avoid unsafe-inline for styles.
+					// If a future inline style is required, prefer a hashed style attribute or move styles to CSS.
+					const cspDirectives: Record<string, string[]> = {
+						"default-src": ["'self'"],
+						"base-uri": ["'self'"],
+						"frame-ancestors": ["'none'"],
+						"form-action": ["'self'"],
+						"object-src": ["'none'"],
+						"connect-src": [
+							"'self'",
+							MODE === 'development' ? 'ws:' : undefined,
+							process.env.SENTRY_DSN ? '*.sentry.io' : undefined,
+						].filter(Boolean) as string[],
+						"img-src": ["'self'", 'data:'],
+						"font-src": ["'self'", 'data:'],
+						"script-src": ["'strict-dynamic'", "'self'", `'nonce-${nonce}'`],
+						"script-src-attr": [`'nonce-${nonce}'`],
+						"style-src": ["'self'"],
+						// Reporting directives (non-legacy + legacy fallback). Browsers ignore unknown directives.
+						"report-to": ['csp'],
+						"report-uri": ['/csp-report'],
+					}
+					const csp = Object.entries(cspDirectives)
+						.map(([k, v]) => `${k} ${v.join(' ')}`)
+						.join('; ')
+					responseHeaders.set('Content-Security-Policy', csp)
+
+					// Configure Report-To header for modern reporting API.
+					try {
+						const origin = new URL(request.url).origin
+						const reportTo = {
+							group: 'csp',
+							max_age: 60 * 60 * 24 * 7, // 7 days
+							endpoints: [{ url: `${origin}/csp-report` }],
+						}
+						responseHeaders.set('Report-To', JSON.stringify(reportTo))
+					} catch {}
 
 					resolve(
 						new Response(createReadableStreamFromReadable(body), {

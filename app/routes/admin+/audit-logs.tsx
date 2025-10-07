@@ -7,6 +7,7 @@ import { InterexLayout } from '#app/components/interex-layout.tsx'
 import { JsonViewer } from '#app/components/json-view.tsx'
 import { LoadingOverlay } from '#app/components/ui/loading-overlay.tsx'
 import { actionLabel, entityLabel } from '#app/domain/audit-enums.ts'
+import { applyBulkAuditRedaction } from '#app/utils/audit-redaction.server.ts'
 import { requireUserId } from '#app/utils/auth.server.ts'
 import { prisma } from '#app/utils/db.server.ts'
 import { INTEREX_ROLES } from '#app/utils/interex-roles.ts'
@@ -161,9 +162,12 @@ export async function loader({ request }: LoaderFunctionArgs) {
     nextCursor = extra?.id || null
   }
 
+  // Apply redaction for non-system-admin (future: customer-admin may have partial view; for now redacted same as others)
+  const redactedLogs = applyBulkAuditRedaction(pageLogs as any, { isSystemAdmin })
+
   return data({
     user,
-  logs: pageLogs,
+  logs: redactedLogs,
   nextCursor,
   cursor,
     search,

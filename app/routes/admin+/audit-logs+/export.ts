@@ -1,5 +1,6 @@
 // /admin/audit-logs/export resource route (correct folder-nesting version)
 import { type LoaderFunctionArgs } from 'react-router'
+import { applyBulkAuditRedaction } from '#app/utils/audit-redaction.server.ts'
 import { requireUserId } from '#app/utils/auth.server.ts'
 import { prisma } from '#app/utils/db.server.ts'
 import { INTEREX_ROLES } from '#app/utils/interex-roles.ts'
@@ -24,9 +25,11 @@ export async function loader({ request }: LoaderFunctionArgs) {
   const createdFrom = url.searchParams.get('createdFrom') || ''
   const createdTo = url.searchParams.get('createdTo') || ''
   const format = url.searchParams.get('format') || 'csv'
-  const full = format.endsWith('-full')
+  const requestedFull = format.endsWith('-full')
   const baseFormat = format.replace('-full','')
-  const take = Math.min(full ? 5000 : 500, Number(url.searchParams.get('take') || (full ? 5000 : 500)))
+  const fullAllowed = requestedFull && user.roles.some(r => r.name === INTEREX_ROLES.SYSTEM_ADMIN)
+  const effectiveFull = fullAllowed
+  const take = Math.min(effectiveFull ? 5000 : 500, Number(url.searchParams.get('take') || (effectiveFull ? 5000 : 500)))
 
   const where: any = {}
   if (search) {
@@ -52,11 +55,13 @@ export async function loader({ request }: LoaderFunctionArgs) {
     if (Object.keys(range).length) where.createdAt = range
   }
 
-  const logs = await prisma.auditEvent.findMany({
+  const rawLogs = await prisma.auditEvent.findMany({
     where,
     orderBy: { createdAt: 'desc' },
     take,
   })
+  const isSystemAdmin = user.roles.some(r => r.name === INTEREX_ROLES.SYSTEM_ADMIN)
+  const logs = applyBulkAuditRedaction(rawLogs as any, { isSystemAdmin })
 
   const timestamp = new Date().toISOString().replace(/[:T]/g, '-').split('.')[0]
   const commonHeaders: Record<string,string> = {
@@ -65,18 +70,21 @@ export async function loader({ request }: LoaderFunctionArgs) {
   // Light keepalive cookie to avoid session expiring during export (optional)
   commonHeaders['Set-Cookie'] = `audit_export_ping=1; Path=/; HttpOnly; SameSite=Lax; Max-Age=300`
 
+  const redactedFlag = logs.some(l => (l as any).redacted) ? 'true' : 'false'
+
   if (baseFormat === 'json') {
     const body = JSON.stringify({
       generatedAt: new Date().toISOString(),
       count: logs.length,
-      fullExport: full,
+      fullExport: effectiveFull,
       filters: { search, actions, entityTypes, categories, statuses, chainKeys, createdFrom, createdTo },
       logs,
     }, null, 2)
     return new Response(body, { headers: {
       ...commonHeaders,
       'Content-Type': 'application/json; charset=utf-8',
-      'Content-Disposition': `attachment; filename="audit-logs-${timestamp}${full ? '-full' : ''}.json"`,
+      'Content-Disposition': `attachment; filename="audit-logs-${timestamp}${effectiveFull ? '-full' : ''}.json"`,
+      'X-Audit-Redacted': redactedFlag,
     } })
   }
 
@@ -94,7 +102,8 @@ export async function loader({ request }: LoaderFunctionArgs) {
   return new Response(csv, { headers: {
     ...commonHeaders,
     'Content-Type': 'text/csv; charset=utf-8',
-    'Content-Disposition': `attachment; filename="audit-logs-${timestamp}${full ? '-full' : ''}.csv"`,
+    'Content-Disposition': `attachment; filename="audit-logs-${timestamp}${effectiveFull ? '-full' : ''}.csv"`,
+    'X-Audit-Redacted': redactedFlag,
   } })
 }
 

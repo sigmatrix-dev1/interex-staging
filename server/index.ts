@@ -72,24 +72,26 @@ app.use(compression())
 // http://expressjs.com/en/advanced/best-practice-security.html#at-a-minimum-disable-x-powered-by-header
 app.disable('x-powered-by')
 
-// Content Security Policy (Phase 0 enforcement): enforce a strict baseline. Adjust if external origins required.
-// Directives chosen to minimize XSS risk while allowing inline styles via Tailwind's injected style tags (unsafe-inline styles only).
-// (Temporarily disabled per-request nonce generation while reverting to simpler CSP for hydration reliability.)
+// NOTE: CSP is now fully handled within `app/entry.server.tsx` using a per-request nonce and
+// `strict-dynamic` for HTML document responses. We intentionally do NOT add a duplicate CSP
+// header here to avoid conflicting directives. Non-HTML (JSON/data) responses inherit a
+// default "no inline scripts" posture by virtue of containing no HTML. If a future requirement
+// emerges to apply a resource-only CSP to JSON endpoints, introduce a lightweight middleware
+// that skips `text/html` responses and reuses a read-only directive set.
+
+// Additional security headers (idempotent) – kept minimal to avoid breaking existing redirect logic.
 app.use((req, res, next) => {
-	if (req.path.startsWith('/assets')) return next()
-	// Simpler CSP (temporary): allow inline scripts for hydration + bootstrapping.
-	const csp = [
-		"default-src 'self'",
-		"script-src 'self' 'unsafe-inline'",
-		"style-src 'self' 'unsafe-inline'",
-		"img-src 'self' data:",
-		"font-src 'self' data:",
-		"object-src 'none'",
-		"base-uri 'self'",
-		"frame-ancestors 'none'",
-		"form-action 'self'",
-	].join('; ')
-	res.setHeader('Content-Security-Policy', csp)
+	// HSTS only in production and only over HTTPS (Fly terminates TLS before us but sets X-Forwarded-Proto)
+	if (IS_PROD && req.get('X-Forwarded-Proto') === 'https') {
+		res.setHeader('Strict-Transport-Security', 'max-age=63072000; includeSubDomains; preload')
+	}
+	res.setHeader('X-Content-Type-Options', 'nosniff')
+	res.setHeader('X-Frame-Options', 'DENY') // redundant with frame-ancestors 'none' in CSP but harmless defense-in-depth
+	// Reinstate a safer Referrer-Policy. We use application-level redirectTo query params rather than referrer reliance.
+	res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin')
+	res.setHeader('Permissions-Policy', 'geolocation=(), camera=(), microphone=()')
+	res.setHeader('Cross-Origin-Opener-Policy', 'same-origin')
+	res.setHeader('Cross-Origin-Resource-Policy', 'same-origin')
 	next()
 })
 

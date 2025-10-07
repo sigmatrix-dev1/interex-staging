@@ -16,7 +16,8 @@ Focus: Strengthened perimeter against brute force & XSS; improved audit fidelity
 | Feature | Why (Risk) | Value | Status |
 |---------|------------|-------|--------|
 | Auth Rate Limiting (login, 2FA verify, reset) | Brute force & credential stuffing unthrottled | Reduces automated attack window; lowers log noise | Shipped |
-| Enforce CSP (removed `reportOnly`) | XSS protection previously observational | Hard mitigation of injection; compliance | Shipped |
+| Enforce CSP (nonce + strict-dynamic) | XSS protection previously observational | Hard mitigation of injection; compliance | Shipped (Initial strict -> temporary inline fallback for hydration regression -> re‑hardened with nonce & strict-dynamic on 2025-10-06) |
+| CSP Violation Reporting Endpoint (`/csp-report`) | No feedback loop for CSP regressions | Enables visibility into real-world blocked vectors allowing safe tightening | Shipped (2025-10-06) |
 | Failure Security Events (`LOGIN_FAILURE`, `MFA_VERIFY_FAILED`, etc.) | Limited visibility into failed attempts | Enables anomaly detection & future lockout tuning | Shipped |
 | Central Active User Query Helper | Risk of soft-deleted users leaking into logic | Consistent correctness | Shipped |
 | Universal Mandatory TOTP MFA Enforcement | Password-only sessions vulnerable to takeover | Dramatically raises bar for credential abuse; consistent policy | Shipped (replaced privileged warn gate) |

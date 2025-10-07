@@ -82,6 +82,18 @@ export async function handleNewSession(
 			if (user && isPasswordExpired(user.passwordChangedAt)) {
 				if (!user.mustChangePassword) {
 					await (prisma as any).user.update({ where: { id: user.id }, data: { mustChangePassword: true } })
+					// Emit security event for visibility
+					try {
+						await (prisma as any).securityEvent.create({
+							data: {
+								kind: 'PASSWORD_EXPIRED_ENFORCED',
+								userId: user.id,
+								success: true,
+								reason: 'PASSWORD_EXPIRED',
+								data: { userId: user.id },
+							},
+						})
+					} catch {}
 				}
 				return redirect(
 					'/change-password',

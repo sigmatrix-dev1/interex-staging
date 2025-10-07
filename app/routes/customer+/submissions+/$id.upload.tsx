@@ -45,6 +45,7 @@ import { getCachedFile, subKey } from '#app/utils/file-cache.ts'
 import { extractRequestContext } from '#app/utils/request-context.server.ts'
 import { redirectWithToast } from '#app/utils/toast.server.ts'
 import { BYTES_PER_MB, MAX_FILE_MB, MAX_TOTAL_MB, totalsNote, perFileLimitFor, totalsNoteFor } from '#app/utils/upload-constraints.ts'
+import { validateAndLogUpload } from '#app/utils/upload-security.server.ts'
 
 /** Minimal PCG types used for stage detection */
 type PcgEvent = { kind?: string; payload?: any }
@@ -214,7 +215,7 @@ export async function action({ request }: ActionFunctionArgs) {
         return data({ result: parsed.reply({ formErrors: msgs }) }, { status: 400 })
     }
 
-    // Validate sizes: each ≤ MAX_FILE_MB, total ≤ MAX_TOTAL_MB
+    // Validate sizes: each ≤ MAX_FILE_MB (or env override), total ≤ MAX_TOTAL_MB
     const bytesPerMB = BYTES_PER_MB
     const perFileLimit = autoSplit ? MAX_TOTAL_MB : MAX_FILE_MB
     const perFileErrors = files
@@ -225,8 +226,25 @@ export async function action({ request }: ActionFunctionArgs) {
     const sizeErrors = [...perFileErrors, ...totalError]
     if (sizeErrors.length) return data({ result: parsed.reply({ formErrors: sizeErrors }) }, { status: 400 })
 
-    // All good: upload
+    // Gather request context before validation loop
     const ctx = await extractRequestContext(request, { requireUser: false })
+
+    // Security validation (type & per-file size enforcement with logging)
+    for (const f of files) {
+        const v = await validateAndLogUpload(f, {
+            maxPerFileMB: perFileLimit,
+            userId: userId,
+            customerId: submission.customerId,
+            requestId: ctx.requestId,
+            ip: request.headers.get('fly-client-ip') || request.headers.get('x-forwarded-for') || undefined,
+            userAgent: request.headers.get('user-agent') || undefined,
+        })
+        if (!v.ok) {
+            return data({ result: parsed.reply({ formErrors: [v.reason] }) }, { status: 400 })
+        }
+    }
+
+    // All good: upload
     try {
         // Send files to PCG
         const pcgResp = await pcgUploadFiles(submission.pcgSubmissionId, files)

@@ -188,11 +188,11 @@ function Document({
 					<meta name="robots" content="noindex, nofollow" />
 				)}
 				<Links />
-				{/* Early inline script to auto-inject CSRF hidden input into any POST form that lacks one (defense-in-depth). */}
+				{/* CSRF auto-inject script: handles initial & dynamically added POST forms safely via MutationObserver. */}
 				<script
 					nonce={nonce}
 					dangerouslySetInnerHTML={{
-						__html: `document.addEventListener('DOMContentLoaded',function(){try{var t=window.__ROOT_DATA__&&window.__ROOT_DATA__.csrf;if(!t)return;var forms=document.querySelectorAll('form[method=post],form[method=POST]');for(var i=0;i<forms.length;i++){var f=forms[i];if(!f.querySelector('input[name=csrf],input[name=_csrf]')){var inp=document.createElement('input');inp.type='hidden';inp.name='csrf';inp.value=t;f.appendChild(inp);}}}catch(e){}});`,
+						__html: `(()=>{function inject(f,t){if(!f||!t)return;if(f.__csrfInjected) return; if(f.querySelector('input[name=csrf],input[name=_csrf]')){f.__csrfInjected=true;return;}var i=document.createElement('input');i.type='hidden';i.name='csrf';i.value=t;f.appendChild(i);f.__csrfInjected=true;}function scan(t){var forms=document.querySelectorAll('form[method=post],form[method=POST]');for(var i=0;i<forms.length;i++)inject(forms[i],t);}try{var token=(window.__ROOT_DATA__&&window.__ROOT_DATA__.csrf)||null;if(!token)return;scan(token);var mo=new MutationObserver(function(m){for(var j=0;j<m.length;j++){var rec=m[j];for(var n=0;n<rec.addedNodes.length;n++){var node=rec.addedNodes[n];if(node.nodeType!==1)continue; if(node.tagName==='FORM'){var mf=node;var mth=(mf.getAttribute('method')||'').toLowerCase(); if(mth==='post') inject(mf,token);}var nested=node.querySelectorAll?node.querySelectorAll('form'):[]; for(var k=0;k<nested.length;k++){var nf=nested[k];var mth2=(nf.getAttribute('method')||'').toLowerCase(); if(mth2==='post') inject(nf,token);}}}});mo.observe(document.documentElement,{childList:true,subtree:true});}catch(e){}})();`,
 					}}
 				/>
 			</head>
@@ -202,12 +202,12 @@ function Document({
 				<script
 					nonce={nonce}
 					// Expose minimal root data needed early (csrf). Avoid dumping full user object to minimize risk.
-					dangerouslySetInnerHTML={{ __html: `window.__ROOT_DATA__=${JSON.stringify({ csrf: (globalThis as any).__ROOT_CSRF__ || null })}` }}
+					dangerouslySetInnerHTML={{ __html: (() => { const json = JSON.stringify({ csrf: (globalThis as any).__ROOT_CSRF__ || null }).replace(/</g,'\\u003c').replace(/-->/g,'__'); return `window.__ROOT_DATA__=${json}` })() }}
 				/>
 				<script
 					nonce={nonce}
 					dangerouslySetInnerHTML={{
-						__html: `window.ENV = ${JSON.stringify(env)}`,
+						__html: (() => { const json = JSON.stringify(env).replace(/</g,'\\u003c').replace(/-->/g,'__'); return `window.ENV = ${json}` })(),
 					}}
 				/>
 				<ScrollRestoration nonce={nonce} />

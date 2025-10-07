@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import { z } from 'zod'
+import { PHI_PATTERNS } from './phi-constants.ts'
 
 // Max sizes (bytes) aligned with migration comments
 export const AUDIT_METADATA_MAX = 2 * 1024 // 2KB
@@ -62,13 +63,7 @@ export function computeAuditHashSelf(fields: {
   return sha256Hex(canonicalJson(payload))
 }
 
-// Rudimentary PHI detection heuristics (extendable)
-// NOTE: intentionally conservative. Returns true if potential PHI found.
-const phiPatterns: Array<{ name: string; regex: RegExp }> = [
-  { name: 'ssn', regex: /\b\d{3}-\d{2}-\d{4}\b/ },
-  { name: 'mrn', regex: /\bMRN[:#]?\s*\d{5,}\b/i },
-  { name: 'dob', regex: /\b(19|20)\d{2}[-\/.](0?[1-9]|1[0-2])[-\/.](0?[1-9]|[12]\d|3[01])\b/ },
-]
+// PHI detection patterns imported from unified constants file
 
 export interface PhiScanResult {
   hasPhi: boolean
@@ -78,7 +73,7 @@ export interface PhiScanResult {
 export function scanForPhi(obj: unknown): PhiScanResult {
   const text = extractText(obj)
   const matches: PhiScanResult['matches'] = []
-  for (const p of phiPatterns) {
+  for (const p of PHI_PATTERNS) {
     const m = p.regex.exec(text)
     if (m) {
       matches.push({ pattern: p.name, sample: m[0] })

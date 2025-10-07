@@ -70,6 +70,15 @@ export async function action({ request }: { request: Request }) {
   const ctx = await extractRequestContext(request, { requireUser: false })
   const formData = await request.formData()
   await assertCsrf(request, formData)
+  // Recovery codes acknowledgment branch
+  if (formData.get('intent') === 'ack-recovery') {
+    const sessionId = String(formData.get('sessionId') || '')
+    const remember = formData.get('remember') ? true : false
+    const redirectTo = String(formData.get('redirectTo') || '') || undefined
+    const session = await prisma.session.findUnique({ where: { id: sessionId }, select: { id: true, userId: true, expirationDate: true } })
+    if (!session) return data({ result: { formErrors: ['Session expired. Please log in again.'] } }, { status: 400 })
+    return handleNewSession({ request, session, remember, redirectTo, twoFAVerified: true })
+  }
   const submission = await parseWithZod(formData, {
     schema: TwoFASetupSchema.transform(async (val, ctx) => {
       const user = await prisma.user.findUnique({
@@ -98,7 +107,8 @@ export async function action({ request }: { request: Request }) {
   const { userId, secret, redirectTo } = submission.value
   // Persist secret and enable 2FA
   await enableTwoFactorForUser(userId, secret)
-  // Conditionally issue recovery codes ONLY for privileged roles
+  // Conditionally issue recovery codes ONLY for privileged roles; capture for one-time display
+  let issuedCodes: string[] | null = null
   try {
     const roles = await prisma.role.findMany({
       where: { users: { some: { id: userId } } },
@@ -106,7 +116,8 @@ export async function action({ request }: { request: Request }) {
     })
     const allowed = roles.some(r => r.name === 'system-admin' || r.name === 'customer-admin')
     if (allowed) {
-      await issueRecoveryCodes(userId, { actorType: 'USER', actorId: userId, actorIp: ctx.ip ?? null, actorUserAgent: ctx.userAgent ?? null, chainKey: 'global', summary: 'Initial recovery codes issued at MFA enable' })
+      const codes = await issueRecoveryCodes(userId, { actorType: 'USER', actorId: userId, actorIp: ctx.ip ?? null, actorUserAgent: ctx.userAgent ?? null, chainKey: 'global', summary: 'Initial recovery codes issued at MFA enable' })
+      issuedCodes = codes && codes.length ? codes : null
     }
   } catch (e) {
     console.warn('Failed to issue recovery codes', e)
@@ -136,12 +147,17 @@ export async function action({ request }: { request: Request }) {
   }
   // Read remember flag from verify session to respect the original login choice
   const remember = !!verifySession.get('remember')
-  // TODO: Provide recoveryCodes to user (one-time) via dedicated page or flash message.
+  // If recovery codes were issued, show them once before redirecting into full session.
+  if (issuedCodes && issuedCodes.length) {
+    return data({ recoveryCodes: issuedCodes, next: { sessionId: session.id, remember, redirectTo } })
+  }
   return handleNewSession({ request, session, remember, redirectTo, twoFAVerified: true })
 }
 
 export default function TwoFASetupPage({ loaderData, actionData }: { loaderData: any; actionData: any }) {
   const { userId, username, secret, qrCode } = loaderData
+  const recoveryCodes: string[] | undefined = actionData?.recoveryCodes
+  const pendingNext = actionData?.next
   const isPending = useIsPending()
   const [searchParams] = useSearchParams()
   const redirectTo = searchParams.get('redirectTo') || undefined
@@ -156,6 +172,31 @@ export default function TwoFASetupPage({ loaderData, actionData }: { loaderData:
     },
   })
 
+  if (recoveryCodes && recoveryCodes.length) {
+    return (
+      <div className="flex min-h-full flex-col justify-center pt-20 pb-32 bg-gray-50">
+        <div className="mx-auto w-full max-w-md px-4 sm:px-0">
+          <div className="rounded-2xl border border-green-200 bg-white shadow-xl ring-1 ring-black/5">
+            <div className="px-6 py-6 sm:px-8 sm:py-8 space-y-4">
+              <h1 className="text-h3 text-center">Recovery Codes</h1>
+              <p className="text-sm text-gray-600">Store these one-time recovery codes in a secure password manager. Each can be used once if you lose access to your authenticator app.</p>
+              <ul className="grid grid-cols-2 gap-2 font-mono text-sm bg-gray-50 p-3 rounded">
+                {recoveryCodes.map(c => <li key={c} className="px-2 py-1 bg-white rounded border border-gray-200 text-center">{c}</li>)}
+              </ul>
+              <Form method="post" className="pt-2">
+                <CsrfInput />
+                <input type="hidden" name="intent" value="ack-recovery" />
+                <input type="hidden" name="sessionId" value={pendingNext.sessionId} />
+                <input type="hidden" name="remember" value={pendingNext.remember ? '1' : ''} />
+                <input type="hidden" name="redirectTo" value={pendingNext.redirectTo || ''} />
+                <StatusButton type="submit" status={isPending ? 'pending' : 'idle'} className="w-full bg-indigo-600 text-white rounded-md py-2">Continue</StatusButton>
+              </Form>
+            </div>
+          </div>
+        </div>
+      </div>
+    )
+  }
   return (
     <div className="flex min-h-full flex-col justify-center pt-20 pb-32 bg-gray-50">
       <div className="mx-auto w-full max-w-md px-4 sm:px-0">

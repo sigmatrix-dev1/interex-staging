@@ -1,5 +1,15 @@
 import { randomUUID } from 'node:crypto'
 import { computeAuditHashSelf, validateAndSerializePayload } from '#app/utils/audit-hash.ts'
+
+// Hard caps (bytes) for serialized JSON fields to avoid oversized rows silently bloating storage.
+const METADATA_MAX_BYTES = 2048
+const DIFF_MAX_BYTES = 4096
+
+function truncateIfNeeded(json: string | null | undefined, max: number): { value: string | null; truncated: boolean } {
+  if (!json) return { value: null, truncated: false }
+  if (json.length <= max) return { value: json, truncated: false }
+  return { value: json.slice(0, max - 15) + '"…TRUNCATED"}', truncated: true }
+}
 import { prisma } from '#app/utils/db.server.ts'
 
 // Local string literal unions mirror Prisma enum values; avoids lint complaints about type-only imports.
@@ -58,11 +68,20 @@ export async function logAuditEvent(input: AuditEventInput): Promise<AuditEventR
   const chainKey = input.chainKey || input.customerId || 'global'
 
   // serialize & validate payload
-  const { metadataJson, diffJson, phiDetected } = validateAndSerializePayload(
+  let { metadataJson, diffJson, phiDetected } = validateAndSerializePayload(
     input.metadata,
     input.diff,
     { allowPhi: !!input.allowPhi }
   )
+
+  // Enforce size limits and mark truncation in summary if necessary.
+  const metaTrunc = truncateIfNeeded(metadataJson ?? null, METADATA_MAX_BYTES)
+  const diffTrunc = truncateIfNeeded(diffJson ?? null, DIFF_MAX_BYTES)
+  metadataJson = metaTrunc.value ?? undefined
+  diffJson = diffTrunc.value ?? undefined
+  if (metaTrunc.truncated || diffTrunc.truncated) {
+    input.summary = (input.summary ? input.summary + ' | ' : '') + 'Payload truncated'
+  }
 
   // Best-effort enrichment: if a USER actor is provided without a display name, resolve name/email now
   // so future reads don't need to backfill. This adds one lightweight query only when needed.

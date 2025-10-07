@@ -17,6 +17,7 @@ beforeAll(async () => {
       password: { create: { hash: passwordHash } },
       twoFactorEnabled: true,
       twoFactorSecret: 'JBSWY3DPEHPK3PXP',
+      passwordChangedAt: new Date(), // ensure not expired for test
     },
     select: { id: true },
   })
