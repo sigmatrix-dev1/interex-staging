@@ -13,7 +13,7 @@ const schema = z.object({
     SENTRY_DSN: z.string().optional(),
     // If you plan to use Resend, remove the .optional()
     RESEND_API_KEY: z.string().optional(),
-    // If you plan to use GitHub auth, remove the .optional()
+    // GitHub OAuth removed – variables deprecated (retain optional parsing for backward deploy safety)
     GITHUB_CLIENT_ID: z.string().optional(),
     GITHUB_CLIENT_SECRET: z.string().optional(),
     GITHUB_REDIRECT_URI: z.string().optional(),
@@ -40,8 +40,12 @@ const schema = z.object({
     AUTH_RATE_LIMIT_ENABLED: z.enum(['true','false']).optional(),
     AUTH_RATE_LIMIT_WINDOW_SEC: z.string().optional(),
     AUTH_RATE_LIMIT_MAX: z.string().optional(),
-    PRIVILEGED_2FA_WARN: z.enum(['true','false']).optional(),
-    PRIVILEGED_2FA_ENFORCE: z.enum(['true','false']).optional(),
+    // Account lockout flags (Phase 1)
+    LOCKOUT_ENABLED: z.enum(['true','false']).optional(),
+    LOCKOUT_THRESHOLD: z.string().optional(),
+    LOCKOUT_WINDOW_SEC: z.string().optional(),
+    LOCKOUT_BASE_COOLDOWN_SEC: z.string().optional(),
+    // Removed privileged MFA flags – MFA now mandatory for all users.
 
     // Privacy: how to record client IPs in audit logs: 'raw' | 'masked' | 'hash'
     LOG_IP_MODE: z.enum(['raw', 'masked', 'hash']).optional(),
@@ -72,8 +76,8 @@ export function getEnv() {
         ALLOW_INDEXING: process.env.ALLOW_INDEXING,
         LOG_IP_MODE: process.env.LOG_IP_MODE,
         AUTH_RATE_LIMIT_ENABLED: process.env.AUTH_RATE_LIMIT_ENABLED,
-        PRIVILEGED_2FA_WARN: process.env.PRIVILEGED_2FA_WARN,
-        PRIVILEGED_2FA_ENFORCE: process.env.PRIVILEGED_2FA_ENFORCE,
+        LOCKOUT_ENABLED: process.env.LOCKOUT_ENABLED,
+    // No privileged MFA flags exported
     }
 }
 

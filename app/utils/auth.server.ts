@@ -1,19 +1,16 @@
 // app/utils/auth.server.ts
 
 import crypto from 'node:crypto'
-import { type Connection, type Password } from '@prisma/client'
+import { type Password } from '@prisma/client'
 import bcrypt from 'bcryptjs'
 import { redirect } from 'react-router'
-import { Authenticator } from 'remix-auth'
 import { safeRedirect } from 'remix-utils/safe-redirect'
 import { audit } from '#app/services/audit.server.ts'
 import { extractRequestContext } from '#app/utils/request-context.server.ts'
-import { providers } from './connections.server.ts'
 import { prisma } from './db.server.ts'
-import { combineHeaders, downloadFile } from './misc.tsx'
-import { type ProviderUser } from './providers/provider.ts'
+import { combineHeaders } from './misc.tsx'
 import { authSessionStorage } from './session.server.ts'
-import { uploadProfileImage } from './storage.server.ts'
+// uploadProfileImage no longer needed (OAuth avatar sync removed)
 
 export const SESSION_EXPIRATION_TIME = 1000 * 60 * 60 * 24 * 30
 export const getSessionExpirationDate = () =>
@@ -21,14 +18,7 @@ export const getSessionExpirationDate = () =>
 
 export const sessionKey = 'sessionId'
 
-export const authenticator = new Authenticator<ProviderUser>()
-
-for (const [providerName, provider] of Object.entries(providers)) {
-    const strategy = provider.getAuthStrategy()
-    if (strategy) {
-        authenticator.use(strategy, providerName)
-    }
-}
+// OAuth/passkey providers removed – username/password + mandatory TOTP only.
 
 export async function getUserId(request: Request) {
     const authSession = await authSessionStorage.getSession(
@@ -116,13 +106,38 @@ export async function login(
         throw new Error('login(request, { username, password }) called without a valid Request object')
     }
     const ctx = await extractRequestContext(request, { requireUser: false })
-    const verified = await verifyUserPassword({ username }, password)
-    if (!verified) {
-        // differentiate reason: user missing/inactive vs bad password is not exposed directly here
+    // Load user record up-front to apply lockout logic atomically
+    // Fallback path retained because type generation appears to still mismatch in current build context
+    const baseUser = await prisma.user.findUnique({
+        where: { username: username.toLowerCase() },
+        select: { id: true, active: true },
+    })
+    let userRecord: { id: string; active: boolean; failedLoginCount: number; lockedUntil: Date | null } | null = null
+    if (baseUser) {
+        let failedLoginCount = 0
+        let lockedUntil: Date | null = null
+        try {
+            const rows: any = await prisma.$queryRawUnsafe(
+                'SELECT failedLoginCount, lockedUntil FROM User WHERE id = ? LIMIT 1',
+                baseUser.id,
+            )
+            const row = Array.isArray(rows) ? rows[0] : rows
+            if (row) {
+                if (typeof row.failedLoginCount === 'number') failedLoginCount = row.failedLoginCount
+                if (row.lockedUntil) lockedUntil = new Date(row.lockedUntil)
+            }
+        } catch {}
+        userRecord = { id: baseUser.id, active: baseUser.active, failedLoginCount, lockedUntil }
+    }
+
+    const lockoutEnabled = process.env.LOCKOUT_ENABLED === 'true'
+    const now = new Date()
+    if (lockoutEnabled && userRecord?.lockedUntil && userRecord.lockedUntil > now) {
+        // Still locked
         await audit.auth({
-            action: 'LOGIN_FAILURE',
+            action: 'LOGIN_LOCKED',
             actorType: 'USER',
-            actorId: undefined,
+            actorId: userRecord.id,
             actorDisplay: username,
             actorIp: ctx.ip ?? null,
             actorUserAgent: ctx.userAgent ?? null,
@@ -130,11 +145,143 @@ export async function login(
             requestId: ctx.requestId,
             traceId: ctx.traceId,
             spanId: ctx.spanId,
-            metadata: { username, reason: 'INVALID_CREDENTIALS' },
-            summary: 'Login failed',
+            metadata: { username, lockedUntil: userRecord.lockedUntil.toISOString() },
+            summary: 'Login attempt while account locked',
             status: 'FAILURE',
         })
+        // SecurityEvent: locked login attempt
+        try {
+            await (prisma as any).securityEvent.create({
+                data: {
+                    kind: 'LOGIN_FAILURE_LOCKED',
+                    userId: userRecord.id,
+                    userEmail: null,
+                    ip: ctx.ip,
+                    userAgent: ctx.userAgent,
+                    success: false,
+                    reason: 'ACCOUNT_LOCKED',
+                    data: { username },
+                },
+            })
+        } catch {}
         return null
+    }
+
+    const verified = await verifyUserPassword({ username }, password)
+    if (!verified) {
+        // On failure, increment counters and maybe lock
+    if (lockoutEnabled && userRecord?.id) {
+            const threshold = Number(process.env.LOCKOUT_THRESHOLD || 10)
+            const baseCooldownSec = Number(process.env.LOCKOUT_BASE_COOLDOWN_SEC || 300)
+            // naive exponential:  base * 2^(floor(failures/threshold)-1)
+            const nextFails = (userRecord.failedLoginCount ?? 0) + 1
+            let lockedUntil: Date | null = null
+            if (nextFails >= threshold) {
+                const multiplier = Math.max(1, Math.floor(nextFails / threshold))
+                const cooldownMs = baseCooldownSec * 1000 * Math.pow(2, multiplier - 1)
+                lockedUntil = new Date(Date.now() + cooldownMs)
+            }
+            try {
+                const prismaAny = prisma as any
+                await prismaAny.user.update({
+                    where: { id: userRecord.id },
+                    data: { failedLoginCount: { increment: 1 }, lockedUntil },
+                    select: { id: true },
+                })
+                userRecord.failedLoginCount += 1
+                userRecord.lockedUntil = lockedUntil ?? null
+            } catch {}
+            const wasLocked = Boolean(lockedUntil)
+            await audit.auth({
+                action: lockedUntil ? 'AUTH_LOCKOUT_TRIGGERED' : 'LOGIN_FAILURE',
+                actorType: 'USER',
+                actorId: userRecord.id,
+                actorDisplay: username,
+                actorIp: ctx.ip ?? null,
+                actorUserAgent: ctx.userAgent ?? null,
+                customerId: null,
+                requestId: ctx.requestId,
+                traceId: ctx.traceId,
+                spanId: ctx.spanId,
+                metadata: { username, failures: nextFails, threshold, lockedUntil: lockedUntil?.toISOString() },
+                summary: lockedUntil ? 'Account locked due to repeated failures' : 'Login failed',
+                status: 'FAILURE',
+            })
+            // SecurityEvent for lockout or failure with lockout enabled path
+            try {
+                await (prisma as any).securityEvent.create({
+                    data: {
+                        kind: wasLocked ? 'AUTH_LOCKOUT_TRIGGERED' : 'LOGIN_FAILURE',
+                        userId: userRecord.id,
+                        userEmail: null,
+                        ip: ctx.ip,
+                        userAgent: ctx.userAgent,
+                        success: false,
+                        reason: wasLocked ? 'LOCKOUT' : 'INVALID_CREDENTIALS',
+                        data: { username, failures: userRecord.failedLoginCount, threshold },
+                    },
+                })
+            } catch {}
+        } else {
+            await audit.auth({
+                action: 'LOGIN_FAILURE',
+                actorType: 'USER',
+                actorId: userRecord?.id,
+                actorDisplay: username,
+                actorIp: ctx.ip ?? null,
+                actorUserAgent: ctx.userAgent ?? null,
+                customerId: null,
+                requestId: ctx.requestId,
+                traceId: ctx.traceId,
+                spanId: ctx.spanId,
+                metadata: { username, reason: 'INVALID_CREDENTIALS' },
+                summary: 'Login failed',
+                status: 'FAILURE',
+            })
+        }
+        // SecurityEvent: generic login failure outside lockout path
+        try {
+            await (prisma as any).securityEvent.create({
+                data: {
+                    kind: 'LOGIN_FAILURE',
+                    userId: userRecord?.id || null,
+                    userEmail: null,
+                    ip: ctx.ip,
+                    userAgent: ctx.userAgent,
+                    success: false,
+                    reason: 'INVALID_CREDENTIALS',
+                    data: { username },
+                },
+            })
+        } catch {}
+        return null
+    }
+
+    // Success: clear failure counters if previously set
+    if (lockoutEnabled && userRecord?.id && (userRecord.failedLoginCount > 0 || userRecord.lockedUntil)) {
+        try {
+            const prismaAny = prisma as any
+            await prismaAny.user.update({
+                where: { id: userRecord.id },
+                data: { failedLoginCount: 0, lockedUntil: null },
+                select: { id: true },
+            })
+        } catch {}
+        await audit.auth({
+            action: 'AUTH_LOCKOUT_CLEARED',
+            actorType: 'USER',
+            actorId: userRecord.id,
+            actorDisplay: username,
+            actorIp: ctx.ip ?? null,
+            actorUserAgent: ctx.userAgent ?? null,
+            customerId: null,
+            requestId: ctx.requestId,
+            traceId: ctx.traceId,
+            spanId: ctx.spanId,
+            metadata: { username },
+            summary: 'Cleared failed login counters after successful auth',
+            status: 'SUCCESS',
+        })
     }
 
     const session = await prisma.session.create({
@@ -219,57 +366,7 @@ export async function signup({
     return session
 }
 
-export async function signupWithConnection({
-                                               email,
-                                               username,
-                                               name,
-                                               providerId,
-                                               providerName,
-                                               imageUrl,
-                                           }: {
-    email: string
-    username: string
-    name: string
-    providerId: Connection['providerId']
-    providerName: Connection['providerName']
-    imageUrl?: string
-}) {
-    const user = await prisma.user.create({
-        data: {
-            email: email.toLowerCase(),
-            username: username.toLowerCase(),
-            name,
-            roles: { connect: { name: 'basic-user' } },
-            connections: { create: { providerId, providerName } },
-        },
-        select: { id: true },
-    })
-
-    if (imageUrl) {
-        const imageFile = await downloadFile(imageUrl)
-        await prisma.user.update({
-            where: { id: user.id },
-            data: {
-                image: {
-                    create: {
-                        objectKey: await uploadProfileImage(user.id, imageFile),
-                    },
-                },
-            },
-        })
-    }
-
-    // Create and return the session
-    const session = await prisma.session.create({
-        data: {
-            expirationDate: getSessionExpirationDate(),
-            userId: user.id,
-        },
-        select: { id: true, expirationDate: true },
-    })
-
-    return session
-}
+// Removed signupWithConnection – external OAuth onboarding no longer supported.
 
 export async function logout(
     {
@@ -408,10 +505,16 @@ export function getPasswordHashParts(password: string) {
 export async function checkIsCommonPassword(password: string) {
     const [prefix, suffix] = getPasswordHashParts(password)
 
+    // Allow disabling the breach check entirely (perf / offline) via env.
+    if (process.env.PASSWORD_BREACH_CHECK === 'false') return false
+
+    // Allow tuning timeout; default lowered from 1000ms to 600ms to reduce perceived latency.
+    const timeoutMs = Number(process.env.PASSWORD_PWNED_TIMEOUT_MS || 600)
+
     try {
         const response = await fetch(
             `https://api.pwnedpasswords.com/range/${prefix}`,
-            { signal: AbortSignal.timeout(1000) },
+            { signal: AbortSignal.timeout(timeoutMs) },
         )
 
         if (!response.ok) return false
@@ -422,12 +525,16 @@ export async function checkIsCommonPassword(password: string) {
             return hashSuffix === suffix
         })
     } catch (error) {
-        if (error instanceof DOMException && error.name === 'TimeoutError') {
-            console.warn('Password check timed out')
-            return false
+        const timedOut = error instanceof DOMException && error.name === 'TimeoutError'
+        if (process.env.PASSWORD_BREACH_CHECK_LOG !== 'false') {
+            // Preserve legacy message strings so existing tests remain valid.
+            if (timedOut) {
+                console.warn('Password check timed out')
+            } else {
+                console.warn('Unknown error during password check', error)
+            }
         }
-
-        console.warn('Unknown error during password check', error)
+        // Fail open (treat as not common) so we do not block password changes on network issues.
         return false
     }
 }

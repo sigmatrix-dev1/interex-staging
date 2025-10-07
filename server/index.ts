@@ -72,6 +72,27 @@ app.use(compression())
 // http://expressjs.com/en/advanced/best-practice-security.html#at-a-minimum-disable-x-powered-by-header
 app.disable('x-powered-by')
 
+// Content Security Policy (Phase 0 enforcement): enforce a strict baseline. Adjust if external origins required.
+// Directives chosen to minimize XSS risk while allowing inline styles via Tailwind's injected style tags (unsafe-inline styles only).
+app.use((req, res, next) => {
+	// Skip CSP for asset files to reduce header bloat
+	if (req.path.startsWith('/assets')) return next()
+	const csp = [
+		"default-src 'self'",
+		"script-src 'self'",
+		"style-src 'self' 'unsafe-inline'",
+		"img-src 'self' data:",
+		"font-src 'self' data:",
+		"object-src 'none'",
+		"base-uri 'self'",
+		"frame-ancestors 'none'",
+		"form-action 'self'",
+		'upgrade-insecure-requests',
+	].join('; ')
+	res.setHeader('Content-Security-Policy', csp)
+	next()
+})
+
 app.use((_, res, next) => {
 	// The referrerPolicy breaks our redirectTo logic
 	helmet(res, { general: { referrerPolicy: false } })

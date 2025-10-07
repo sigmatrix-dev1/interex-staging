@@ -2,11 +2,14 @@ import { getFormProps, getInputProps, useForm } from '@conform-to/react'
 import { getZodConstraint, parseWithZod } from '@conform-to/zod'
 import { data, Form, redirect, useSearchParams } from 'react-router'
 import { z } from 'zod'
+import { CsrfInput } from '#app/components/csrf-input.tsx'
 import { Field, ErrorList } from '#app/components/forms.tsx'
 import { StatusButton } from '#app/components/ui/status-button.tsx'
 import { audit } from '#app/services/audit.server.ts'
 import { requireAnonymous } from '#app/utils/auth.server.ts'
+import { getOrCreateCsrfToken, assertCsrf } from '#app/utils/csrf.server.ts'
 import { prisma } from '#app/utils/db.server.ts'
+import { issueRecoveryCodes } from '#app/utils/mfa.server.ts'
 import { useIsPending } from '#app/utils/misc.tsx'
 import { extractRequestContext } from '#app/utils/request-context.server.ts'
 import { generateTwoFactorSecret, verifyTwoFactorToken, enableTwoFactorForUser } from '#app/utils/twofa.server.ts'
@@ -58,13 +61,15 @@ export async function loader({ request }: { request: Request }) {
     summary: 'User initiated 2FA setup during login',
     metadata: { method: 'TOTP' },
   })
-  return data({ userId: user.id, username: user.username, secret, qrCode })
+  const { token, setCookie } = await getOrCreateCsrfToken(request)
+  return data({ userId: user.id, username: user.username, secret, qrCode, csrf: token }, setCookie ? { headers: { 'set-cookie': setCookie } } : undefined)
 }
 
 export async function action({ request }: { request: Request }) {
   await requireAnonymous(request)
   const ctx = await extractRequestContext(request, { requireUser: false })
   const formData = await request.formData()
+  await assertCsrf(request, formData)
   const submission = await parseWithZod(formData, {
     schema: TwoFASetupSchema.transform(async (val, ctx) => {
       const user = await prisma.user.findUnique({
@@ -93,6 +98,19 @@ export async function action({ request }: { request: Request }) {
   const { userId, secret, redirectTo } = submission.value
   // Persist secret and enable 2FA
   await enableTwoFactorForUser(userId, secret)
+  // Conditionally issue recovery codes ONLY for privileged roles
+  try {
+    const roles = await prisma.role.findMany({
+      where: { users: { some: { id: userId } } },
+      select: { name: true },
+    })
+    const allowed = roles.some(r => r.name === 'system-admin' || r.name === 'customer-admin')
+    if (allowed) {
+      await issueRecoveryCodes(userId, { actorType: 'USER', actorId: userId, actorIp: ctx.ip ?? null, actorUserAgent: ctx.userAgent ?? null, chainKey: 'global', summary: 'Initial recovery codes issued at MFA enable' })
+    }
+  } catch (e) {
+    console.warn('Failed to issue recovery codes', e)
+  }
   await audit.security({
     action: 'MFA_ENABLE',
     actorType: 'USER',
@@ -118,6 +136,7 @@ export async function action({ request }: { request: Request }) {
   }
   // Read remember flag from verify session to respect the original login choice
   const remember = !!verifySession.get('remember')
+  // TODO: Provide recoveryCodes to user (one-time) via dedicated page or flash message.
   return handleNewSession({ request, session, remember, redirectTo, twoFAVerified: true })
 }
 
@@ -158,6 +177,7 @@ export default function TwoFASetupPage({ loaderData, actionData }: { loaderData:
             </div>
 
             <Form method="post" {...getFormProps(form)}>
+              <CsrfInput />
               <input {...getInputProps(fields.userId, { type: 'hidden' })} />
               <input {...getInputProps(fields.secret, { type: 'hidden' })} />
               {/* remember is sourced from verify session cookie; no hidden field needed */}

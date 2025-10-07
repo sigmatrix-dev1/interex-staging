@@ -57,8 +57,12 @@ export default defineConfig((config) => ({
 			: null,
 	],
 	test: {
-		include: ['./app/**/*.test.{ts,tsx}'],
-		exclude: ['**/password-lifecycle.test.ts'],
+		// Include app unit/integration tests plus selected tests directory (excluding Playwright e2e)
+		include: ['./app/**/*.test.{ts,tsx}', './tests/**/*.test.{ts,tsx}'],
+		exclude: [
+			'**/password-lifecycle.test.ts',
+			'./tests/e2e/**', // Playwright tests run via playwright, not Vitest
+		],
 		setupFiles: ['./tests/setup/setup-test-env.ts'],
 		globalSetup: ['./tests/setup/global-setup.ts'],
 		restoreMocks: true,

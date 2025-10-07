@@ -1,8 +1,10 @@
 import { type LoaderFunctionArgs, type ActionFunctionArgs, data, redirect, useLoaderData, Form  } from 'react-router'
+import { CsrfInput } from '#app/components/csrf-input.tsx'
 import { InterexLayout } from '#app/components/interex-layout.tsx'
 import { Button } from '#app/components/ui/button.tsx'
 import { Icon } from '#app/components/ui/icon.tsx'
 import { requireUserId } from '#app/utils/auth.server.ts'
+import { assertCsrf } from '#app/utils/csrf.server.ts'
 import { prisma } from '#app/utils/db.server.ts'
 import { INTEREX_ROLES } from '#app/utils/interex-roles.ts'
 import { requireRoles } from '#app/utils/role-redirect.server.ts'
@@ -57,6 +59,7 @@ export async function action({ request }: ActionFunctionArgs) {
   requireRoles(user, [INTEREX_ROLES.SYSTEM_ADMIN])
 
   const formData = await request.formData()
+  await assertCsrf(request, formData)
   const name = formData.get('name')?.toString()
   const description = formData.get('description')?.toString()
   const customerId = formData.get('customerId')?.toString()
@@ -102,6 +105,7 @@ export default function NewProviderGroup() {
         <div className="bg-white shadow sm:rounded-lg">
           <div className="px-4 py-5 sm:p-6">
             <Form method="post">
+              <CsrfInput />
               <div className="space-y-6">
                 <div>
                   <label htmlFor="name" className="block text-sm font-medium text-gray-700">

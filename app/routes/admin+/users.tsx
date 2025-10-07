@@ -14,6 +14,7 @@ import {
     useActionData,
 } from 'react-router'
 import { z } from 'zod'
+import { CsrfInput } from '#app/components/csrf-input.tsx'
 import { Field, ErrorList, SelectField } from '#app/components/forms.tsx'
 import { InterexLayout } from '#app/components/interex-layout.tsx'
 import { Button } from '#app/components/ui/button.tsx'
@@ -130,6 +131,7 @@ function CreateUserForm({
 
     return (
         <Form method="post" {...getFormProps(form)}>
+            <CsrfInput />
             <input type="hidden" name="intent" value="create" />
             <div className="space-y-6">
                 <Field
@@ -337,6 +339,14 @@ export async function action({ request }: ActionFunctionArgs) {
     requireRoles(admin, [INTEREX_ROLES.SYSTEM_ADMIN])
 
     const formData = await request.formData()
+    // CSRF validation
+    try {
+        const { assertCsrf } = await import('#app/utils/csrf.server.ts')
+        await assertCsrf(request, formData)
+    } catch (e) {
+        if (e instanceof Response) throw e
+        throw e
+    }
     const submission = parseWithZod(formData, { schema: ActionSchema })
 
     if (submission.status !== 'success') {

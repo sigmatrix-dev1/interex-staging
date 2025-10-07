@@ -4,15 +4,17 @@ import { type SEOHandle } from '@nasa-gcn/remix-seo'
 import { Img } from 'openimg/react'
 import { data, Link, useFetcher, Form, redirect } from 'react-router'
 import { z } from 'zod'
+import { CsrfInput } from '#app/components/csrf-input.tsx'
 import { Field } from '#app/components/forms.tsx'
 import { Button } from '#app/components/ui/button.tsx'
 import { Icon } from '#app/components/ui/icon.tsx'
 import { StatusButton } from '#app/components/ui/status-button.tsx'
-import { requireUserId, sessionKey } from '#app/utils/auth.server.ts'
 import { audit } from '#app/services/audit.server.ts'
-import { extractRequestContext } from '#app/utils/request-context.server.ts'
+import { requireUserId, sessionKey } from '#app/utils/auth.server.ts'
+import { getOrCreateCsrfToken, assertCsrf } from '#app/utils/csrf.server.ts'
 import { prisma } from '#app/utils/db.server.ts'
 import { cn, getUserImgSrc, useDoubleCheck } from '#app/utils/misc.tsx'
+import { extractRequestContext } from '#app/utils/request-context.server.ts'
 import { authSessionStorage } from '#app/utils/session.server.ts'
 import { NameSchema, UsernameSchema } from '#app/utils/user-validation.ts'
 import { type Route } from './+types/profile.index.ts'
@@ -88,6 +90,7 @@ export async function loader({ request }: Route.LoaderArgs) {
         } catch {}
     }
 
+    const { token } = await getOrCreateCsrfToken(request)
     return {
         user,
         hasPassword: Boolean(password),
@@ -99,7 +102,9 @@ export async function loader({ request }: Route.LoaderArgs) {
             loginAt: metaBySession[s.id]?.loginAt ?? null,
         })),
         currentSessionId,
+        csrf: token,
     }
+    // Note: we intentionally do not set cookie here if unchanged; if new token generated, setCookie will be defined
 }
 
 type ProfileActionArgs = {
@@ -114,6 +119,7 @@ const revokeSessionIntent = 'revoke-session'
 export async function action({ request }: Route.ActionArgs) {
     const userId = await requireUserId(request)
     const formData = await request.formData()
+    await assertCsrf(request, formData)
     const intent = formData.get('intent')
     switch (intent) {
         case profileUpdateActionIntent: {
@@ -379,6 +385,7 @@ function SignOutOfSessions({
         <div className="p-3 rounded-lg border">
             {otherSessionsCount ? (
                 <fetcher.Form method="POST" className="flex items-center gap-3">
+                    <CsrfInput />
                     <Icon name="exit" className="size-5 text-red-600" />
                     <div className="flex-1">
                         <div className="font-medium">Sign Out Other Sessions</div>
@@ -516,12 +523,14 @@ function ActiveSessionsList({
                                     <div className="shrink-0">
                                         {isCurrent ? (
                                             <Form method="POST">
+                                                <CsrfInput />
                                                 <input type="hidden" name="intent" value={revokeSessionIntent} />
                                                 <input type="hidden" name="sessionId" value={s.id} />
                                                 <Button variant="outline" size="sm">Sign out</Button>
                                             </Form>
                                         ) : (
                                             <fetcher.Form method="POST">
+                                                <CsrfInput />
                                                 <input type="hidden" name="intent" value={revokeSessionIntent} />
                                                 <input type="hidden" name="sessionId" value={s.id} />
                                                 <StatusButton size="sm" variant="outline" status={fetcher.state !== 'idle' ? 'pending' : (fetcher.data?.status ?? 'idle')}>Sign out</StatusButton>

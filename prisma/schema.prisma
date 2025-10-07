@@ -32,6 +32,13 @@ model User {
   twoFactorSecret  String?
   twoFactorEnabled Boolean @default(false)
 
+  // Account lockout (Phase 1 additive security feature)
+  failedLoginCount Int      @default(0) // incremented on failed password attempts
+  lockedUntil      DateTime?           // if set in the future, login attempts are blocked
+
+  // MFA recovery codes (one-to-many)
+  recoveryCodes RecoveryCode[]
+
   // Existing relationships
   image       UserImage?
   password    Password?
@@ -39,7 +46,7 @@ model User {
   roles       Role[]
   sessions    Session[]
   connections Connection[]
-  passkey     Passkey[]
+  // Passkey support removed (Phase 1 cleanup)
 
   // Password history entries (for reuse prevention)
   passwordHistories PasswordHistory[]
@@ -65,6 +72,23 @@ model User {
   @@index([customerId])
   @@index([providerGroupId])
   @@index([deletedAt])
+  @@index([lockedUntil])
+}
+
+// Recovery codes for MFA (one-time use). Codes are only ever stored as bcrypt hashes.
+model RecoveryCode {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+  usedAt    DateTime?
+
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId String
+
+  // Bcrypt hash of the recovery code (plaintext shown only once at generation time)
+  codeHash String
+
+  @@index([userId])
+  @@index([userId, usedAt])
 }
 
 model Note {
@@ -200,22 +224,7 @@ model Connection {
   @@unique([providerName, providerId])
 }
 
-model Passkey {
-  id             String   @id
-  aaguid         String
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
-  publicKey      Bytes
-  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  userId         String
-  webauthnUserId String
-  counter        BigInt
-  deviceType     String
-  backedUp       Boolean
-  transports     String?
-
-  @@index([userId])
-}
+// model Passkey { /* removed */ }
 
 // =============================================
 // CMS Interex User Management Models

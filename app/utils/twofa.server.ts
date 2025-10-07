@@ -1,5 +1,6 @@
 import { generateTOTP, getTOTPAuthUri, verifyTOTP } from '@epic-web/totp'
 import QRCode from 'qrcode'
+import { encryptTotpSecret, decryptTotpSecret, isMfaEncryptionEnabled } from '#app/utils/mfa.server.ts'
 import { prisma } from './db.server.ts'
 
 export async function generateTwoFactorSecret(
@@ -29,7 +30,8 @@ export async function generateTwoFactorSecret(
 
 export async function verifyTwoFactorToken(secret: string, token: string): Promise<boolean> {
 	try {
-		const result = await verifyTOTP({ otp: token, secret, window: 1 })
+		const plain = isMfaEncryptionEnabled() ? decryptTotpSecret(secret) : secret
+		const result = await verifyTOTP({ otp: token, secret: plain, window: 1 })
 		return result !== null
 	} catch {
 		return false
@@ -40,10 +42,11 @@ export async function enableTwoFactorForUser(
 	userId: string,
 	secret: string,
 ): Promise<void> {
+	const stored = isMfaEncryptionEnabled() ? encryptTotpSecret(secret) : secret
 	await prisma.user.update({
 		where: { id: userId },
 		data: {
-			twoFactorSecret: secret,
+							twoFactorSecret: stored,
 			twoFactorEnabled: true,
 		},
 	})

@@ -51,6 +51,18 @@ export const AuditActionValues = [
     'SESSION_LOGOUT_OTHERS',
     'SESSION_REVOKE',
     'LOGOUT_OTHERS_ON_LOGIN',
+    // MFA lifecycle
+    'MFA_SETUP_START',
+    'MFA_ENABLE',
+    'MFA_VERIFY',
+    'MFA_VERIFY_FAILED',
+    'MFA_ENFORCE_BLOCK',
+    'MFA_RESET',
+    // Recovery codes lifecycle
+    'MFA_RECOVERY_ISSUE',        // codes generated (initial or regeneration)
+    'MFA_RECOVERY_USE',          // a single recovery code consumed successfully
+    'MFA_RECOVERY_USE_FAILED',   // invalid or already-used recovery code attempt
+    'MFA_RECOVERY_REGENERATE',   // old set invalidated & new set issued
     'USER_CREATE',
     'USER_CREATE_ATTEMPT',
     'USER_UPDATE',
@@ -140,6 +152,12 @@ export const AuditActionLabels: Record<AuditAction, string> = {
     SESSION_LOGOUT_OTHERS: 'Session: Sign Out Other Sessions',
     SESSION_REVOKE: 'Session: Revoke',
     LOGOUT_OTHERS_ON_LOGIN: 'Auth: Logout Others on Login',
+    MFA_SETUP_START: 'MFA: Setup Start',
+    MFA_ENABLE: 'MFA: Enable',
+    MFA_VERIFY: 'MFA: Verify',
+    MFA_VERIFY_FAILED: 'MFA: Verify Failed',
+    MFA_ENFORCE_BLOCK: 'MFA: Enforcement Redirect',
+    MFA_RESET: 'MFA: Reset',
     USER_CREATE: 'User: Create',
     USER_CREATE_ATTEMPT: 'User: Create (Attempt)',
     USER_UPDATE: 'User: Update',
@@ -164,6 +182,10 @@ export const AuditActionLabels: Record<AuditAction, string> = {
     PROVIDER_GROUP_DELETE_BLOCKED: 'Provider Group: Delete (Blocked)',
     PROVIDER_GROUP_NAME_CONFLICT: 'Provider Group: Name Conflict',
     PROVIDER_GROUP_NOT_FOUND: 'Provider Group: Not Found',
+    MFA_RECOVERY_ISSUE: 'MFA: Recovery Codes Issued',
+    MFA_RECOVERY_USE: 'MFA: Recovery Code Used',
+    MFA_RECOVERY_USE_FAILED: 'MFA: Recovery Code Failed',
+    MFA_RECOVERY_REGENERATE: 'MFA: Recovery Codes Regenerated',
 }
 
 export const AuditEntityLabels: Record<AuditEntity, string> = {

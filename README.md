@@ -37,7 +37,9 @@ npx epicli
 
 ### Project-specific docs
 
-- Complete Guide (single file, includes all docs inline): `docs/INTEREX_FULL_GUIDE.md`
+- System Specification (single source of truth): `docs/INTEREX_SYSTEM_SPEC.md`
+
+Legacy multi-file docs have been consolidated. See `docs/SECURITY_ENHANCEMENT_PHASES.md` for the phased security roadmap.
 
 ## Support
 
@@ -59,3 +61,12 @@ assets you can use in your material:
 ## Thanks
 
 You rock 🪨
+
+## Authentication
+
+The deployment has been simplified to support only username/password plus mandatory TOTP MFA. All OAuth provider code (GitHub strategy, connection management UI/routes, provider onboarding flows) and associated tests were removed to reduce complexity and attack surface. Passkeys (WebAuthn) are presently disabled and slated for future evaluation; related experimental code may still exist under `webauthn+` but is not active in the auth flow.
+
+Rationale:
+- Eliminate unused third‑party auth dependencies and configuration.
+- Reduce session complexity (no provider link/unlink edge cases).
+- Focus security hardening & test coverage on a single, mandatory MFA path.

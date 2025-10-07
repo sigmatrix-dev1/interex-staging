@@ -2,17 +2,15 @@ import { getFormProps, getInputProps, useForm } from '@conform-to/react'
 import { getZodConstraint, parseWithZod } from '@conform-to/zod'
 import { type SEOHandle } from '@nasa-gcn/remix-seo'
 import * as E from '@react-email/components'
-import { data, redirect, Form, useSearchParams } from 'react-router'
+import { data, redirect, Form } from 'react-router'
 import { HoneypotInputs } from 'remix-utils/honeypot/react'
 import { z } from 'zod'
+import { CsrfInput } from '#app/components/csrf-input.tsx'
 import { GeneralErrorBoundary } from '#app/components/error-boundary.tsx'
 import { ErrorList, Field } from '#app/components/forms.tsx'
 import { StatusButton } from '#app/components/ui/status-button.tsx'
 import { requireAnonymous } from '#app/utils/auth.server.ts'
-import {
-	ProviderConnectionForm,
-	providerNames,
-} from '#app/utils/connections.tsx'
+import { getOrCreateCsrfToken, assertCsrf } from '#app/utils/csrf.server.ts'
 import { prisma } from '#app/utils/db.server.ts'
 import { sendEmail } from '#app/utils/email.server.ts'
 import { checkHoneypot } from '#app/utils/honeypot.server.ts'
@@ -31,11 +29,13 @@ const SignupSchema = z.object({
 
 export async function loader({ request }: Route.LoaderArgs) {
 	await requireAnonymous(request)
-	return null
+	const { token, setCookie } = await getOrCreateCsrfToken(request)
+	return data({ csrf: token }, setCookie ? { headers: { 'set-cookie': setCookie } } : undefined)
 }
 
 export async function action({ request }: Route.ActionArgs) {
 	const formData = await request.formData()
+	await assertCsrf(request, formData)
 
 	await checkHoneypot(formData)
 
@@ -123,8 +123,7 @@ export const meta: Route.MetaFunction = () => {
 
 export default function SignupRoute({ actionData }: Route.ComponentProps) {
 	const isPending = useIsPending()
-	const [searchParams] = useSearchParams()
-	const redirectTo = searchParams.get('redirectTo')
+	// Redirect target param retained for future use (currently unused after OAuth removal)
 
 	const [form, fields] = useForm({
 		id: 'signup-form',
@@ -137,6 +136,7 @@ export default function SignupRoute({ actionData }: Route.ComponentProps) {
 		shouldRevalidate: 'onBlur',
 	})
 
+	// CSRF handled by <CsrfInput />
 	return (
 		<div className="container flex flex-col justify-center pt-20 pb-32">
 			<div className="text-center">
@@ -147,6 +147,7 @@ export default function SignupRoute({ actionData }: Route.ComponentProps) {
 			</div>
 			<div className="mx-auto mt-16 max-w-sm min-w-full sm:min-w-[368px]">
 				<Form method="POST" {...getFormProps(form)}>
+					<CsrfInput />
 					<HoneypotInputs />
 					<Field
 						labelProps={{
@@ -170,20 +171,7 @@ export default function SignupRoute({ actionData }: Route.ComponentProps) {
 						Submit
 					</StatusButton>
 				</Form>
-				<ul className="flex flex-col gap-4 py-4">
-					{providerNames.map((providerName) => (
-						<>
-							<hr />
-							<li key={providerName}>
-								<ProviderConnectionForm
-									type="Signup"
-									providerName={providerName}
-									redirectTo={redirectTo}
-								/>
-							</li>
-						</>
-					))}
-				</ul>
+				{/* OAuth signup options removed – password + mandatory MFA only */}
 			</div>
 		</div>
 	)

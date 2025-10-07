@@ -26,6 +26,7 @@ import { listUserNotifications, serializeForClient } from './services/notificati
 import tailwindStyleSheetUrl from './styles/tailwind.css?url'
 import { getUserId, logout } from './utils/auth.server.ts'
 import { ClientHintCheck, getHints } from './utils/client-hints.tsx'
+import { getOrCreateCsrfToken } from './utils/csrf.server.ts'
 import { prisma } from './utils/db.server.ts'
 import { getEnv } from './utils/env.server.ts'
 import { pipeHeaders } from './utils/headers.server.ts'
@@ -118,9 +119,13 @@ export async function loader({ request }: Route.LoaderArgs) {
 	}
 	const honeyProps = await honeypot.getInputProps()
 
+	// Global CSRF token (session-scoped). Reuse existing if present; commit cookie only if new.
+	const { token: csrf, setCookie: csrfSetCookie } = await getOrCreateCsrfToken(request)
+
 	return data(
 		{
 			user,
+			csrf,
 			privilegedTwoFaWarning: (() => {
 				if (!user) return null
 				const roleNames = user.roles.map(r => r.name)
@@ -152,6 +157,7 @@ export async function loader({ request }: Route.LoaderArgs) {
 			headers: combineHeaders(
 				{ 'Server-Timing': timings.toString() },
 				toastHeaders,
+				csrfSetCookie ? { 'set-cookie': csrfSetCookie } : undefined,
 			),
 		},
 	)
@@ -182,9 +188,21 @@ function Document({
 					<meta name="robots" content="noindex, nofollow" />
 				)}
 				<Links />
+				{/* Early inline script to auto-inject CSRF hidden input into any POST form that lacks one (defense-in-depth). */}
+				<script
+					nonce={nonce}
+					dangerouslySetInnerHTML={{
+						__html: `document.addEventListener('DOMContentLoaded',function(){try{var t=window.__ROOT_DATA__&&window.__ROOT_DATA__.csrf;if(!t)return;var forms=document.querySelectorAll('form[method=post],form[method=POST]');for(var i=0;i<forms.length;i++){var f=forms[i];if(!f.querySelector('input[name=csrf],input[name=_csrf]')){var inp=document.createElement('input');inp.type='hidden';inp.name='csrf';inp.value=t;f.appendChild(inp);}}}catch(e){}});`,
+					}}
+				/>
 			</head>
 			<body className="bg-background text-foreground">
 				{children}
+				{/* Expose root data (including csrf) prior to other scripts */}
+				<script
+					nonce={nonce}
+					dangerouslySetInnerHTML={{ __html: `window.__ROOT_DATA__=${JSON.stringify({})}` }}
+				/>
 				<script
 					nonce={nonce}
 					dangerouslySetInnerHTML={{
@@ -212,42 +230,31 @@ export function Layout({ children }: { children: React.ReactNode }) {
 
 function App() {
 	const data = useLoaderData<typeof loader>()
-	useOptionalUser() // invoked for potential downstream usage; result unused so no binding
+	useOptionalUser()
 	const matches = useMatches()
 	const isOnSearchPage = matches.find((m) => m.id === 'routes/users+/index')
 	const searchBar = isOnSearchPage ? null : <SearchBar status="idle" />
-
-	// Show system-admin 2FA warning banner only if present
 	const privilegedWarning = data.privilegedTwoFaWarning
 	useToast(data.toast)
-
-	// Check if we're on an app page that uses InterexLayout (has its own header)
 	const currentPath = matches[matches.length - 1]?.pathname || ''
-	const isAppPage = currentPath.startsWith('/customer') || 
-	                  currentPath.startsWith('/admin') || 
-	                  currentPath.startsWith('/provider') || 
-	                  currentPath.startsWith('/submissions') ||
-	                  currentPath.startsWith('/settings') ||
-	                  currentPath === '/dashboard'
+	const isAppPage = currentPath.startsWith('/customer') ||
+		currentPath.startsWith('/admin') ||
+		currentPath.startsWith('/provider') ||
+		currentPath.startsWith('/submissions') ||
+		currentPath.startsWith('/settings') ||
+		currentPath === '/dashboard'
 
 	return (
-		<OpenImgContextProvider
-			optimizerEndpoint="/resources/images"
-			getSrc={getImgSrc}
-		>
+		<OpenImgContextProvider optimizerEndpoint="/resources/images" getSrc={getImgSrc}>
 			<div className="flex min-h-screen flex-col justify-between">
-				{/* Only show root header on marketing/public pages */}
 				{!isAppPage && (
 					<header className="container py-6">
 						<nav className="flex flex-wrap items-center justify-between gap-4 sm:flex-nowrap md:gap-8">
 							<Logo />
-
-
 							<div className="block w-full sm:hidden">{searchBar}</div>
 						</nav>
 					</header>
 				)}
-
 				<div className="flex flex-1 flex-col">
 					{privilegedWarning && (
 						<div className="bg-amber-50 border-b border-amber-300 p-3 text-sm text-amber-900 flex items-start gap-3">
@@ -258,8 +265,6 @@ function App() {
 					)}
 					<Outlet />
 				</div>
-
-
 			</div>
 			<EpicProgress />
 		</OpenImgContextProvider>

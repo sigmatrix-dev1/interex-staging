@@ -13,17 +13,10 @@ export const BASE_DATABASE_PATH = path.join(
 export async function setup() {
 	const databaseExists = await fsExtra.pathExists(BASE_DATABASE_PATH)
 
-	if (databaseExists) {
-		const databaseLastModifiedAt = (await fsExtra.stat(BASE_DATABASE_PATH))
-			.mtime
-		const prismaSchemaLastModifiedAt = (
-			await fsExtra.stat('./prisma/schema.prisma')
-		).mtime
-
-		if (prismaSchemaLastModifiedAt < databaseLastModifiedAt) {
-			return
-		}
-	}
+  // Always rebuild base.db to ensure latest migrations & triggers (fast for SQLite, avoids drift)
+  if (databaseExists) {
+    await fsExtra.remove(BASE_DATABASE_PATH)
+  }
 
 	await execaCommand(
 		'npx prisma migrate reset --force --skip-seed --skip-generate',

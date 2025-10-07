@@ -4,6 +4,7 @@ import { getFormProps, getInputProps, useForm } from '@conform-to/react'
 import { getZodConstraint, parseWithZod } from '@conform-to/zod'
 import { type SEOHandle } from '@nasa-gcn/remix-seo'
 import { data, redirect, Form } from 'react-router'
+import { CsrfInput } from '#app/components/csrf-input.tsx'
 import { GeneralErrorBoundary } from '#app/components/error-boundary.tsx'
 import { ErrorList, Field } from '#app/components/forms.tsx'
 import { StatusButton } from '#app/components/ui/status-button.tsx'
@@ -15,6 +16,7 @@ import {
 	captureCurrentPasswordToHistory,
 	getPasswordHash,
 } from '#app/utils/auth.server.ts'
+import { assertCsrf } from '#app/utils/csrf.server.ts'
 import { prisma } from '#app/utils/db.server.ts'
 import { useIsPending } from '#app/utils/misc.tsx'
 import { validatePasswordComplexity } from '#app/utils/password-policy.server.ts'
@@ -54,6 +56,7 @@ export async function action({ request }: Route.ActionArgs) {
 	const resetPasswordUsername = await requireResetPasswordUsername(request)
 	const ctx = await extractRequestContext(request, { requireUser: false })
 	const formData = await request.formData()
+	await assertCsrf(request, formData)
 	const submission = await parseWithZod(formData, {
 		schema: ResetPasswordSchema.superRefine(async ({ password }, ctx) => {
 			// Enforce new complexity
@@ -176,6 +179,7 @@ export default function ResetPasswordPage({
 			</div>
 			<div className="mx-auto mt-16 max-w-sm min-w-full sm:min-w-[368px]">
 				<Form method="POST" {...getFormProps(form)}>
+					<CsrfInput />
 					<Field
 						labelProps={{
 							htmlFor: fields.password.id,

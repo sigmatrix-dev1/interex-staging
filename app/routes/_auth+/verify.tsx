@@ -4,10 +4,12 @@ import { type SEOHandle } from '@nasa-gcn/remix-seo'
 import { Form, useSearchParams } from 'react-router'
 import { HoneypotInputs } from 'remix-utils/honeypot/react'
 import { z } from 'zod'
+import { CsrfInput } from '#app/components/csrf-input.tsx'
 import { GeneralErrorBoundary } from '#app/components/error-boundary.tsx'
 import { ErrorList, OTPField } from '#app/components/forms.tsx'
 import { Spacer } from '#app/components/spacer.tsx'
 import { StatusButton } from '#app/components/ui/status-button.tsx'
+import { assertCsrf } from '#app/utils/csrf.server.ts'
 import { checkHoneypot } from '#app/utils/honeypot.server.ts'
 import { useIsPending } from '#app/utils/misc.tsx'
 import { type Route } from './+types/verify.ts'
@@ -32,8 +34,10 @@ export const VerifySchema = z.object({
 	[redirectToQueryParam]: z.string().optional(),
 })
 
+
 export async function action({ request }: Route.ActionArgs) {
 	const formData = await request.formData()
+	await assertCsrf(request, formData)
 	await checkHoneypot(formData)
 	return validateRequest(request, formData)
 }
@@ -90,7 +94,8 @@ export default function VerifyRoute({ actionData }: Route.ComponentProps) {
 					<ErrorList errors={form.errors} id={form.errorId} />
 				</div>
 				<div className="flex w-full gap-2">
-					<Form method="POST" {...getFormProps(form)} className="flex-1">
+						<Form method="POST" {...getFormProps(form)} className="flex-1">
+							<CsrfInput />
 						<HoneypotInputs />
 						<div className="flex items-center justify-center">
 							<OTPField

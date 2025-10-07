@@ -7,9 +7,11 @@ import * as E from '@react-email/components'
 import { data, redirect, Link, useFetcher } from 'react-router'
 import { HoneypotInputs } from 'remix-utils/honeypot/react'
 import { z } from 'zod'
+import { CsrfInput } from '#app/components/csrf-input.tsx'
 import { GeneralErrorBoundary } from '#app/components/error-boundary.tsx'
 import { ErrorList, Field } from '#app/components/forms.tsx'
 import { StatusButton } from '#app/components/ui/status-button.tsx'
+import { assertCsrf } from '#app/utils/csrf.server.ts'
 import { prisma } from '#app/utils/db.server.ts'
 import { sendEmail } from '#app/utils/email.server.ts'
 import { checkHoneypot } from '#app/utils/honeypot.server.ts'
@@ -27,6 +29,7 @@ const ForgotPasswordSchema = z.object({
 
 export async function action({ request }: Route.ActionArgs) {
 	const formData = await request.formData()
+	await assertCsrf(request, formData)
 	await checkHoneypot(formData)
 	const submission = await parseWithZod(formData, {
 		schema: ForgotPasswordSchema.superRefine(async (data, ctx) => {
@@ -142,7 +145,8 @@ export default function ForgotPasswordRoute() {
 					</p>
 				</div>
 				<div className="mx-auto mt-16 max-w-sm min-w-full sm:min-w-[368px]">
-					<forgotPassword.Form method="POST" {...getFormProps(form)}>
+						<forgotPassword.Form method="POST" {...getFormProps(form)}>
+							<CsrfInput />
 						<HoneypotInputs />
 						<div>
 							<Field

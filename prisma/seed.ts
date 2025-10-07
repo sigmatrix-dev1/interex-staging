@@ -1,9 +1,8 @@
 import { faker } from '@faker-js/faker'
 import { prisma } from '#app/utils/db.server.ts'
 import { createPassword } from '#app/utils/password'
-import { MOCK_CODE_GITHUB } from '#app/utils/providers/constants'
 import { createUser, getNoteImages, getUserImages } from '#tests/db-utils'
-import { insertGitHubUser } from '#tests/mocks/github'
+// Provider/OAuth artifacts fully purged (Phase 1 cleanup)
 
 async function seed() {
 	console.log('🌱 Seeding...')
@@ -102,8 +101,6 @@ async function seed() {
 		},
 	}
 
-	const githubUser = await insertGitHubUser(MOCK_CODE_GITHUB)
-
 	const kody = await prisma.user.create({
 		select: { id: true },
 		data: {
@@ -111,12 +108,7 @@ async function seed() {
 			username: 'kody',
 			name: 'Kody',
 			password: { create: createPassword('kodylovesyou') },
-			connections: {
-				create: {
-					providerName: 'github',
-					providerId: String(githubUser.profile.id),
-				},
-			},
+			// OAuth connections removed
 			roles: { connect: [{ name: 'admin' }, { name: 'user' }] },
 		},
 	})

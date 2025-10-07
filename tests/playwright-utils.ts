@@ -1,20 +1,10 @@
 import { test as base } from '@playwright/test'
 import * as setCookieParser from 'set-cookie-parser'
-import {
-	getPasswordHash,
-	getSessionExpirationDate,
-	sessionKey,
-} from '#app/utils/auth.server.ts'
+import { getPasswordHash, getSessionExpirationDate, sessionKey } from '#app/utils/auth.server.ts'
 import { prisma } from '#app/utils/db.server.ts'
-import { MOCK_CODE_GITHUB_HEADER } from '#app/utils/providers/constants.js'
-import { normalizeEmail } from '#app/utils/providers/provider.js'
 import { authSessionStorage } from '#app/utils/session.server.ts'
 import { createUser } from './db-utils.ts'
-import {
-	type GitHubUser,
-	deleteGitHubUser,
-	insertGitHubUser,
-} from './mocks/github.ts'
+// Provider/OAuth mocks removed – cleaned up.
 
 export * from './db-utils.ts'
 
@@ -68,7 +58,7 @@ async function getOrInsertUser({
 export const test = base.extend<{
 	insertNewUser(options?: GetOrInsertUserOptions): Promise<User>
 	login(options?: GetOrInsertUserOptions): Promise<User>
-	prepareGitHubUser(): Promise<GitHubUser>
+// Removed prepareGitHubUser – OAuth flows deprecated
 }>({
 	insertNewUser: async ({}, use) => {
 		let userId: string | undefined = undefined
@@ -107,32 +97,6 @@ export const test = base.extend<{
 			return user
 		})
 		await prisma.user.deleteMany({ where: { id: userId } })
-	},
-	prepareGitHubUser: async ({ page }, use, testInfo) => {
-		await page.route(/\/auth\/github(?!\/callback)/, async (route, request) => {
-			const headers = {
-				...request.headers(),
-				[MOCK_CODE_GITHUB_HEADER]: testInfo.testId,
-			}
-			await route.continue({ headers })
-		})
-
-		let ghUser: GitHubUser | null = null
-		await use(async () => {
-			const newGitHubUser = await insertGitHubUser(testInfo.testId)!
-			ghUser = newGitHubUser
-			return newGitHubUser
-		})
-
-		const user = await prisma.user.findUnique({
-			select: { id: true, name: true },
-			where: { email: normalizeEmail(ghUser!.primaryEmail) },
-		})
-		if (user) {
-			await prisma.user.delete({ where: { id: user.id } })
-			await prisma.session.deleteMany({ where: { userId: user.id } })
-		}
-		await deleteGitHubUser(ghUser!.primaryEmail)
 	},
 })
 export const { expect } = test

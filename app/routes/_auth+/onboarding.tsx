@@ -4,6 +4,7 @@ import { data, redirect, Form, useSearchParams } from 'react-router'
 import { HoneypotInputs } from 'remix-utils/honeypot/react'
 import { safeRedirect } from 'remix-utils/safe-redirect'
 import { z } from 'zod'
+import { CsrfInput } from '#app/components/csrf-input.tsx'
 import { CheckboxField, ErrorList, Field } from '#app/components/forms.tsx'
 import { Spacer } from '#app/components/spacer.tsx'
 import { StatusButton } from '#app/components/ui/status-button.tsx'
@@ -13,6 +14,7 @@ import {
 	sessionKey,
 	signup,
 } from '#app/utils/auth.server.ts'
+import { assertCsrf } from '#app/utils/csrf.server.ts'
 import { prisma } from '#app/utils/db.server.ts'
 import { checkHoneypot } from '#app/utils/honeypot.server.ts'
 import { useIsPending } from '#app/utils/misc.tsx'
@@ -61,6 +63,7 @@ export async function loader({ request }: Route.LoaderArgs) {
 export async function action({ request }: Route.ActionArgs) {
 	const email = await requireOnboardingEmail(request)
 	const formData = await request.formData()
+	await assertCsrf(request, formData)
 	await checkHoneypot(formData)
 	const submission = await parseWithZod(formData, {
 		schema: (intent) =>
@@ -165,6 +168,7 @@ export default function OnboardingRoute({
 					className="mx-auto max-w-sm min-w-full sm:min-w-[368px]"
 					{...getFormProps(form)}
 				>
+					<CsrfInput />
 					<HoneypotInputs />
 					<Field
 						labelProps={{ htmlFor: fields.username.id, children: 'Username' }}

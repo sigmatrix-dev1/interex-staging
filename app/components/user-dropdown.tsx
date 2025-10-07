@@ -48,6 +48,15 @@ export function UserDropdown() {
 							</Icon>
 						</Link>
 					</DropdownMenuItem>
+					{(user.roles?.some?.((r: any) => r.name === 'system-admin' || r.name === 'customer-admin')) && (
+						<DropdownMenuItem asChild>
+							<Link prefetch="intent" to="/me/2fa/recovery">
+								<Icon className="text-body-md" name="key">
+									Recovery Codes
+								</Icon>
+							</Link>
+						</DropdownMenuItem>
+					)}
 					<Form action="/logout" method="POST" ref={formRef}>
 						<DropdownMenuItem asChild>
 							<button type="submit" className="w-full">

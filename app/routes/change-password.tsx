@@ -6,12 +6,14 @@ import { getZodConstraint, parseWithZod } from '@conform-to/zod'
 import { type SEOHandle } from '@nasa-gcn/remix-seo'
 import React from 'react'
 import { data, Form, redirect } from 'react-router'
+import { CsrfInput } from '#app/components/csrf-input.tsx'
 import { GeneralErrorBoundary } from '#app/components/error-boundary.tsx'
 import { ErrorList, Field } from '#app/components/forms.tsx'
 import { Icon } from '#app/components/ui/icon.tsx'
 import { StatusButton } from '#app/components/ui/status-button.tsx'
 import { audit } from '#app/services/audit.server.ts'
 import { getUserId, checkIsCommonPassword, getPasswordHash, isPasswordReused, captureCurrentPasswordToHistory } from '#app/utils/auth.server.ts'
+import { getOrCreateCsrfToken, assertCsrf } from '#app/utils/csrf.server.ts'
 import { prisma } from '#app/utils/db.server.ts'
 import { useIsPending } from '#app/utils/misc.tsx'
 import { validatePasswordComplexity } from '#app/utils/password-policy.server.ts'
@@ -29,7 +31,8 @@ export async function loader({ request }: { request: Request }) {
   const user = await (prisma as any).user.findUnique({ where: { id: userId }, select: { mustChangePassword: true, username: true } })
   if (!user) throw redirect('/login')
   if (!user.mustChangePassword) return redirect('/')
-  return { username: user.username }
+  const { token, setCookie } = await getOrCreateCsrfToken(request)
+  return data({ username: user.username, csrf: token }, setCookie ? { headers: { 'set-cookie': setCookie } } : undefined)
 }
 
 export async function action({ request }: { request: Request }) {
@@ -39,6 +42,7 @@ export async function action({ request }: { request: Request }) {
   if (!user) throw redirect('/login')
   const ctx = await extractRequestContext(request, { requireUser: true })
   const formData = await request.formData()
+  await assertCsrf(request, formData)
   const submission = await parseWithZod(formData, {
     schema: ForcedChangeSchema.superRefine(async ({ password }, ctx) => {
       const { ok, errors } = validatePasswordComplexity(password)
@@ -132,6 +136,8 @@ export default function ForcedChangePasswordPage({ actionData }: any) {
       </div>
       <div className="mx-auto mt-12 max-w-sm min-w-full sm:min-w-[368px]">
         <Form method="POST" {...getFormProps(form)}>
+          {/* Reliable CSRF token via loader/root */}
+          <CsrfInput />
           <div className="space-y-2">
             <label className="text-sm font-medium text-gray-700" htmlFor={fields.password.id}>New Password</label>
             <div className="relative">

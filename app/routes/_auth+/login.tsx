@@ -8,12 +8,14 @@ import { useState } from 'react'
 import { data, Form, Link, useSearchParams } from 'react-router'
 import { HoneypotInputs } from 'remix-utils/honeypot/react'
 import { z } from 'zod'
+import { CsrfInput } from '#app/components/csrf-input.tsx'
 import { GeneralErrorBoundary } from '#app/components/error-boundary.tsx'
 import { CheckboxField, ErrorList, Field } from '#app/components/forms.tsx'
 import { Spacer } from '#app/components/spacer.tsx'
 import { StatusButton } from '#app/components/ui/status-button.tsx'
 import { audit } from '#app/services/audit.server.ts'
 import { login, requireAnonymous, verifyUserPassword } from '#app/utils/auth.server.ts'
+import { getOrCreateCsrfToken, assertCsrf } from '#app/utils/csrf.server.ts'
 import { prisma } from '#app/utils/db.server.ts'
 import { checkHoneypot } from '#app/utils/honeypot.server.ts'
 import { useIsPending } from '#app/utils/misc.tsx'
@@ -39,12 +41,14 @@ const LoginFormSchema = z.object({
 
 export async function loader({ request }: { request: Request }) {
 	await requireAnonymous(request)
-	return {}
+	const { token, setCookie } = await getOrCreateCsrfToken(request)
+	return data({ csrf: token }, setCookie ? { headers: { 'set-cookie': setCookie } } : undefined)
 }
 
 export async function action({ request }: { request: Request }) {
 	await requireAnonymous(request)
 	const formData = await request.formData()
+	await assertCsrf(request, formData)
 	await checkHoneypot(formData)
 	const submission = await parseWithZod(formData, {
 		schema: LoginFormSchema,
@@ -126,29 +130,7 @@ export async function action({ request }: { request: Request }) {
 		)
 	}
 
-	// Warn privileged users without 2FA (Phase 0 warn gate)
-	try {
-		if (session) {
-			const user = await prisma.user.findUnique({ where: { id: session.userId }, select: { twoFactorEnabled: true, roles: { select: { name: true } } } })
-			const warnEnabled = process.env.PRIVILEGED_2FA_WARN !== 'false'
-			if (warnEnabled && user && !user.twoFactorEnabled) {
-				const isPriv = user.roles.some(r => ['system-admin','customer-admin'].includes(r.name))
-				if (isPriv) {
-					await audit.security({
-						action: 'ADMIN_MFA_NOT_ENABLED_WARNING',
-						actorType: 'USER',
-						actorId: session.userId,
-						actorIp: ctx.ip ?? null,
-						actorUserAgent: ctx.userAgent ?? null,
-						status: 'INFO',
-						summary: 'Privileged user logged in without 2FA enabled',
-						metadata: { roles: user.roles.map(r=>r.name) },
-						chainKey: 'global',
-					})
-				}
-			}
-		}
-	} catch {}
+	// Removed privileged warning: MFA mandatory for all users including system-admin.
 
 	// Hand off to the shared session flow which:
 	// - If 2FA is enabled, sets a verify session and redirects to /verify
@@ -166,6 +148,7 @@ export default function LoginPage({ actionData }: { actionData: any }) {
 	const isPending = useIsPending()
 	const [searchParams] = useSearchParams()
 	const redirectTo = searchParams.get('redirectTo')
+	// CSRF token now provided globally via CsrfInput component
 
 	const [form, fields] = useForm({
 		id: 'login-form',
@@ -207,6 +190,7 @@ export default function LoginPage({ actionData }: { actionData: any }) {
             )}
 
 						<Form method="POST" {...getFormProps(form)}>
+							<CsrfInput />
 							<input type="hidden" name="intent" value="submit" />
 							<HoneypotInputs />
 							<Field

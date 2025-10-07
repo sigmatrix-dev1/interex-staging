@@ -3,6 +3,7 @@ import { getZodConstraint, parseWithZod } from '@conform-to/zod'
 import { type SEOHandle } from '@nasa-gcn/remix-seo'
 import { data, redirect, Form, Link } from 'react-router'
 import { z } from 'zod'
+import { CsrfInput } from '#app/components/csrf-input.tsx'
 import { ErrorList, Field } from '#app/components/forms.tsx'
 import { Button } from '#app/components/ui/button.tsx'
 import { Icon } from '#app/components/ui/icon.tsx'
@@ -13,6 +14,7 @@ import {
 	requireUserId,
 	verifyUserPassword,
 } from '#app/utils/auth.server.ts'
+import { getOrCreateCsrfToken, assertCsrf } from '#app/utils/csrf.server.ts'
 import { prisma } from '#app/utils/db.server.ts'
 import { useIsPending } from '#app/utils/misc.tsx'
 import { redirectWithToast } from '#app/utils/toast.server.ts'
@@ -54,13 +56,15 @@ async function requirePassword(userId: string) {
 export async function loader({ request }: Route.LoaderArgs) {
 	const userId = await requireUserId(request)
 	await requirePassword(userId)
-	return {}
+	const { token, setCookie } = await getOrCreateCsrfToken(request)
+	return data({ csrf: token }, setCookie ? { headers: { 'set-cookie': setCookie } } : undefined)
 }
 
 export async function action({ request }: Route.ActionArgs) {
 	const userId = await requireUserId(request)
 	await requirePassword(userId)
 	const formData = await request.formData()
+	await assertCsrf(request, formData)
 	const submission = await parseWithZod(formData, {
 		async: true,
 		schema: ChangePasswordForm.superRefine(
@@ -122,9 +126,7 @@ export async function action({ request }: Route.ActionArgs) {
 	)
 }
 
-export default function ChangePasswordRoute({
-	actionData,
-}: Route.ComponentProps) {
+export default function ChangePasswordRoute({ actionData }: Route.ComponentProps) {
 	const isPending = useIsPending()
 
 	const [form, fields] = useForm({
@@ -139,6 +141,7 @@ export default function ChangePasswordRoute({
 
 	return (
 		<Form method="POST" {...getFormProps(form)} className="mx-auto max-w-md">
+			<CsrfInput />
 			<Field
 				labelProps={{ children: 'Current Password' }}
 				inputProps={{

@@ -16,6 +16,7 @@ import { handleNewSession } from './login.server.ts'
 const TwoFALoginSchema = z.object({
 	code: z.string().min(6, 'Verification code must be 6 digits').max(6),
 	redirectTo: z.string().optional(),
+	recovery: z.string().optional(), // optional recovery code path
 })
 
 export async function loader({ request }: { request: Request }) {
@@ -42,7 +43,7 @@ export async function action({ request }: { request: Request }) {
 	const reqCtx = await extractRequestContext(request, { requireUser: false })
 	const formData = await request.formData()
 	
-	const submission = await parseWithZod(formData, {
+		const submission = await parseWithZod(formData, {
 		schema: TwoFALoginSchema.transform(async (data, ctx) => {
 			// Get user and verify 2FA is enabled
 			const verifySession = await verifySessionStorage.getSession(request.headers.get('cookie'))
@@ -64,8 +65,18 @@ export async function action({ request }: { request: Request }) {
 				ctx.addIssue({ code: z.ZodIssueCode.custom, message: '2FA not configured' })
 				return z.NEVER
 			}
-			// Verify the 2FA code
-			const isValid = await verifyTwoFactorToken(user.twoFactorSecret, data.code)
+			// Verify the 2FA code; allow recovery code fallback if provided
+			let isValid = await verifyTwoFactorToken(user.twoFactorSecret, data.code)
+			if (!isValid && data.recovery) {
+				// Lazy import to avoid circulars
+				const { consumeRecoveryCode } = await import('#app/utils/mfa.server.ts')
+				const attempt = await consumeRecoveryCode(sess.userId, data.recovery.toUpperCase(), { actorIp: reqCtx.ip, actorUserAgent: reqCtx.userAgent })
+				if (attempt.ok) {
+					isValid = true
+				} else {
+					// recovery attempt failed; fall through to generic invalid message
+				}
+			}
 			if (!isValid) {
 				// Attempt to resolve userId for audit
 				try {
@@ -181,6 +192,16 @@ export default function TwoFALoginPage({ loaderData, actionData }: { loaderData:
 								}}
 								errors={fields.code.errors}
 							/>
+
+							<div className="text-xs text-gray-500 mt-2 space-y-1">
+								<p>If you lost access to your authenticator, you can enter a recovery code instead.</p>
+								<input
+									{...getInputProps(fields.recovery, { type: 'text' })}
+									placeholder="Recovery code (optional)"
+									className="w-full rounded border px-2 py-1 font-mono tracking-wide uppercase"
+									style={{ letterSpacing: '0.08em' }}
+								/>
+							</div>
 
 							<ErrorList errors={form.errors} id={form.errorId} />
 
